@@ -1,6 +1,6 @@
 # AuthFI Node.js SDK
 
-Official Node.js SDK for [AuthFI](https://authfi.app) — the identity control plane.
+Official Node.js SDK for [AuthFI](https://authfi.io) — the identity control plane.
 
 ## Install
 

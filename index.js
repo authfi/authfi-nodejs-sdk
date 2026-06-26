@@ -7,7 +7,7 @@
  *   const auth = authfi({
  *     tenant: 'acme',
  *     apiKey: 'sk_live_...',
- *     apiUrl: 'https://api.authfi.app',
+ *     apiUrl: 'https://api.authfi.io',
  *     applicationId: 'client-id-of-your-app',   // optional: scope permissions to this app
  *     autoSync: true,                            // auto-register permissions on startup
  *   });
@@ -33,7 +33,7 @@ module.exports = function authfi(config) {
   const {
     tenant,
     apiKey,
-    apiUrl = 'https://api.authfi.app',
+    apiUrl = 'https://api.authfi.io',
     applicationId,
     clientSecret,       // required for cloud identity
     autoSync = true,

@@ -70,7 +70,7 @@ describe('verifyToken()', () => {
         org_slug: 'acme-corp',
         exp: Math.floor(Date.now() / 1000) + 3600,
         iat: Math.floor(Date.now() / 1000),
-        iss: 'https://acme.authfi.app',
+        iss: 'https://acme.authfi.io',
       });
 
       const claims = await auth.verifyToken(token);
