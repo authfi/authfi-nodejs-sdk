@@ -40,8 +40,17 @@ module.exports = function authfi(config) {
     jwksRefreshInterval = 300000, // 5 min
   } = config;
 
-  const managePath = `${apiUrl}/manage/v1/${tenant}`;
-  const authPath = `${apiUrl}/v1/${tenant}`;
+  // The edge dispatch is api.authfi.io/<slug>/<path> — the SLUG COMES FIRST. Every path here had
+  // the slug and the version transposed, so every URL 404'd against a real deployment, the JWKS
+  // fetch among them.
+  //
+  // Two shapes, deliberately named apart: root-level protocol paths (JWKS, OIDC discovery,
+  // /oauth/*) hang off tenantBase; API routes add /v1. Conflating them is how a straight
+  // transposition still leaves JWKS broken.
+  const tenantBase = `${apiUrl}/${tenant}`;
+  // No /manage/ prefix exists on the platform; those routes are /v1/* like the rest.
+  const managePath = `${tenantBase}/v1`;
+  const authPath = `${tenantBase}/v1`;
   const registeredPermissions = new Set();
   let jwksCache = null;
   let jwksCacheTime = 0;
@@ -52,7 +61,7 @@ module.exports = function authfi(config) {
     const now = Date.now();
     if (jwksCache && now - jwksCacheTime < jwksRefreshInterval) return jwksCache;
 
-    const res = await fetch(`${authPath}/.well-known/jwks.json`);
+    const res = await fetch(`${tenantBase}/.well-known/jwks.json`);
     if (!res.ok) throw new Error('Failed to fetch JWKS');
     jwksCache = await res.json();
     jwksCacheTime = now;
@@ -248,7 +257,7 @@ module.exports = function authfi(config) {
       if (!applicationId || !clientSecret) {
         throw new Error('applicationId and clientSecret required for cloud credentials');
       }
-      const res = await fetch(`${authPath}/cloud/credentials`, {
+      const res = await fetch(`${authPath}/credentials`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -279,7 +288,7 @@ module.exports = function authfi(config) {
       if (!applicationId || !clientSecret) {
         throw new Error('applicationId and clientSecret required for cloud token');
       }
-      const res = await fetch(`${authPath}/cloud/token`, {
+      const res = await fetch(`${authPath}/credentials/token`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
