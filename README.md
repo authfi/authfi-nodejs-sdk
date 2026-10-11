@@ -5,13 +5,13 @@ Official Node.js SDK for [AuthFI](https://authfi.io) — the identity control pl
 ## Install
 
 ```bash
-npm install @queflyhq/authfi
+npm install @authfi/sdk
 ```
 
 ## Quick Start (Express)
 
 ```js
-const authfi = require('@queflyhq/authfi');
+const authfi = require('@authfi/sdk');
 
 const auth = authfi({
   tenant: 'acme',

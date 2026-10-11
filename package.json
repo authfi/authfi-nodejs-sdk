@@ -1,5 +1,5 @@
 {
-  "name": "@queflyhq/authfi",
+  "name": "@authfi/sdk",
   "version": "0.1.0",
   "description": "AuthFI Node.js SDK — JWT validation, RBAC middleware, permission auto-sync, cloud credentials",
   "main": "index.js",
@@ -7,7 +7,7 @@
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/queflyhq/authfi-nodejs-sdk"
+    "url": "https://github.com/authfi/authfi-nodejs-sdk"
   },
   "keywords": ["auth", "authfi", "jwt", "rbac", "permissions", "middleware", "sso", "cloud-iam"],
   "engines": {
