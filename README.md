@@ -14,8 +14,9 @@ npm install @authfi/sdk
 const authfi = require('@authfi/sdk');
 
 const auth = authfi({
-  tenant: 'acme',
-  apiKey: 'sk_live_...',
+  issuer: 'https://acme.authfi.io',   // your project's origin, which is its issuer
+  audience: 'https://api.acme.com',   // the aud this API accepts
+  apiKey: 'sk_live_...',              // only for permission sync
 });
 
 // Permission middleware
@@ -27,13 +28,15 @@ app.get('/api/users', auth.require('read:users'), (req, res) => {
 // Role middleware
 app.get('/admin', auth.requireRole('admin'), handler);
 
-// Start — syncs permissions + pre-fetches JWKS
+// Start — syncs permissions + pre-fetches the issuer's keys
 auth.start().then(() => app.listen(3000));
 ```
 
 ## Features
 
-- JWKS + RS256 token verification with caching
+- Token verification with the keys at the project's `jwks_uri` (from its discovery document):
+  RS256, PS256, ES256 and EdDSA, the algorithm chosen by the key and never by the token;
+  `iss`, `aud` and `exp` required
 - `auth.require("read:users")` — Express middleware
 - `auth.requireRole("admin")` — role-based access
 - `auth.authenticate()` — JWT only, no permission check
@@ -41,6 +44,19 @@ auth.start().then(() => app.listen(3000));
 - Cloud credentials (GCP/AWS/Azure/OCI)
 - TypeScript definitions included
 - Zero dependencies — uses Node.js crypto
+
+## Verifying tokens
+
+`verifyToken(token)` (and the middleware) accept a token only when:
+
+- its `kid` names a key the issuer publishes, and the token's `alg` is the one that key signs with;
+- `iss` is the issuer and `aud` contains `audience`;
+- it has an `exp` that has not passed.
+
+That covers a person's token (RS256) and an agent's token, including one an agent holds for a
+person (EdDSA, with `act.sub` naming the agent). A refusal is a `TokenError` whose `code` says why
+(`audience_mismatch`, `alg_mismatch`, `token_expired`, ...). Without an `audience` the middleware
+answers 500: verifying a token without checking who it is for is not offered.
 
 ## Cloud Credentials (AuthFI Connect)
 
@@ -53,10 +69,8 @@ const creds = await auth.cloud.credentials(userToken, 'gcp', {
 ## Running Tests
 
 ```bash
-node --test test.js
+npm test
 ```
-
-13 unit tests — all passing.
 
 ## License
 

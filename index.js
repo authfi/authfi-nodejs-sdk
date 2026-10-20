@@ -2,19 +2,19 @@
  * AuthFI Node.js SDK
  *
  * Usage:
- *   const authfi = require('@authfi/node');
+ *   const authfi = require('@authfi/sdk');
  *
  *   const auth = authfi({
- *     tenant: 'acme',
- *     apiKey: 'sk_live_...',
- *     apiUrl: 'https://api.authfi.io',
- *     applicationId: 'client-id-of-your-app',   // optional: scope permissions to this app
- *     autoSync: true,                            // auto-register permissions on startup
+ *     issuer: 'https://acme.authfi.io',            // the project's origin, which is its issuer
+ *     audience: 'https://api.acme.com',            // what this API accepts in a token's aud
+ *     apiKey: 'sk_live_...',                       // only for permission sync
+ *     applicationId: 'client-id-of-your-app',      // optional: scope permissions to this app
+ *     autoSync: true,                              // auto-register permissions on startup
  *   });
  *
- *   // Express middleware — validates JWT + checks permissions
+ *   // Express middleware — validates the token + checks permissions
  *   app.get('/api/users', auth.require('read:users'), (req, res) => {
- *     console.log(req.user); // decoded JWT claims
+ *     console.log(req.user); // verified token claims
  *   });
  *
  *   // Check multiple permissions (ALL required)
@@ -23,80 +23,70 @@
  *   // Check role instead
  *   app.get('/admin', auth.requireRole('admin'), handler);
  *
- *   // Start server — triggers permission sync
+ *   // Start server — fetches the issuer's keys and triggers permission sync
  *   auth.start().then(() => app.listen(3000));
  */
 
-const crypto = require('crypto');
+const { createVerifier, TokenError, ConfigError } = require('./lib/verify');
 
 module.exports = function authfi(config) {
   const {
     tenant,
     apiKey,
     apiUrl = 'https://api.authfi.io',
+    // The project's own origin, which is also its issuer. Pass it for a custom domain or a
+    // self-hosted deployment; otherwise it is https://<tenant>.<baseDomain>.
+    issuer,
+    // The zone projects live under: authfi.io in production. A domain is never hard-coded into
+    // an issuer, so both levels are configurable.
+    baseDomain = 'authfi.io',
+    // The audience this API accepts: a string or a list. Required to verify tokens.
+    audience,
     applicationId,
     clientSecret,       // required for cloud identity
     autoSync = true,
     jwksRefreshInterval = 300000, // 5 min
+    clockTolerance = 30, // seconds
+    fetch: fetchFn,
   } = config;
 
-  // The edge dispatch is api.authfi.io/<slug>/<path> — the SLUG COMES FIRST. Every path here had
-  // the slug and the version transposed, so every URL 404'd against a real deployment, the JWKS
-  // fetch among them.
-  //
-  // Two shapes, deliberately named apart: root-level protocol paths (JWKS, OIDC discovery,
-  // /oauth/*) hang off tenantBase; API routes add /v1. Conflating them is how a straight
-  // transposition still leaves JWKS broken.
+  // Permission sync and cloud credentials still address api.authfi.io; token verification reads
+  // everything from the project issuer's own discovery document.
   const tenantBase = `${apiUrl}/${tenant}`;
   // No /manage/ prefix exists on the platform; those routes are /v1/* like the rest.
   const managePath = `${tenantBase}/v1`;
   const authPath = `${tenantBase}/v1`;
   const registeredPermissions = new Set();
-  let jwksCache = null;
-  let jwksCacheTime = 0;
 
-  // --- JWKS ---
+  // --- Token verification ---
 
-  async function fetchJWKS() {
-    const now = Date.now();
-    if (jwksCache && now - jwksCacheTime < jwksRefreshInterval) return jwksCache;
-
-    const res = await fetch(`${tenantBase}/.well-known/jwks.json`);
-    if (!res.ok) throw new Error('Failed to fetch JWKS');
-    jwksCache = await res.json();
-    jwksCacheTime = now;
-    return jwksCache;
+  let verifier = null;
+  function getVerifier() {
+    if (verifier) return verifier;
+    const iss = issuer || (tenant ? `https://${tenant}.${baseDomain}` : null);
+    if (!iss) throw new ConfigError('issuer (or tenant) is required to verify tokens');
+    try {
+      verifier = createVerifier({
+        issuer: iss,
+        audience,
+        fetch: fetchFn,
+        jwksTtlMs: jwksRefreshInterval,
+        clockToleranceSec: clockTolerance,
+      });
+    } catch (e) {
+      // A bad issuer or a missing audience is a construction-time fact, so it is configuration.
+      throw e instanceof ConfigError ? e : new ConfigError(e.message);
+    }
+    return verifier;
   }
 
+  /**
+   * Verifies an access token from this project and returns its claims. The algorithm comes from
+   * the issuer's key, never from the token; iss must be the issuer, aud must contain `audience`,
+   * and exp is required.
+   */
   async function verifyToken(token) {
-    // Decode header to get kid
-    const [headerB64, payloadB64, signatureB64] = token.split('.');
-    const header = JSON.parse(Buffer.from(headerB64, 'base64url').toString());
-    const payload = JSON.parse(Buffer.from(payloadB64, 'base64url').toString());
-
-    // Check expiry
-    if (payload.exp && payload.exp < Date.now() / 1000) {
-      throw new Error('Token expired');
-    }
-
-    // Enforce RS256 algorithm
-    if (header.alg !== 'RS256') {
-      throw new Error('Unsupported algorithm: ' + header.alg);
-    }
-
-    // Fetch JWKS and find matching key
-    const jwks = await fetchJWKS();
-    const key = jwks.keys.find(k => k.kid === header.kid);
-    if (!key) throw new Error('Unknown signing key');
-
-    // Verify signature using Node.js crypto
-    const publicKey = crypto.createPublicKey({ key, format: 'jwk' });
-    const signedData = `${headerB64}.${payloadB64}`;
-    const signature = Buffer.from(signatureB64, 'base64url');
-    const valid = crypto.verify('sha256', Buffer.from(signedData), publicKey, signature);
-    if (!valid) throw new Error('Invalid signature');
-
-    return payload;
+    return getVerifier().verify(token);
   }
 
   // --- Permission registration ---
@@ -162,7 +152,7 @@ module.exports = function authfi(config) {
 
         next();
       } catch (err) {
-        return res.status(401).json({ error: err.message });
+        return refuse(res, err);
       }
     };
   }
@@ -189,7 +179,7 @@ module.exports = function authfi(config) {
 
         next();
       } catch (err) {
-        return res.status(401).json({ error: err.message });
+        return refuse(res, err);
       }
     };
   }
@@ -205,9 +195,18 @@ module.exports = function authfi(config) {
         req.user = await verifyToken(token);
         next();
       } catch (err) {
-        return res.status(401).json({ error: err.message });
+        return refuse(res, err);
       }
     };
+  }
+
+  // A misconfigured SDK is the server's fault, not the caller's: 500, not 401.
+  function refuse(res, err) {
+    if (err instanceof ConfigError) {
+      console.error('[authfi] token verification is not configured:', err.message);
+      return res.status(500).json({ error: 'Authentication is not configured' });
+    }
+    return res.status(401).json({ error: err.message, code: err.code });
   }
 
   function extractBearer(req) {
@@ -219,8 +218,12 @@ module.exports = function authfi(config) {
   // --- Startup ---
 
   async function start() {
-    // Pre-fetch JWKS
-    await fetchJWKS().catch(err => console.warn('[authfi] JWKS fetch failed:', err.message));
+    // Pre-fetch the issuer's metadata and keys, when this service verifies tokens.
+    if (audience) {
+      await Promise.resolve()
+        .then(() => getVerifier().warm())
+        .catch(err => console.warn('[authfi] JWKS fetch failed:', err.message));
+    }
 
     // Sync permissions
     if (autoSync) {
@@ -314,3 +317,6 @@ module.exports = function authfi(config) {
     cloud,
   };
 };
+
+module.exports.TokenError = TokenError;
+module.exports.ConfigError = ConfigError;
