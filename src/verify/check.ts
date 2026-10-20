@@ -1,7 +1,7 @@
 import { TransportError } from '../core/errors.js';
 import { apiErrorOf, dataOf } from '../core/oauth.js';
 import type { Core } from '../core/project.js';
-import { Secret } from '../core/secret.js';
+import { isSecret, type Secret } from '../core/secret.js';
 import type { TokenSource } from '../core/token-source.js';
 import { contextOf } from '../core/transport.js';
 
@@ -36,10 +36,9 @@ export async function checkAccess(
   req: CheckRequest,
 ): Promise<CheckResult> {
   const url = `${await core.apiOrigin(req.signal)}/apis/regional/v1/check`;
-  const auth =
-    credential instanceof Secret
-      ? { authorization: `Bearer ${credential.reveal()}` }
-      : await credential.headers('POST', url);
+  const auth = isSecret(credential)
+    ? { authorization: `Bearer ${credential.reveal()}` }
+    : await credential.headers('POST', url);
   const res = await core.transport.send({
     method: 'POST',
     url,

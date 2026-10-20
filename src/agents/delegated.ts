@@ -107,7 +107,7 @@ export class DelegatedToken extends BaseTokenSource {
         'this token was approved by the person once and is about to expire; ask them again',
       );
     }
-    const res = await this.#flight.run(0, () => renew(options.signal));
+    const res = await this.#flight.run(0, () => renew(), options.signal);
     this.#token = res.accessToken;
     this.#expiresAt = res.expiresAt;
     if (res.scope.length > 0) this.#scopes = new Set(res.scope);

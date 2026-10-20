@@ -60,8 +60,7 @@ function actorOf(sub: string): Principal {
 }
 
 function clientIdOf(claims: Readonly<Record<string, unknown>>): string {
-  if (typeof claims.client_id === 'string') return claims.client_id;
-  return typeof claims.azp === 'string' ? claims.azp : '';
+  return typeof claims.client_id === 'string' ? claims.client_id : '';
 }
 
 /**
@@ -157,7 +156,7 @@ export class AccessToken {
     this.tenantId = String(claims.tenant_id);
     this.issuer = String(claims.iss);
     this.audience = Object.freeze([...audience]);
-    this.scopes = new Set(scopeList(claims.scope ?? claims.scp));
+    this.scopes = new Set(scopeList(claims.scope));
     this.permissions = new Set(strings(claims.permissions));
     this.roles = new Set(strings(claims.roles));
     this.groups = new Set(strings(claims.groups));

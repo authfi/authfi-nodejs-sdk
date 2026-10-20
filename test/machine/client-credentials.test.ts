@@ -48,6 +48,23 @@ describe('clientCredentials', () => {
     expect(await m2m.token({ force: true })).toBe('at-3');
   });
 
+  it("one caller's abort fails that caller only, and the others still get the one mint", async () => {
+    const { t, af } = await setup();
+    const m2m = af.clientCredentials({
+      clientId: 'app_m',
+      clientSecret: new Secret('s3cret'),
+      resource: API,
+      sendTo: ['https://api.example.com'],
+    });
+    const a = new AbortController();
+    const first = m2m.token({ signal: a.signal });
+    const second = m2m.token();
+    a.abort(new Error('caller A gave up'));
+    await expect(first).rejects.toThrow('caller A gave up');
+    expect(await second).toBe('at-1');
+    expect(t.fake.to(`${ISSUER}/oauth/token`)).toHaveLength(1);
+  });
+
   it('sends the token to its API and nowhere else', async () => {
     const { t, af } = await setup();
     t.fake.on('GET', 'https://api.example.com/orders', (r) => json({ auth: r.headers.get('authorization') }));
@@ -92,7 +109,7 @@ describe('clientCredentials', () => {
     expect(own.sendTo).toEqual([ISSUER]);
   });
 
-  it('uses client_secret_post when asked, and refuses private_key_jwt for a non-agent client', async () => {
+  it('uses client_secret_post when asked, and refuses any other method', async () => {
     const { t, af } = await setup();
     await af
       .clientCredentials({
@@ -105,9 +122,17 @@ describe('clientCredentials', () => {
       .token();
     const body = new URLSearchParams(t.fake.to(`${ISSUER}/oauth/token`)[0]!.body);
     expect([body.get('client_id'), body.get('client_secret')]).toEqual(['a', 's']);
+    // private_key_jwt is not in the type (agents use their key through af.agent()); a JS caller
+    // that passes it anyway is refused.
     expect(() =>
-      af.clientCredentials({ clientId: 'a', clientSecret: new Secret('s'), authMethod: 'private_key_jwt' }),
-    ).toThrow(expect.objectContaining({ name: 'NotSupportedError', feature: 'private_key_jwt' }));
+      af.clientCredentials({
+        clientId: 'a',
+        clientSecret: new Secret('s'),
+        authMethod: 'private_key_jwt' as unknown as 'client_secret_basic',
+      }),
+    ).toThrow(
+      expect.objectContaining({ name: 'ConfigurationError', message: expect.stringContaining('authMethod') }),
+    );
     expect(() => af.clientCredentials({ clientId: '', clientSecret: new Secret('s') })).toThrow('clientId');
     expect(() => af.clientCredentials({ clientId: 'a', clientSecret: 's' as unknown as Secret })).toThrow(
       'must be a Secret',

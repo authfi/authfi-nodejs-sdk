@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
   ConfigurationError,
+  DiscoveryError,
   InsufficientAuthentication,
   InvalidToken,
+  TemporarilyUnavailable,
   TransportError,
 } from '../../src/core/errors.js';
 import { AccessToken, Principal } from '../../src/verify/access-token.js';
@@ -20,7 +22,14 @@ describe('refusalAnswer', () => {
       headers: { 'retry-after': '5' },
       body: { error: 'service_unavailable' },
     });
-    expect(refusalAnswer(new Error('anything')).status).toBe(503);
+    expect(refusalAnswer(new DiscoveryError('discovery_failed', 'no document')).status).toBe(503);
+    expect(refusalAnswer(new TemporarilyUnavailable('temporarily_unavailable', 'later')).status).toBe(503);
+  });
+
+  it('answers a bug 500, with no Retry-After, so no client retries a programming error', () => {
+    for (const bug of [new TypeError('cannot read properties of undefined'), new Error('x'), 'a string']) {
+      expect(refusalAnswer(bug)).toEqual({ status: 500, headers: {}, body: { error: 'internal_error' } });
+    }
   });
 
   it('answers step-up with acr_values, max_age and the resource metadata', () => {
@@ -57,14 +66,14 @@ describe('requirements', () => {
 });
 
 describe('AccessToken', () => {
-  it('reads azp, scp and absent optional claims', () => {
+  it('reads client_id and scope only, and absent optional claims', () => {
     const token = new AccessToken(
-      { iss: 'i', sub: 'app_1', azp: 'app_1', scp: ['a'], exp: 10, tenant_id: 't' },
+      { iss: 'i', sub: 'app_1', client_id: 'app_1', scope: 'a b', exp: 10, tenant_id: 't' },
       ['aud'],
     );
     expect(token.clientId).toBe('app_1');
     expect(token.tokenKind).toBe('machine');
-    expect([...token.scopes]).toEqual(['a']);
+    expect([...token.scopes]).toEqual(['a', 'b']);
     expect(token.orgId).toBeUndefined();
     expect(token.acr).toBeUndefined();
     expect(token.authTime).toBeUndefined();
@@ -73,6 +82,16 @@ describe('AccessToken', () => {
     const bare = new AccessToken({ iss: 'i', sub: 'u', exp: 1, tenant_id: 't' }, []);
     expect(bare.clientId).toBe('');
     expect(bare.tokenKind).toBe('person');
+  });
+
+  it('does not read scp or azp: the design names scope and client_id only', () => {
+    const token = new AccessToken(
+      { iss: 'i', sub: 'app_1', azp: 'app_1', scp: ['a'], exp: 10, tenant_id: 't' },
+      ['aud'],
+    );
+    expect(token.clientId).toBe('');
+    expect(token.tokenKind).toBe('person');
+    expect([...token.scopes]).toEqual([]);
   });
 
   it('compares principals', () => {

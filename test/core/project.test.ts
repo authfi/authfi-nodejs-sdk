@@ -113,6 +113,31 @@ describe('discovery', () => {
     await expect(project(t).metadata()).rejects.toMatchObject({ name: 'DiscoveryError', code });
   });
 
+  it.each([
+    ['token_endpoint', 'http://token.evil.example/oauth/token'],
+    ['jwks_uri', 'http://keys.evil.example/jwks.json'],
+    ['userinfo_endpoint', 'http://evil.example/userinfo'],
+    ['revocation_endpoint', 'http://evil.example/revoke'],
+    ['backchannel_authentication_endpoint', 'http://evil.example/ciba'],
+    ['token_endpoint', 'ftp://evil.example/oauth/token'],
+    ['token_endpoint', 'not a url'],
+  ])('refuses a document whose %s is %s', async (field, value) => {
+    const t = await TestIssuer.create();
+    t.metadataExtra = { [field]: value };
+    await expect(project(t).metadata()).rejects.toMatchObject({
+      name: 'DiscoveryError',
+      code: 'discovery_failed',
+    });
+  });
+
+  it('refuses an address that is not a string, and takes loopback http', async () => {
+    const t = await TestIssuer.create();
+    t.metadataExtra = { userinfo_endpoint: 42 };
+    await expect(project(t).metadata()).rejects.toMatchObject({ code: 'discovery_failed' });
+    t.metadataExtra = { userinfo_endpoint: 'http://127.0.0.1:8080/userinfo' };
+    expect((await project(t).metadata()).userinfo_endpoint).toBe('http://127.0.0.1:8080/userinfo');
+  });
+
   it('refuses a document that is not an object, and answers that are not 200', async () => {
     const t = await TestIssuer.create();
     t.fake.on('GET', `${ISSUER}/.well-known/openid-configuration`, () => json([1, 2]));
@@ -160,10 +185,11 @@ describe('the key set', () => {
     expect(t.fake.to(`${ISSUER}/.well-known/jwks.json`)).toHaveLength(3);
   });
 
-  it("refuses a header alg that is not the key's", async () => {
+  it("refuses a header alg that is not the key's as an unknown key, as the kernel does", async () => {
     const t = await TestIssuer.create();
     const keys = coreOf(project(t)).keys;
-    await expect(keys.key('okp-1', 'RS256')).rejects.toMatchObject({ code: 'token_signature_invalid' });
+    await expect(keys.key('okp-1', 'RS256')).rejects.toMatchObject({ code: 'token_key_unknown' });
+    await expect(keys.key('rsa-1', 'ES256')).rejects.toMatchObject({ code: 'token_key_unknown' });
     expect((await keys.key('okp-1', 'EdDSA')).alg).toBe('EdDSA');
     expect((await keys.key('ec-1', 'ES256')).alg).toBe('ES256');
   });

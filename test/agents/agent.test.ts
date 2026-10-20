@@ -1,9 +1,11 @@
 import { inspect } from 'node:util';
 import { describe, expect, it } from 'vitest';
 import { AgentKey } from '../../src/agents/agent-key.js';
+import { isAuthFIError } from '../../src/core/errors.js';
+import type { AgentAuth as Agent } from '../../src/agents/agent.js';
 import { AuthFI } from '../../src/core/project.js';
 import { Secret } from '../../src/core/secret.js';
-import { json } from '../support/fake-fetch.js';
+import { json, networkError } from '../support/fake-fetch.js';
 import { AGENT_ID, CIBA, FakeAS } from '../support/fake-as.js';
 import { TestClock } from '../support/issuer.js';
 
@@ -56,6 +58,44 @@ describe("the agent's own token", () => {
     expect(assertions).toHaveLength(2);
     expect(assertions[0]).not.toBe(assertions[1]);
   });
+
+  it("one caller's abort fails that caller only: the others get the one mint", async () => {
+    const { as, agent } = await setup();
+    const a = new AbortController();
+    const first = agent.token({ signal: a.signal });
+    const second = agent.token();
+    a.abort(new Error('caller A gave up'));
+    await expect(first).rejects.toThrow('caller A gave up');
+    expect(await second).toMatch(/^eyJ/);
+    expect(as.minted).toBe(1);
+  });
+
+  it.each([
+    [
+      'a request approval',
+      '/apis/regional/v1/ai/auth/request-approval',
+      (a: Agent) => a.requestApproval('refund'),
+    ],
+    [
+      'a CIBA start',
+      '/apis/regional/v1/ai/auth/backchannel-authorize',
+      (a: Agent) => a.requestUserToken({ loginHint: 'a', bindingMessage: 'b' }),
+    ],
+  ])(
+    'sends %s once, whether the connection resets or the platform answers 503',
+    async (_name, path, call) => {
+      for (const failure of ['reset', '503'] as const) {
+        const { agent, as, fake } = await setup();
+        await agent.token(); // the agent's own mint is not what is under test
+        fake.on('POST', `${as.issuer}${path}`, () => {
+          if (failure === 'reset') return networkError();
+          return json({ error: 'temporarily_unavailable' }, 503);
+        });
+        await expect(call(agent)).rejects.toBeDefined();
+        expect(fake.to(`${as.issuer}${path}`)).toHaveLength(1);
+      }
+    },
+  );
 
   it('lists its capabilities, and mints per resource', async () => {
     const { agent, as } = await setup();
@@ -167,13 +207,26 @@ describe('CIBA', () => {
     as.ciba.answers = Array(100).fill('pending');
     await expect(
       agent.tokenAsUser({ loginHint: 'a', bindingMessage: 'b', timeoutMs: 9000 }),
-    ).rejects.toMatchObject({ code: 'authorization_pending' });
+    ).rejects.toMatchObject({ name: 'WaitTimeout', code: 'wait_timeout' });
     const controller = new AbortController();
     controller.abort(new Error('caller stopped'));
     const request = await agent.requestUserToken({ loginHint: 'a', bindingMessage: 'b' });
     await expect(agent.awaitUserToken(request, { signal: controller.signal })).rejects.toThrow(
       'caller stopped',
     );
+  });
+
+  it('says a request that lapsed is ConsentExpired, not a timeout, and that a wait that ran out is not the server', async () => {
+    const { agent, as } = await setup();
+    as.ciba.answers = Array(1000).fill('pending');
+    const request = await agent.requestUserToken({ loginHint: 'a', bindingMessage: 'b' }); // lives 300 s
+    const lapsed = agent.awaitUserToken(request, { timeoutMs: 100_000_000 });
+    await expect(lapsed).rejects.toMatchObject({ name: 'ConsentExpired', code: 'expired_token' });
+    const fresh = await agent.requestUserToken({ loginHint: 'a', bindingMessage: 'b' });
+    const timeout = await agent.awaitUserToken(fresh, { timeoutMs: 1000 }).catch((e: unknown) => e);
+    expect(timeout).toMatchObject({ name: 'WaitTimeout', code: 'wait_timeout', pendingId: undefined });
+    expect(isAuthFIError(timeout, 'OAuthError')).toBe(false);
+    expect(isAuthFIError(timeout, 'WaitTimeout')).toBe(true);
   });
 
   it('requires a binding message and a login hint, sends the request once, and refuses a project without CIBA', async () => {
@@ -232,6 +285,22 @@ describe('token exchange', () => {
     expect(second).not.toBe(first);
     expect(fake.to(`${as.issuer}/oauth/token`).filter((r) => r.body.includes('token-exchange'))).toHaveLength(
       2,
+    );
+  });
+
+  it('a renewal outlives the caller that started it: aborting that caller does not lose the rotated token', async () => {
+    const { agent, as, clock, fake } = await setup();
+    const personToken = await as.t.sign({ sub: 'usr_9', exp: Math.floor(clock.now() / 1000) + 3600 });
+    const delegated = await agent.exchange(new Secret(personToken));
+    clock.advance(850_000);
+    const a = new AbortController();
+    const first = delegated.token({ signal: a.signal });
+    const second = delegated.token();
+    a.abort(new Error('caller A gave up'));
+    await expect(first).rejects.toThrow('caller A gave up');
+    expect(await second).toMatch(/^eyJ/);
+    expect(fake.to(`${as.issuer}/oauth/token`).filter((r) => r.body.includes('token-exchange'))).toHaveLength(
+      2, // the first exchange and one renewal
     );
   });
 
@@ -360,8 +429,12 @@ describe('approvals', () => {
     expect(done.status).toBe('approved');
     expect(clock.sleeps).toContain(1000);
     as.approvalStatus = 'pending';
-    expect((await agent.waitForApproval('apr-1', { timeoutMs: 2500, intervalMs: 1000 })).status).toBe(
-      'pending',
+    await expect(agent.waitForApproval('apr-1', { timeoutMs: 2500, intervalMs: 1000 })).rejects.toMatchObject(
+      {
+        name: 'WaitTimeout',
+        code: 'wait_timeout',
+        pendingId: 'apr-1',
+      },
     );
   });
 

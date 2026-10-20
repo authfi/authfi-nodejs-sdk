@@ -9,6 +9,7 @@ import {
   MultiIssuerVerifier,
   TokenVerifier,
   decodeUnverified,
+  isTokenVerifier,
   parseAuthorization,
 } from '../../src/verify/verifier.js';
 import { json } from '../support/fake-fetch.js';
@@ -108,7 +109,7 @@ describe('refusals', () => {
     [
       'an alg that disagrees with the key',
       async () => unsignedJwt({ alg: 'EdDSA', typ: 'at+jwt', kid: 'rsa-1' }, {}),
-      'token_signature_invalid',
+      'token_key_unknown',
     ],
     [
       'a bad signature',
@@ -143,6 +144,41 @@ describe('refusals', () => {
     it(`refuses ${what} as ${code}`, async () => {
       const { t, verifier } = await setup();
       expect(await refusal(verifier.verify(await make(t)))).toBe(code);
+    });
+  }
+
+  // Each of these is refused from the token alone: no key is looked up, so a stream of them
+  // costs the issuer nothing. Without the alg allow-list, alg none and HS* would reach the key
+  // lookup; without the size cap, a signed token over 16 KiB would verify.
+  const beforeAnyKey: [string, (t: TestIssuer) => Promise<string>, string][] = [
+    [
+      'alg none',
+      async () => unsignedJwt({ alg: 'none', typ: 'at+jwt', kid: 'rsa-1' }, {}),
+      'token_signature_invalid',
+    ],
+    [
+      'HS256',
+      async () => unsignedJwt({ alg: 'HS256', typ: 'at+jwt', kid: 'rsa-1' }, {}),
+      'token_signature_invalid',
+    ],
+    [
+      'HS512',
+      async () => unsignedJwt({ alg: 'HS512', typ: 'at+jwt', kid: 'rsa-1' }, {}),
+      'token_signature_invalid',
+    ],
+    ['a signed token over 16 KiB', (t) => t.sign({ padding: 'x'.repeat(16 * 1024) }), 'token_malformed'],
+    [
+      'a token under 16 Ki code units but over 16 KiB of UTF-8',
+      async () => `eyJhbGciOiJSUzI1NiJ9.e30.${'é'.repeat(9000)}`,
+      'token_malformed',
+    ],
+  ];
+  for (const [what, make, code] of beforeAnyKey) {
+    it(`refuses ${what} as ${code} before fetching any key`, async () => {
+      const { t, verifier } = await setup();
+      const raw = await make(t);
+      expect(await refusal(verifier.verify(raw))).toBe(code);
+      expect(t.fake.to(`${t.issuer}/.well-known/jwks.json`)).toHaveLength(0);
     });
   }
 
@@ -382,6 +418,24 @@ describe('MultiIssuerVerifier', () => {
     const g = new AuthFI({ issuer: globex.issuer, fetch: fetchBoth });
     return { acme, globex, a, g };
   }
+
+  it('recognises a TokenVerifier by its brand, so one from the other build is accepted', async () => {
+    const { verifier } = await setup();
+    expect(isTokenVerifier(verifier)).toBe(true);
+    expect(isTokenVerifier({ verifyAs: () => undefined })).toBe(false);
+    const otherCopy = {
+      [Symbol.for('authfi.token-verifier')]: true,
+      issuer: ISSUER,
+      verifyAs: verifier.verifyAs.bind(verifier),
+    };
+    expect(isTokenVerifier(otherCopy)).toBe(true);
+    expect(
+      () =>
+        new MultiIssuerVerifier({
+          [ISSUER]: { verifier: otherCopy as unknown as TokenVerifier, tenantId: TENANT },
+        }),
+    ).not.toThrow();
+  });
 
   it('picks the issuer from the list and pins each to its tenant', async () => {
     const { acme, globex, a, g } = await two();
