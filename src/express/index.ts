@@ -16,7 +16,9 @@
  */
 
 import { isAuthFIError } from '../core/errors.js';
+import { isValidRequestId } from '../core/ids.js';
 import type { Logger } from '../core/logger.js';
+import { checkOrigin } from '../core/urls.js';
 import type { AccessToken } from '../verify/access-token.js';
 import {
   applyRequirements,
@@ -66,6 +68,13 @@ export interface ProtectOptions extends Requirements, AnswerOptions {
   readonly optional?: boolean | undefined;
   /** Where refusals are logged (code and request id, never the token). Defaults to the project's logger. */
   readonly logger?: Logger | undefined;
+  /**
+   * The origin clients reach this API at, such as `https://api.example.com`. The URL a DPoP proof is
+   * checked against is this plus the request path. Without it the URL is built from the `Host` header
+   * and the connection's protocol, which a client chooses unless Express's `trust proxy` is set
+   * exactly right, so set it whenever the API is behind a proxy or accepts DPoP.
+   */
+  readonly publicUrl?: string | undefined;
 }
 
 const SILENT: Logger = {
@@ -79,11 +88,28 @@ function single(value: string | string[] | undefined): string | undefined {
   return Array.isArray(value) ? value[0] : value;
 }
 
-function urlOf(req: ExpressRequest): string | undefined {
-  const host = req.get?.('host') ?? single(req.headers.host);
+function urlOf(req: ExpressRequest, publicOrigin: string | undefined): string | undefined {
   const path = req.originalUrl ?? req.url;
-  if (host === undefined || path === undefined) return undefined;
+  if (path === undefined) return undefined;
+  if (publicOrigin !== undefined) return `${publicOrigin}${path}`;
+  const host = req.get?.('host') ?? single(req.headers.host);
+  if (host === undefined) return undefined;
   return `${req.protocol ?? 'https'}://${host}${path}`;
+}
+
+/** What an operator needs to diagnose a failure that is not a refusal: the message, stack and cause. */
+function failureOf(error: unknown): Record<string, unknown> {
+  if (!(error instanceof Error)) return { error: String(error) };
+  return {
+    error: error.message,
+    ...(error.stack === undefined ? {} : { stack: error.stack }),
+    ...(error.cause === undefined ? {} : { cause: causeText(error.cause) }),
+  };
+}
+
+function causeText(cause: unknown): string {
+  if (cause instanceof Error) return cause.message;
+  return typeof cause === 'string' ? cause : JSON.stringify(cause);
 }
 
 function schemeOf(req: ExpressRequest): Scheme {
@@ -98,7 +124,10 @@ function answer(
   logger: Logger,
 ): void {
   const reply = refusalAnswer(error, schemeOf(req), options);
-  const requestId = single(req.headers['x-request-id']);
+  // The caller's id is echoed and logged only when it is one the platform would accept: anything
+  // else could forge log lines or carry a value into the response.
+  const given = single(req.headers['x-request-id']);
+  const requestId = given !== undefined && isValidRequestId(given) ? given : undefined;
   const fields = {
     code: isAuthFIError(error) ? error.code : 'internal_error',
     status: reply.status,
@@ -106,7 +135,7 @@ function answer(
     path: (req.originalUrl ?? req.url ?? '').split('?')[0],
     ...(requestId === undefined ? {} : { request_id: requestId }),
   };
-  if (reply.status >= 500) logger.error('request refused: the token could not be checked', fields);
+  if (reply.status >= 500) logger.error('the token could not be checked', { ...fields, ...failureOf(error) });
   else if (fields.code === 'token_missing') logger.info('request refused', fields);
   else logger.warn('request refused', fields);
   const headers = { ...reply.headers, ...(requestId === undefined ? {} : { 'x-request-id': requestId }) };
@@ -131,6 +160,8 @@ export function protect(
     scopes: options.scopes,
   };
   checkRequirements(requirements);
+  const publicOrigin =
+    options.publicUrl === undefined ? undefined : checkOrigin(options.publicUrl, 'publicUrl');
   const logger = options.logger ?? loggerOf(verifier) ?? SILENT;
   return (req, res, next) => {
     const authorization = single(req.headers.authorization);
@@ -139,7 +170,12 @@ export function protect(
       return;
     }
     verifier
-      .verifyRequest({ authorization, dpop: single(req.headers.dpop), method: req.method, url: urlOf(req) })
+      .verifyRequest({
+        authorization,
+        dpop: single(req.headers.dpop),
+        method: req.method,
+        url: urlOf(req, publicOrigin),
+      })
       .then((token) => {
         applyRequirements(token, requirements);
         req.authfi = token;

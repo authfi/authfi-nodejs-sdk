@@ -92,7 +92,7 @@ describe('clientCredentials', () => {
     expect(own.sendTo).toEqual([ISSUER]);
   });
 
-  it('uses client_secret_post when asked, and refuses private_key_jwt for a non-agent client', async () => {
+  it('uses client_secret_post when asked, and refuses any other method', async () => {
     const { t, af } = await setup();
     await af
       .clientCredentials({
@@ -105,9 +105,17 @@ describe('clientCredentials', () => {
       .token();
     const body = new URLSearchParams(t.fake.to(`${ISSUER}/oauth/token`)[0]!.body);
     expect([body.get('client_id'), body.get('client_secret')]).toEqual(['a', 's']);
+    // private_key_jwt is not in the type (agents use their key through af.agent()); a JS caller
+    // that passes it anyway is refused.
     expect(() =>
-      af.clientCredentials({ clientId: 'a', clientSecret: new Secret('s'), authMethod: 'private_key_jwt' }),
-    ).toThrow(expect.objectContaining({ name: 'NotSupportedError', feature: 'private_key_jwt' }));
+      af.clientCredentials({
+        clientId: 'a',
+        clientSecret: new Secret('s'),
+        authMethod: 'private_key_jwt' as unknown as 'client_secret_basic',
+      }),
+    ).toThrow(
+      expect.objectContaining({ name: 'ConfigurationError', message: expect.stringContaining('authMethod') }),
+    );
     expect(() => af.clientCredentials({ clientId: '', clientSecret: new Secret('s') })).toThrow('clientId');
     expect(() => af.clientCredentials({ clientId: 'a', clientSecret: 's' as unknown as Secret })).toThrow(
       'must be a Secret',

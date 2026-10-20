@@ -1,8 +1,8 @@
 import { SingleFlight } from '../core/cache.js';
-import { ConfigurationError, NotSupportedError } from '../core/errors.js';
+import { ConfigurationError } from '../core/errors.js';
 import { GRANT, requestToken, type ClientAuth, type TokenResponse } from '../core/oauth.js';
 import { coreOf, type AuthFI, type Core } from '../core/project.js';
-import { Secret } from '../core/secret.js';
+import { isSecret, type Secret } from '../core/secret.js';
 import { BaseTokenSource, checkSendTo, type TokenOptions } from '../core/token-source.js';
 
 /** How `af.clientCredentials()` is configured. */
@@ -19,7 +19,7 @@ export interface ClientCredentialsOptions {
   /** Scopes to ask for. The platform copies them into the token unchecked; authorize on permissions. */
   readonly scope?: readonly string[] | undefined;
   /** `client_secret_basic` (default) or `client_secret_post`. */
-  readonly authMethod?: 'client_secret_basic' | 'client_secret_post' | 'private_key_jwt' | undefined;
+  readonly authMethod?: 'client_secret_basic' | 'client_secret_post' | undefined;
 }
 
 /**
@@ -52,22 +52,23 @@ export class ClientCredentials extends BaseTokenSource {
     this.#core = core;
     if (typeof options.clientId !== 'string' || options.clientId === '')
       throw new ConfigurationError('clientId is required');
-    if (!(options.clientSecret instanceof Secret)) {
+    if (!isSecret(options.clientSecret)) {
       throw new ConfigurationError(
         'clientSecret must be a Secret: new Secret(process.env.AUTHFI_CLIENT_SECRET)',
       );
     }
-    if (options.authMethod === 'private_key_jwt') {
-      throw new NotSupportedError(
-        'private_key_jwt',
-        'This AuthFI project accepts key-based client authentication from agents only; use the client secret',
+    const method: unknown = options.authMethod ?? 'client_secret_basic';
+    if (method !== 'client_secret_basic' && method !== 'client_secret_post') {
+      throw new ConfigurationError(
+        `authMethod must be client_secret_basic or client_secret_post, not ${String(method)}: a machine ` +
+          'client authenticates with its secret (an agent authenticates with its key, af.agent())',
       );
     }
     this.clientId = options.clientId;
     this.resource = options.resource;
     this.scope = Object.freeze([...(options.scope ?? [])]);
     this.#auth = {
-      method: options.authMethod ?? 'client_secret_basic',
+      method,
       clientId: options.clientId,
       clientSecret: options.clientSecret,
     };

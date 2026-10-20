@@ -1,9 +1,9 @@
 import { compactVerify } from 'jose';
-import { fromBase64url, fromUtf8 } from '../core/bytes.js';
+import { fromBase64url, fromUtf8, utf8 } from '../core/bytes.js';
 import { ConfigurationError, InvalidToken } from '../core/errors.js';
 import type { Logger } from '../core/logger.js';
 import { coreOf, type AuthFI, type Core } from '../core/project.js';
-import { Secret } from '../core/secret.js';
+import { isSecret, type Secret } from '../core/secret.js';
 import { isAtOrUnder, originOf } from '../core/urls.js';
 import { AccessToken } from './access-token.js';
 
@@ -83,7 +83,9 @@ export function decodeUnverified(raw: string): {
   header: Record<string, unknown>;
   payload: Record<string, unknown>;
 } {
-  if (raw.length > MAX_TOKEN_BYTES)
+  // Bytes, not UTF-16 units: a code unit is at least one UTF-8 byte, so the length alone can
+  // refuse early, and the encoded size decides the rest.
+  if (raw.length > MAX_TOKEN_BYTES || utf8(raw).length > MAX_TOKEN_BYTES)
     throw new InvalidToken('token_malformed', 'the token is longer than 16 KiB');
   const parts = raw.split('.');
   if (parts.length === 5)
@@ -113,6 +115,22 @@ function isAccessTokenType(typ: unknown): boolean {
 }
 
 /**
+ * The brand {@link isTokenVerifier} reads. A package loaded as both ESM and CommonJS holds two
+ * copies of this class, so `instanceof` is false for the other copy's verifiers.
+ */
+const VERIFIER_BRAND = Symbol.for('authfi.token-verifier');
+
+/** Whether `value` is a {@link TokenVerifier}, from this copy of the SDK or another. */
+export function isTokenVerifier(value: unknown): value is TokenVerifier {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    (value as Record<symbol, unknown>)[VERIFIER_BRAND] === true &&
+    typeof (value as { verifyAs?: unknown }).verifyAs === 'function'
+  );
+}
+
+/**
  * Verifies the access tokens one issuer mints for your API: people's, machine clients', agents' and
  * delegated tokens, with the rules of design §1.8. Made by `af.verifier({ audience })`.
  *
@@ -120,6 +138,8 @@ function isAccessTokenType(typ: unknown): boolean {
  * in your logs; on the wire, answer the one opaque `invalid_token` (the adapters do).
  */
 export class TokenVerifier implements Verifier {
+  /** The brand {@link isTokenVerifier} reads. */
+  readonly [VERIFIER_BRAND] = true;
   readonly issuer: string;
   readonly audience: readonly string[];
   readonly expectedTenantId: string | undefined;
@@ -154,7 +174,7 @@ export class TokenVerifier implements Verifier {
 
   /** Verifies a token presented under the Bearer scheme. */
   verify(raw: string | Secret, options: { signal?: AbortSignal } = {}): Promise<AccessToken> {
-    const value = raw instanceof Secret ? raw.reveal() : raw;
+    const value = isSecret(raw) ? raw.reveal() : raw;
     return this.verifyAs(value, 'Bearer', this.expectedTenantId, options.signal);
   }
 
@@ -333,7 +353,7 @@ export class MultiIssuerVerifier implements Verifier {
   constructor(issuers: Readonly<Record<string, TrustedIssuer>>) {
     const map = new Map<string, TrustedIssuer>();
     for (const [issuer, entry] of Object.entries(issuers)) {
-      if (!(entry.verifier instanceof TokenVerifier))
+      if (!isTokenVerifier(entry.verifier))
         throw new ConfigurationError(`the entry for ${issuer} has no TokenVerifier`);
       if (entry.verifier.issuer !== issuer) {
         throw new ConfigurationError(`the verifier filed under ${issuer} verifies ${entry.verifier.issuer}`);
@@ -361,7 +381,7 @@ export class MultiIssuerVerifier implements Verifier {
 
   /** Verifies a token presented under the Bearer scheme. */
   verify(raw: string | Secret, options: { signal?: AbortSignal } = {}): Promise<AccessToken> {
-    const value = raw instanceof Secret ? raw.reveal() : raw;
+    const value = isSecret(raw) ? raw.reveal() : raw;
     return this.#verify(value, 'Bearer', options.signal);
   }
 

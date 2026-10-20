@@ -25,19 +25,28 @@ export function raceSignal<T>(promise: Promise<T>, signal: AbortSignal | undefin
 /**
  * Concurrent callers asking for the same key share one in-flight call. A failure is not kept: the
  * next caller starts a new call.
+ *
+ * The shared call belongs to no caller, so it runs without any caller's `AbortSignal` (the
+ * transport's own timeouts still apply), and each caller's `signal` ends that caller's wait only.
+ * Handing the first caller's signal to the shared call would let that caller's abort reject every
+ * other caller, and abandon a refresh whose rotated token the platform has already issued.
  */
 export class SingleFlight<K, V> {
   readonly #inflight = new Map<K, Promise<V>>();
 
-  /** Runs `fn` for `key` unless a call for it is in flight, in which case its result is shared. */
-  run(key: K, fn: () => Promise<V>): Promise<V> {
-    const existing = this.#inflight.get(key);
-    if (existing !== undefined) return existing;
-    const p = fn().finally(() => {
-      this.#inflight.delete(key);
-    });
-    this.#inflight.set(key, p);
-    return p;
+  /**
+   * Runs `fn` for `key` unless a call for it is in flight, in which case its result is shared.
+   * `signal` stops this caller waiting; it never reaches `fn` or the other callers.
+   */
+  run(key: K, fn: () => Promise<V>, signal?: AbortSignal): Promise<V> {
+    let shared = this.#inflight.get(key);
+    if (shared === undefined) {
+      shared = fn().finally(() => {
+        this.#inflight.delete(key);
+      });
+      this.#inflight.set(key, shared);
+    }
+    return raceSignal(shared, signal);
   }
 }
 
@@ -81,14 +90,17 @@ export class CachedDocument<T> {
     if (options.refresh !== true && this.#value !== undefined && this.#clock.monotonic() < this.#expiresAt) {
       return Promise.resolve(this.#value);
     }
-    const shared = this.#flight.run(0, async () => {
-      const loaded = await this.#load();
-      const ttl = Math.min(MAX_TTL_MS, Math.max(MIN_TTL_MS, loaded.maxAgeMs ?? DEFAULT_TTL_MS));
-      this.#value = loaded.value;
-      this.#expiresAt = this.#clock.monotonic() + ttl;
-      return loaded.value;
-    });
-    return raceSignal(shared, options.signal);
+    return this.#flight.run(
+      0,
+      async () => {
+        const loaded = await this.#load();
+        const ttl = Math.min(MAX_TTL_MS, Math.max(MIN_TTL_MS, loaded.maxAgeMs ?? DEFAULT_TTL_MS));
+        this.#value = loaded.value;
+        this.#expiresAt = this.#clock.monotonic() + ttl;
+        return loaded.value;
+      },
+      options.signal,
+    );
   }
 
   /** The cached value, without fetching; undefined before the first successful fetch. */

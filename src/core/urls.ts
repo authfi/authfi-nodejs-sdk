@@ -16,7 +16,8 @@ export function isLoopback(url: URL): boolean {
   return LOOPBACK.has(url.hostname);
 }
 
-function requireSecureScheme(url: URL, what: string, value: string): void {
+/** Refuses a URL that is not `https`, or `http` to loopback; the one rule for every address the SDK sends to. */
+export function requireSecureScheme(url: URL, what: string, value: string): void {
   if (url.protocol === 'https:') return;
   if (url.protocol === 'http:' && isLoopback(url)) return;
   throw new ConfigurationError(`${what} ${value} must be https (plain http is allowed for loopback only)`);

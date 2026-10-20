@@ -1,11 +1,11 @@
 import type { Clock } from './clock.js';
 import { fromUtf8 } from './bytes.js';
 import { asksForNonce, type DPoPSigner } from './dpop.js';
-import { TransportError, type ErrorContext } from './errors.js';
+import { ConfigurationError, TransportError, type ErrorContext } from './errors.js';
 import { freshTraceparent, isValidRequestId, requestId as newRequestId, traceIdOf } from './ids.js';
 import { warnOnce, type Logger } from './logger.js';
 import type { Secret } from './secret.js';
-import { originOf } from './urls.js';
+import { originOf, requireSecureScheme } from './urls.js';
 
 /**
  * How a request may be retried (design §1.2).
@@ -206,6 +206,7 @@ export class Transport {
 
   /** Sends one logical call, retrying it as its class allows. */
   async send(req: HttpRequest): Promise<HttpResponse> {
+    this.#requireSecure(req.url);
     const { clock, attemptMs, totalMs, retries, logger } = this.#settings;
     const id = this.#requestId(req.requestId);
     const retry: RetryClass = req.idempotencyKey === undefined ? req.retry : 'safe';
@@ -314,6 +315,17 @@ export class Transport {
       }
       return this.#finish(req, res, bytes, id, headers);
     }
+  }
+
+  /** Plain http is for loopback only: a credential in a request must not cross a network in the clear. */
+  #requireSecure(url: string): void {
+    let parsed: URL;
+    try {
+      parsed = new URL(url);
+    } catch {
+      throw new ConfigurationError(`${url} is not a URL`);
+    }
+    requireSecureScheme(parsed, 'the request URL', url);
   }
 
   #requestId(given: string | undefined): string {
