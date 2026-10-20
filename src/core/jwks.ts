@@ -75,8 +75,9 @@ export class KeySet {
   }
 
   /**
-   * The verification key for `kid`, with the one algorithm it verifies. Refuses (as `InvalidToken`)
-   * an unknown kid, and a header `alg` that is not the key's.
+   * The verification key for `kid`, with the one algorithm it verifies. Refuses (as `InvalidToken`
+   * `token_key_unknown`) an unknown kid, and a header `alg` that is not the key's: as in the kernel's
+   * `middleware/jwks.go`, a key of another type is no key for the token.
    */
   async key(
     kid: string,
@@ -94,7 +95,7 @@ export class KeySet {
       throw new InvalidToken('token_key_unknown', `the issuer publishes no usable key ${kid}`);
     if (alg !== found.alg) {
       throw new InvalidToken(
-        'token_signature_invalid',
+        'token_key_unknown',
         `the token's alg ${alg} is not ${found.alg}, the algorithm of key ${kid}`,
       );
     }

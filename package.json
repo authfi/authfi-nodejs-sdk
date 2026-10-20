@@ -60,7 +60,7 @@
     "gen:codes": "node scripts/gen-codes.mjs"
   },
   "dependencies": {
-    "jose": "6.2.12"
+    "jose": "^6.2.12"
   },
   "devDependencies": {
     "@arethetypeswrong/cli": "0.18.5",

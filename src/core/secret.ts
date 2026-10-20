@@ -3,6 +3,11 @@ import { ConfigurationError } from './errors.js';
 
 const INSPECT = Symbol.for('nodejs.util.inspect.custom');
 const REDACTED = 'Secret(***)';
+/**
+ * The brand {@link isSecret} reads. A package loaded as both ESM and CommonJS holds two copies of
+ * this class, so `instanceof Secret` is false for the other copy's secrets; the brand is shared.
+ */
+const BRAND = Symbol.for('authfi.secret');
 
 /**
  * A value that must not leave the process by accident: a client secret, a token, an assertion, a
@@ -49,9 +54,25 @@ export class Secret {
   [INSPECT](): string {
     return REDACTED;
   }
+
+  /** The brand {@link isSecret} reads. It carries no part of the value. */
+  readonly [BRAND] = true;
+}
+
+/**
+ * Whether `value` is a {@link Secret}, from this copy of the SDK or another (ESM and CommonJS).
+ * The SDK checks this, never `instanceof`.
+ */
+export function isSecret(value: unknown): value is Secret {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    (value as Record<symbol, unknown>)[BRAND] === true &&
+    typeof (value as { reveal?: unknown }).reveal === 'function'
+  );
 }
 
 /** Wraps a string in a {@link Secret}, or passes a Secret through. */
 export function toSecret(value: string | Secret): Secret {
-  return value instanceof Secret ? value : new Secret(value);
+  return isSecret(value) ? value : new Secret(value);
 }

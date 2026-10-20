@@ -13,7 +13,8 @@ All notable changes to this package. It follows [Semantic Versioning](https://se
 - **The transport:** timeouts per attempt and per call, a retry table that never sends a
   state-creating request twice, `X-Request-Id` and `traceparent` on every call, a `User-Agent`, no
   redirects, capped answers, and a warning when the platform deprecates a URL.
-- **`Secret`**, which never prints, serialises or clones its value.
+- **`Secret`**, which never prints, serialises or clones its value, and `isSecret(value)`, which
+  recognises one from either build (ESM or CommonJS) where `instanceof` cannot.
 - **Typed errors** under `AuthFIError`, with `isAuthFIError(e, kind)`, carrying the kernel's token
   refusal codes (generated from authfi-regional-kernel v0.58.0).
 - **`TokenSource`**, the one credential interface, with an origin guard on `headers()` and `fetch`.

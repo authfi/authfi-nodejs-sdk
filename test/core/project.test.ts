@@ -160,10 +160,11 @@ describe('the key set', () => {
     expect(t.fake.to(`${ISSUER}/.well-known/jwks.json`)).toHaveLength(3);
   });
 
-  it("refuses a header alg that is not the key's", async () => {
+  it("refuses a header alg that is not the key's as an unknown key, as the kernel does", async () => {
     const t = await TestIssuer.create();
     const keys = coreOf(project(t)).keys;
-    await expect(keys.key('okp-1', 'RS256')).rejects.toMatchObject({ code: 'token_signature_invalid' });
+    await expect(keys.key('okp-1', 'RS256')).rejects.toMatchObject({ code: 'token_key_unknown' });
+    await expect(keys.key('rsa-1', 'ES256')).rejects.toMatchObject({ code: 'token_key_unknown' });
     expect((await keys.key('okp-1', 'EdDSA')).alg).toBe('EdDSA');
     expect((await keys.key('ec-1', 'ES256')).alg).toBe('ES256');
   });

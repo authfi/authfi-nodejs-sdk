@@ -23,7 +23,7 @@ import {
   traceIdOf,
 } from '../../src/core/ids.js';
 import { redact, redactingLogger, type Logger } from '../../src/core/logger.js';
-import { Secret, toSecret } from '../../src/core/secret.js';
+import { isSecret, Secret, toSecret } from '../../src/core/secret.js';
 import { MemoryTokenStore, TokenSet } from '../../src/core/token-set.js';
 import { checkIssuer, checkOrigin, isAtOrUnder, originOf } from '../../src/core/urls.js';
 import { TestClock } from '../support/issuer.js';
@@ -63,6 +63,19 @@ describe('Secret', () => {
     expect(new Secret('abc').equals(new Secret('abc'))).toBe(true);
     expect(new Secret('abc').equals(new Secret('abd'))).toBe(false);
     expect(new Secret('abc').equals(new Secret('abcd'))).toBe(false);
+  });
+
+  it("is recognised by its brand, so another copy of the SDK's Secret passes", () => {
+    const s = new Secret('x');
+    expect(isSecret(s)).toBe(true);
+    // A Secret from the other build (ESM beside CommonJS) is another class with the same brand.
+    const otherCopy: unknown = { [Symbol.for('authfi.secret')]: true, reveal: () => 'x' };
+    expect(otherCopy instanceof Secret).toBe(false);
+    expect(isSecret(otherCopy)).toBe(true);
+    expect(toSecret(otherCopy as Secret)).toBe(otherCopy);
+    expect(isSecret({ reveal: () => 'x' })).toBe(false);
+    expect(isSecret('x')).toBe(false);
+    expect(isSecret(null)).toBe(false);
   });
 
   it('wraps a string and passes a Secret through', () => {
