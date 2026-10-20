@@ -33,6 +33,15 @@ All notable changes to this package. It follows [Semantic Versioning](https://se
 - `conformance/vectors.json`: tokens with the outcome every AuthFI SDK must produce, run in Node and
   in the edge runtime.
 
+### Build and CI
+
+- `pipeline.yml`: lint, the tests on Node 22, 24 and 26 and in the edge runtime with coverage gates,
+  and a build checked by publint, attw and a browser bundle; one required check, `ci`. No secrets
+  in any pull-request job, every action pinned by commit.
+- `live.yml` (main and on demand, protected environment) and `weekly.yml` (platform drift and the
+  kernel codes against its newest tag).
+- `SECURITY.md`.
+
 ### Changed
 
 - **Verification is strict.** A missing `audience` is a `ConfigurationError`, not "accept any".
