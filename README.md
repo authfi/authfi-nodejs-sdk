@@ -186,12 +186,11 @@ An agent is an OAuth client with a key. Its token comes from the same token endp
 client's, and an API verifies it with the same verifier as a person's.
 
 ```ts
-import { AuthFI, AgentKey } from '@authfi/sdk';
-import { agentFromEnv, writeAgentKey } from '@authfi/sdk/node';
+import { AuthFI } from '@authfi/sdk';
+import { agentFromEnv, generateAgentKeyFile } from '@authfi/sdk/node';
 
 // Once: make the key, keep the private half in a 0600 file, register the public half in the console.
-const key = await AgentKey.generate('EdDSA');
-await writeAgentKey('./agent-key.pem', key);
+const key = await generateAgentKeyFile('./agent-key.pem', 'EdDSA');
 console.log(key.publicJwk(), await key.thumbprint());
 
 // At run time: AUTHFI_ISSUER, AUTHFI_AGENT_ID, AUTHFI_AGENT_KID, AUTHFI_AGENT_KEY_FILE.

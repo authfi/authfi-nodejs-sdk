@@ -38,7 +38,8 @@ export type SdkErrorCode =
   | 'sign_in_state_mismatch'
   | 'sign_in_issuer_mismatch'
   | 'sign_in_callback_invalid'
-  | 'pending_sign_in_invalid';
+  | 'pending_sign_in_invalid'
+  | 'wait_timeout';
 
 /** Every code this SDK knows by name. */
 export type KnownCode = KernelTokenCode | OAuthErrorCode | SdkErrorCode;
@@ -163,6 +164,21 @@ export class ConsentExpired extends OAuthError {
   override readonly name: string = 'ConsentExpired';
 }
 
+/**
+ * The caller's own `timeoutMs` ran out while waiting for a person; what was waited on is still open.
+ * This is the SDK's answer, never the server's: `authorization_pending` is the server saying the
+ * person has not decided yet, and a request that really ran out is {@link ConsentExpired}.
+ */
+export class WaitTimeout extends AuthFIError {
+  override readonly name: string = 'WaitTimeout';
+  /** What is still open and can be waited on again, when it has an id of its own (an approval's). */
+  readonly pendingId: string | undefined;
+  constructor(message: string, pendingId?: string) {
+    super('wait_timeout', message);
+    this.pendingId = pendingId;
+  }
+}
+
 /** The platform could not decide now (503, for example Actions failing closed). Safe to try later. */
 export class TemporarilyUnavailable extends OAuthError {
   override readonly name: string = 'TemporarilyUnavailable';
@@ -268,6 +284,7 @@ export interface AuthFIErrorKinds {
   ConsentDenied: ConsentDenied;
   ConsentExpired: ConsentExpired;
   TemporarilyUnavailable: TemporarilyUnavailable;
+  WaitTimeout: WaitTimeout;
   APIError: APIError;
   InvalidToken: InvalidToken;
   InsufficientPermission: InsufficientPermission;
@@ -288,6 +305,7 @@ const PARENTS: Readonly<Record<string, string>> = {
   ConsentDenied: 'OAuthError',
   ConsentExpired: 'OAuthError',
   TemporarilyUnavailable: 'OAuthError',
+  WaitTimeout: 'AuthFIError',
   APIError: 'AuthFIError',
   InvalidToken: 'AuthFIError',
   InsufficientPermission: 'InvalidToken',

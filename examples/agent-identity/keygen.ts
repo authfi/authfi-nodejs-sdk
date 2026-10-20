@@ -3,12 +3,10 @@
 //
 //   node --import tsx keygen.ts ./agent-key.pem
 
-import { AgentKey } from '@authfi/sdk';
-import { writeAgentKey } from '@authfi/sdk/node';
+import { generateAgentKeyFile } from '@authfi/sdk/node';
 
 const file = process.argv[2] ?? './agent-key.pem';
-const key = await AgentKey.generate('EdDSA');
-await writeAgentKey(file, key); // refuses to overwrite; owner-only
+const key = await generateAgentKeyFile(file, 'EdDSA'); // a new file, owner-only; never overwrites
 console.log(
   JSON.stringify({ kid: key.kid, thumbprint: await key.thumbprint(), public_jwk: key.publicJwk() }, null, 2),
 );

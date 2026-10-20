@@ -1,15 +1,7 @@
-import {
-  calculateJwkThumbprint,
-  exportJWK,
-  exportPKCS8,
-  generateKeyPair,
-  importJWK,
-  importPKCS8,
-  type JWK,
-} from 'jose';
+import { calculateJwkThumbprint, exportJWK, generateKeyPair, importJWK, importPKCS8, type JWK } from 'jose';
 import { fromBase64url } from '../core/bytes.js';
 import { ConfigurationError } from '../core/errors.js';
-import { Secret } from '../core/secret.js';
+import { isSecret, Secret } from '../core/secret.js';
 
 /** The algorithms an agent key signs with. The key type decides: Ed25519, P-256 or RSA (PSS). */
 export type AgentAlgorithm = 'EdDSA' | 'ES256' | 'PS256';
@@ -29,17 +21,30 @@ export interface Signer {
 }
 
 const PUBLIC_MEMBERS = ['kty', 'crv', 'x', 'y', 'n', 'e'] as const;
-const RSA_BITS = 3072;
+/** The size of an RSA agent key this SDK generates. */
+export const GENERATED_RSA_BITS = 3072;
 const MIN_RSA_BITS = 2048;
 const MAX_RSA_BITS = 4096;
-/** Exports a generated key for `writeAgentKey`. Not part of the public API. */
-export const EXPORT_PKCS8 = Symbol.for('authfi.agentKey.exportPkcs8');
 
 const SIGN_PARAMS: Record<AgentAlgorithm, AlgorithmIdentifier | RsaPssParams | EcdsaParams> = {
   EdDSA: { name: 'Ed25519' },
   ES256: { name: 'ECDSA', hash: 'SHA-256' },
   PS256: { name: 'RSA-PSS', saltLength: 32 },
 };
+
+/**
+ * A fresh extractable key pair, for `AgentKey.generate` and `generateAgentKeyFile` only. Not part of
+ * the public API: the private half must never be reachable from a key object.
+ */
+export async function generatePair(
+  alg: AgentAlgorithm,
+): Promise<{ privateKey: CryptoKey; publicKey: CryptoKey }> {
+  if (!(alg in SIGN_PARAMS))
+    throw new ConfigurationError(`cannot generate ${alg}: use EdDSA, ES256 or PS256`);
+  return alg === 'EdDSA'
+    ? generateKeyPair('Ed25519', { extractable: true })
+    : generateKeyPair(alg, { extractable: true, modulusLength: GENERATED_RSA_BITS });
+}
 
 function publicOf(
   jwk: JWK,
@@ -129,8 +134,9 @@ function pemAlgorithm(pem: string): AgentAlgorithm {
 
 /**
  * An agent's signing key: Ed25519 (EdDSA, the default), P-256 (ES256) or RSA (PS256, 3072 bits when
- * generated). The private key is held as a non-extractable Web Crypto key; no method returns it as a
- * value. `writeAgentKey` in `@authfi/sdk/node` writes a generated key to a 0600 file, once.
+ * generated). The private key is held as a non-extractable Web Crypto key: it can sign, and nothing
+ * the key object offers, by name or by symbol, returns it as a value. To make a key you keep, use
+ * `generateAgentKeyFile` in `@authfi/sdk/node`, which writes it to a new 0600 file.
  *
  * Register the public half in the console (`publicJwk()`, `thumbprint()`). The SDK never uploads a
  * private key.
@@ -140,43 +146,38 @@ export class AgentKey implements Signer {
   readonly alg: AgentAlgorithm;
   readonly #privateKey: CryptoKey;
   readonly #publicJwk: JsonWebKey & { kid: string; alg: string; use: string };
-  readonly #exportable: CryptoKey | undefined;
 
-  private constructor(
-    privateKey: CryptoKey,
-    publicJwk: JWK,
-    kid: string,
-    alg: AgentAlgorithm,
-    exportable?: CryptoKey,
-  ) {
+  private constructor(privateKey: CryptoKey, publicJwk: JWK, kid: string, alg: AgentAlgorithm) {
     if (typeof kid !== 'string' || kid.trim() === '')
       throw new ConfigurationError('kid is required: the key id registered with the public key');
     this.kid = kid.trim();
     this.alg = alg;
     this.#privateKey = privateKey;
     this.#publicJwk = publicOf(publicJwk, this.kid, alg);
-    this.#exportable = exportable;
   }
 
-  /** Generates a key. Its kid defaults to the RFC 7638 thumbprint of the public key. */
+  /**
+   * Generates a key that can sign and cannot be written anywhere: for a test, or a process that
+   * registers the public half and lives only as long as it does. To keep a key, use
+   * `generateAgentKeyFile` in `@authfi/sdk/node`. The kid defaults to the RFC 7638 thumbprint of the
+   * public key.
+   */
   static async generate(
     alg: AgentAlgorithm = 'EdDSA',
     options: { kid?: string | undefined } = {},
   ): Promise<AgentKey> {
-    if (!(alg in SIGN_PARAMS))
-      throw new ConfigurationError(`cannot generate ${alg}: use EdDSA, ES256 or PS256`);
-    const pair =
-      alg === 'EdDSA'
-        ? await generateKeyPair('Ed25519', { extractable: true })
-        : await generateKeyPair(alg, { extractable: true, modulusLength: RSA_BITS });
+    const pair = await generatePair(alg);
     const pub = await exportJWK(pair.publicKey);
     const kid = options.kid ?? (await calculateJwkThumbprint(pub, 'sha256'));
-    return new AgentKey(pair.privateKey, pub, kid, alg, pair.privateKey);
+    const privateKey = (await importJWK({ ...(await exportJWK(pair.privateKey)), alg }, alg, {
+      extractable: false,
+    })) as CryptoKey;
+    return new AgentKey(privateKey, pub, kid, alg);
   }
 
   /** Loads a PKCS#8 PEM private key. The kid is the one registered with its public key. */
   static async fromPem(pem: string | Secret, options: { kid: string }): Promise<AgentKey> {
-    const text = pem instanceof Secret ? pem.reveal() : pem;
+    const text = isSecret(pem) ? pem.reveal() : pem;
     if (typeof text !== 'string') throw new ConfigurationError('the agent key PEM must be a string');
     const alg = pemAlgorithm(text);
     let full: JWK;
@@ -223,16 +224,6 @@ export class AgentKey implements Signer {
   /** Signs bytes with the key. */
   async sign(data: Uint8Array<ArrayBuffer>): Promise<Uint8Array<ArrayBuffer>> {
     return new Uint8Array(await crypto.subtle.sign(SIGN_PARAMS[this.alg], this.#privateKey, data));
-  }
-
-  /** A generated key's PKCS#8 PEM, for `writeAgentKey` only. A loaded key is already in a file. */
-  async [EXPORT_PKCS8](): Promise<Secret> {
-    if (this.#exportable === undefined) {
-      throw new ConfigurationError(
-        'only a key made by AgentKey.generate() can be written; this one was loaded and is already stored',
-      );
-    }
-    return new Secret(await exportPKCS8(this.#exportable));
   }
 
   /** The kid and algorithm only. */

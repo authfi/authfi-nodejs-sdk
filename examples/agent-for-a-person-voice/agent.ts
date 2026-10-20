@@ -21,5 +21,6 @@ try {
 } catch (e) {
   if (isAuthFIError(e, 'ConsentDenied')) console.log('the caller said no');
   else if (isAuthFIError(e, 'ConsentExpired')) console.log('the request lapsed before the caller answered');
+  else if (isAuthFIError(e, 'WaitTimeout')) console.log('still waiting; ask the caller to check their phone');
   else throw e;
 }

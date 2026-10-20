@@ -2,10 +2,9 @@ import { generateKeyPairSync } from 'node:crypto';
 import { chmod, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { AgentKey } from '../../src/agents/agent-key.js';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AuthFI } from '../../src/core/project.js';
-import { agentFromEnv, readAgentKey, writeAgentKey } from '../../src/node/index.js';
+import { agentFromEnv, generateAgentKeyFile, readAgentKey } from '../../src/node/index.js';
 import { ISSUER } from '../support/issuer.js';
 
 const POSIX = process.platform !== 'win32';
@@ -27,15 +26,35 @@ function project() {
 }
 
 describe('key files', () => {
-  it('writes a generated key once, owner-only, and reads it back', async () => {
-    const key = await AgentKey.generate('ES256', { kid: 'k1' });
+  it('makes a key into a new owner-only file, once, and reads it back', async () => {
     const path = join(dir, 'agent.pem');
-    await writeAgentKey(path, key);
+    const key = await generateAgentKeyFile(path, 'ES256', { kid: 'k1' });
     if (POSIX) expect((await stat(path)).mode & 0o777).toBe(0o600);
     expect(await readFile(path, 'utf8')).toMatch(/^-----BEGIN PRIVATE KEY-----/);
-    await expect(writeAgentKey(path, key)).rejects.toMatchObject({ code: 'EEXIST' });
+    await expect(generateAgentKeyFile(path, 'ES256', { kid: 'k1' })).rejects.toMatchObject({
+      code: 'EEXIST',
+    });
     const back = await readAgentKey(path, { kid: 'k1' });
     expect(back.publicJwk()).toEqual(key.publicJwk());
+    expect(key.alg).toBe('ES256');
+  });
+
+  it('defaults to Ed25519 and a kid that is the key thumbprint', async () => {
+    const key = await generateAgentKeyFile(join(dir, 'default.pem'));
+    expect(key.alg).toBe('EdDSA');
+    expect(key.kid).toBe(await key.thumbprint());
+  });
+
+  it('refuses an algorithm it cannot make, before it creates a file', async () => {
+    const path = join(dir, 'never.pem');
+    await expect(generateAgentKeyFile(path, 'RS256' as 'PS256')).rejects.toThrow('cannot generate');
+    await expect(stat(path)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('returns a key that cannot be written out again', async () => {
+    const key = await generateAgentKeyFile(join(dir, 'k.pem'), 'EdDSA', { kid: 'k' });
+    expect(Object.keys(key)).not.toContain('exportPkcs8');
+    expect(Symbol.for('authfi.agentKey.exportPkcs8') in key).toBe(false);
   });
 
   it.runIf(POSIX)('refuses a key file others can read', async () => {
@@ -43,6 +62,23 @@ describe('key files', () => {
     await writeFile(path, generateKeyPairSync('ed25519').privateKey.export({ type: 'pkcs8', format: 'pem' }));
     await chmod(path, 0o644);
     await expect(readAgentKey(path, { kid: 'k' })).rejects.toThrow(`chmod 600 ${path}`);
+  });
+
+  it.runIf(!POSIX)('warns on the console, once, when no project is given', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const path = join(dir, 'c.pem');
+      await writeFile(
+        path,
+        generateKeyPairSync('ed25519').privateKey.export({ type: 'pkcs8', format: 'pem' }),
+      );
+      await readAgentKey(path, { kid: 'k' });
+      await readAgentKey(path, { kid: 'k' });
+      const calls = warn.mock.calls.filter((c) => String(c[0]).includes('POSIX-only'));
+      expect(calls.length).toBeLessThanOrEqual(1); // once per process, whichever test ran first
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it.runIf(!POSIX)('warns once on Windows that the permission check is POSIX-only', async () => {
@@ -77,7 +113,7 @@ describe('agentFromEnv', () => {
   it('reads the key file, which wins over the inline PEM', async () => {
     const { af, warns } = project();
     const path = join(dir, 'agent.pem');
-    await writeAgentKey(path, await AgentKey.generate('EdDSA', { kid: 'file-kid' }));
+    await generateAgentKeyFile(path, 'EdDSA', { kid: 'file-kid' });
     const agent = await agentFromEnv(af, {
       AUTHFI_AGENT_ID: 'agt_1',
       AUTHFI_AGENT_KID: 'file-kid',

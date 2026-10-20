@@ -7,6 +7,7 @@ import {
   NotSupportedError,
   OAuthError,
   TransportError,
+  WaitTimeout,
 } from '../core/errors.js';
 import {
   ACCESS_TOKEN_TYPE,
@@ -19,7 +20,7 @@ import {
   type TokenResponse,
 } from '../core/oauth.js';
 import { coreOf, type AuthFI, type Core } from '../core/project.js';
-import { Secret } from '../core/secret.js';
+import { isSecret, Secret } from '../core/secret.js';
 import { BaseTokenSource, checkSendTo, type TokenOptions, type TokenSource } from '../core/token-source.js';
 import { contextOf, jsonOf } from '../core/transport.js';
 import { isAtOrUnder, originOf } from '../core/urls.js';
@@ -206,14 +207,15 @@ export class AgentAuth extends BaseTokenSource {
     const now = this.#core.clock.now();
     const cached = this.#tokens.get(key);
     if (options.force !== true && cached !== undefined && now < cached.renewAt) return cached;
-    const response = await this.#flight.run(key, () => this.#mint(resource, options.signal));
+    const response = await this.#flight.run(key, () => this.#mint(resource), options.signal);
     const entry = { response, renewAt: response.expiresAt - this.#skew };
     this.#tokens.set(key, entry);
     return entry;
   }
 
-  async #mint(resource: string | undefined, signal?: AbortSignal): Promise<TokenResponse> {
-    const meta = await this.#core.metadata({ signal });
+  /** The shared mint belongs to no caller, so it takes no caller's signal. */
+  async #mint(resource: string | undefined): Promise<TokenResponse> {
+    const meta = await this.#core.metadata();
     this.#requireAgentAuth(
       meta.token_endpoint_auth_methods_supported,
       meta.token_endpoint_auth_signing_alg_values_supported,
@@ -225,7 +227,6 @@ export class AgentAuth extends BaseTokenSource {
         params: { grant_type: GRANT.clientCredentials, resource },
         auth: this.#auth(),
         retry: 'safe',
-        signal,
       },
       () => this.#core.clock.now(),
     );
@@ -374,7 +375,9 @@ export class AgentAuth extends BaseTokenSource {
   /**
    * Waits for the person's decision on a CIBA request, without blocking, and returns the token the
    * agent holds for them. The first poll waits the interval; `slow_down` adds five seconds. A refusal
-   * is {@link ConsentDenied}, a lapsed request {@link ConsentExpired}.
+   * is {@link ConsentDenied}, and a request that lapsed before the person decided {@link ConsentExpired}.
+   * When the caller's `timeoutMs` passes first it is {@link WaitTimeout}, and the request stays open:
+   * waiting on it again continues it.
    */
   async awaitUserToken(
     request: CibaRequest,
@@ -388,16 +391,16 @@ export class AgentAuth extends BaseTokenSource {
     const sendTo = this.#sendToFor(options.resource ?? this.#resource, options.sendTo);
     const clock = this.#core.clock;
     const meta = await this.#core.metadata({ signal: options.signal });
-    const deadline = Math.min(
-      clock.monotonic() + (options.timeoutMs ?? 300_000),
-      clock.monotonic() + Math.max(0, request.expiresAt.getTime() - clock.now()),
-    );
+    const waitDeadline = clock.monotonic() + (options.timeoutMs ?? 300_000);
+    const requestDeadline = clock.monotonic() + Math.max(0, request.expiresAt.getTime() - clock.now());
     let interval = request.intervalMs;
     for (;;) {
-      if (clock.monotonic() + interval > deadline) {
-        throw new OAuthError(
-          'authorization_pending',
-          'the person had not decided in time; the request may still be open',
+      if (clock.monotonic() + interval > Math.min(waitDeadline, requestDeadline)) {
+        if (requestDeadline <= waitDeadline) {
+          throw new ConsentExpired('expired_token', 'the request ran out before the person decided');
+        }
+        throw new WaitTimeout(
+          'the person had not decided in time; the request is still open, and waiting on it again continues it',
         );
       }
       await clock.sleep(interval, options.signal);
@@ -471,10 +474,7 @@ export class AgentAuth extends BaseTokenSource {
       signal?: AbortSignal | undefined;
     } = {},
   ): Promise<DelegatedToken> {
-    if (
-      !(subjectToken instanceof Secret) &&
-      typeof (subjectToken as Partial<TokenSource>).token !== 'function'
-    ) {
+    if (!isSecret(subjectToken) && typeof (subjectToken as Partial<TokenSource>).token !== 'function') {
       throw new ConfigurationError(
         'subjectToken must be a TokenSource or a Secret: wrap a raw token as new Secret(token)',
       );
@@ -482,9 +482,10 @@ export class AgentAuth extends BaseTokenSource {
     const sendTo = this.#sendToFor(options.resource, options.sendTo);
     const meta = await this.#requireGrant(GRANT.tokenExchange, 'token_exchange', options.signal);
     const exchangeOnce = async (signal?: AbortSignal): Promise<TokenResponse> => {
-      const subject =
-        subjectToken instanceof Secret ? subjectToken : new Secret(await subjectToken.token({ signal }));
-      if (subjectToken instanceof Secret && this.#expired(subject)) {
+      const subject = isSecret(subjectToken)
+        ? subjectToken
+        : new Secret(await subjectToken.token({ signal }));
+      if (isSecret(subjectToken) && this.#expired(subject)) {
         throw new ConsentExpired(
           'expired_token',
           "the person's token has expired; the agent cannot act for them until they sign in again",
@@ -718,7 +719,11 @@ export class AgentAuth extends BaseTokenSource {
     return approvalOf(dataOf(res), url);
   }
 
-  /** Polls {@link approval} until the approval is no longer pending, or the timeout passes. */
+  /**
+   * Polls {@link approval} every `intervalMs` until the approval is no longer pending, and returns it
+   * whatever the person decided. When `timeoutMs` passes first it throws {@link WaitTimeout} carrying
+   * the approval's id; the approval stays open, and waiting on it again continues.
+   */
   async waitForApproval(
     approvalId: string,
     options: {
@@ -733,7 +738,12 @@ export class AgentAuth extends BaseTokenSource {
     for (;;) {
       const current = await this.approval(approvalId, options);
       if (current.status !== 'pending') return current;
-      if (clock.monotonic() + interval > deadline) return current;
+      if (clock.monotonic() + interval > deadline) {
+        throw new WaitTimeout(
+          `approval ${approvalId} is still pending: the person had not decided in time, and it stays open`,
+          approvalId,
+        );
+      }
       await clock.sleep(interval, options.signal);
     }
   }

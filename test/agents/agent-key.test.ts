@@ -1,8 +1,8 @@
 import { generateKeyPairSync, type KeyObject } from 'node:crypto';
 import { inspect } from 'node:util';
 import { compactVerify, importJWK, type JWK } from 'jose';
-import { describe, expect, it } from 'vitest';
-import { AgentKey, EXPORT_PKCS8 } from '../../src/agents/agent-key.js';
+import { describe, expect, it, vi } from 'vitest';
+import { AgentKey } from '../../src/agents/agent-key.js';
 import { clientAssertion, MAX_ASSERTION_SECONDS } from '../../src/agents/assertion.js';
 import { Secret } from '../../src/core/secret.js';
 import { TestClock } from '../support/issuer.js';
@@ -87,25 +87,54 @@ describe('AgentKey', () => {
     await expect(AgentKey.generate('RS256' as 'PS256')).rejects.toThrow('cannot generate');
   });
 
-  it('never shows its private key, and exports only a generated key', async () => {
+  it('never shows its private key', async () => {
     const generated = await AgentKey.generate();
-    const pem = await generated[EXPORT_PKCS8]();
-    const ed = generateKeyPairSync('ed25519').privateKey;
-    const loaded = await AgentKey.fromPem(ed.export({ type: 'pkcs8', format: 'pem' }).toString(), {
-      kid: 'k',
-    });
-    await expect(loaded[EXPORT_PKCS8]()).rejects.toThrow('only a key made by AgentKey.generate()');
-    const body = pem.reveal().split('\n')[1]!;
     for (const text of [
       inspect(generated, { showHidden: true }),
       String(generated),
       JSON.stringify(generated),
       JSON.stringify(Object.entries(generated)),
     ]) {
-      expect(text).not.toContain(body);
+      expect(text).not.toContain('PRIVATE KEY');
       expect(text).not.toContain('"d"');
     }
     expect(JSON.parse(JSON.stringify(generated))).toEqual({ kid: generated.kid, alg: 'EdDSA' });
+  });
+
+  it('offers no property, symbol or method that returns the private key', async () => {
+    const generated = await AgentKey.generate('ES256');
+    const loaded = await AgentKey.fromPem(
+      generateKeyPairSync('ed25519').privateKey.export({ type: 'pkcs8', format: 'pem' }).toString(),
+      { kid: 'k' },
+    );
+    for (const key of [generated, loaded]) {
+      // The one global handle the old export hung on: a registered symbol anything in the process can look up.
+      expect(Symbol.for('authfi.agentKey.exportPkcs8') in key).toBe(false);
+      const members = [...Reflect.ownKeys(key), ...Reflect.ownKeys(Object.getPrototypeOf(key) as object)];
+      for (const member of members) {
+        const value = (key as unknown as Record<string | symbol, unknown>)[member];
+        if (typeof value !== 'function' || member === 'constructor') continue;
+        if (member === 'sign') continue; // takes bytes and returns a signature
+        const answer = await Promise.resolve((value as (...a: unknown[]) => unknown).call(key)).catch(
+          () => undefined,
+        );
+        expect(JSON.stringify(answer) ?? '').not.toContain('PRIVATE KEY');
+        expect(JSON.stringify(answer) ?? '').not.toContain('"d"');
+      }
+    }
+  });
+
+  it('holds the key non-extractable: the crypto API refuses to export what it signs with', async () => {
+    for (const alg of ['EdDSA', 'ES256', 'PS256'] as const) {
+      const key = await AgentKey.generate(alg);
+      const sign = vi.spyOn(crypto.subtle, 'sign');
+      await key.sign(new Uint8Array([1, 2, 3]));
+      const used = sign.mock.calls[0]![1];
+      sign.mockRestore();
+      expect(used.extractable).toBe(false);
+      await expect(crypto.subtle.exportKey('pkcs8', used)).rejects.toThrow();
+      await expect(crypto.subtle.exportKey('jwk', used)).rejects.toThrow();
+    }
   });
 });
 
