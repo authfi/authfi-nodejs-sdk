@@ -7,7 +7,7 @@
 
 export { AuthFI, type AuthFIOptions } from './core/project.js';
 export type { ServerMetadata } from './core/metadata.js';
-export { Secret } from './core/secret.js';
+export { isSecret, Secret } from './core/secret.js';
 export { BaseTokenSource, type TokenOptions, type TokenSource } from './core/token-source.js';
 export { MemoryTokenStore, TokenSet, type StoredTokenSet, type TokenStore } from './core/token-set.js';
 export { idempotencyKey, requestId } from './core/ids.js';
