@@ -81,7 +81,14 @@ function unsigned(header, payload) {
   return `${b(header)}.${b(payload)}.c2ln`;
 }
 
-const ok = (principal, tokenKind, actor = null) => ({ valid: true, principal, token_kind: tokenKind, actor });
+// `extra` adds what a vector pins beyond who the token is for: `client_id` and `scopes`.
+const ok = (principal, tokenKind, actor = null, extra = {}) => ({
+  valid: true,
+  principal,
+  token_kind: tokenKind,
+  actor,
+  ...extra,
+});
 const no = (code) => ({ valid: false, code });
 
 const vectors = [
@@ -117,6 +124,41 @@ const vectors = [
     ok('user:usr_1', 'person'),
   ],
   ['expired within the leeway', await sign({ exp: NOW - 30 }), ok('user:usr_1', 'person')],
+  // The boundary: a token is expired from `exp` plus the leeway (RFC 7519 section 4.1.4).
+  ['one second inside the leeway', await sign({ exp: NOW - 59 }), ok('user:usr_1', 'person')],
+  ['exactly at exp plus the leeway', await sign({ exp: NOW - 60 }), no('token_expired')],
+  // Who a token is for, read the same by every SDK (design section 2.2.2).
+  [
+    'typed agent with an actor keeps its own kind',
+    await sign({ sub: 'agent:agt_1', act: { sub: 'agt_2' }, client_id: 'agt_1' }),
+    ok('agent:agt_1', 'agent', 'agent:agt_2'),
+  ],
+  [
+    'typed app with an actor keeps its own kind',
+    await sign({ sub: 'app:app_1', act: { sub: 'agt_1' }, client_id: 'app_1' }),
+    ok('app:app_1', 'machine', 'agent:agt_1'),
+  ],
+  ['typed app alone', await sign({ sub: 'app:app_1', client_id: 'app_1' }), ok('app:app_1', 'machine')],
+  [
+    'azp is not the client id',
+    await sign({ sub: 'app_1', client_id: null, azp: 'app_1' }),
+    ok('user:app_1', 'person', null, { client_id: '' }),
+  ],
+  [
+    'scope is read, and scp is not',
+    await sign({ scope: 'orders:read orders:write', scp: ['other'] }),
+    ok('user:usr_1', 'person', null, { client_id: 'app_web', scopes: ['orders:read', 'orders:write'] }),
+  ],
+  [
+    'scp alone gives no scopes',
+    await sign({ scp: ['orders:read'] }),
+    ok('user:usr_1', 'person', null, { scopes: [] }),
+  ],
+  [
+    'a bound token is refused before its actor chain is looked at',
+    await sign({ cnf: { jkt: 'abc' }, act: { sub: 'agent:agt_1', act: { sub: 'agent:agt_2' } } }),
+    no('token_dpop_proof_required'),
+  ],
   ['JWE', 'a.b.c.d.e', no('token_malformed')],
   ['two parts', 'a.b', no('token_malformed')],
   [

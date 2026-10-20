@@ -2,7 +2,12 @@ import express from 'express';
 import type { AddressInfo } from 'node:net';
 import { afterEach, describe, expect, it } from 'vitest';
 import { KERNEL_TOKEN_CODES } from '../../src/core/codes.js';
-import { InvalidToken } from '../../src/core/errors.js';
+import {
+  DiscoveryError,
+  InvalidToken,
+  TemporarilyUnavailable,
+  TransportError,
+} from '../../src/core/errors.js';
 import type { Logger } from '../../src/core/logger.js';
 import { AuthFI } from '../../src/core/project.js';
 import { authfiErrorHandler, protect, type ProtectOptions } from '../../src/express/index.js';
@@ -199,6 +204,77 @@ describe('protect', () => {
     expect(res.status).toBe(503);
     expect(JSON.parse(res.body)).toEqual({ error: 'service_unavailable' });
     expect(log.lines.some((l) => l.level === 'error')).toBe(true);
+  });
+});
+
+describe('a failure that is not a refusal', () => {
+  /** A verifier that throws what a bug or an outage would, to see what the client gets and what is logged. */
+  function failing(error: unknown): Verifier {
+    return { verify: () => Promise.reject(error), verifyRequest: () => Promise.reject(error) };
+  }
+
+  it('answers a bug 500 with no Retry-After, and logs its message, stack and cause', async () => {
+    const log = capture();
+    const bug = new TypeError("cannot read properties of undefined (reading 'keys')", {
+      cause: new Error('the real cause'),
+    });
+    const base = await serve(failing(bug), { logger: log });
+    const res = await call(base, '/orders', { authorization: 'Bearer x.y.z' });
+    expect(res.status).toBe(500);
+    expect(res.headers.get('retry-after')).toBeNull();
+    expect(JSON.parse(res.body)).toEqual({ error: 'internal_error' });
+    const line = log.lines.find((l) => l.level === 'error');
+    expect(line?.fields?.error).toContain("reading 'keys'");
+    expect(String(line?.fields?.stack)).toContain('TypeError');
+    expect(line?.fields?.cause).toBe('the real cause');
+  });
+
+  it.each([
+    ['a transport failure', new TransportError('network_error', 'connection refused', { retryable: true })],
+    ['a discovery failure', new DiscoveryError('discovery_failed', 'no document')],
+    ['the platform failing closed', new TemporarilyUnavailable('temporarily_unavailable', 'later')],
+  ])('answers %s 503 with Retry-After, and logs why', async (_name, error) => {
+    const log = capture();
+    const base = await serve(failing(error), { logger: log });
+    const res = await call(base, '/orders', { authorization: 'Bearer x.y.z' });
+    expect(res.status).toBe(503);
+    expect(res.headers.get('retry-after')).toBe('5');
+    expect(JSON.parse(res.body)).toEqual({ error: 'service_unavailable' });
+    expect(log.lines.find((l) => l.level === 'error')?.fields?.error).toBe(error.message);
+  });
+});
+
+describe('the URL a DPoP proof is checked against', () => {
+  function recording(): { verifier: Verifier; urls: (string | undefined)[] } {
+    const urls: (string | undefined)[] = [];
+    const verifier: Verifier = {
+      verify: () => Promise.reject(new Error('unused')),
+      verifyRequest: (input) => {
+        urls.push('url' in input ? input.url : undefined);
+        return Promise.reject(new InvalidToken('token_missing', 'x'));
+      },
+    };
+    return { verifier, urls };
+  }
+
+  it('is built from publicUrl, not from a Host header the client chose', async () => {
+    const { verifier, urls } = recording();
+    const base = await serve(verifier, { publicUrl: 'https://api.example.com' });
+    await call(base, '/orders?x=1', { host: 'attacker.example' });
+    expect(urls).toEqual(['https://api.example.com/orders?x=1']);
+  });
+
+  it('falls back to the Host header only when publicUrl is not given', async () => {
+    const { verifier, urls } = recording();
+    const base = await serve(verifier);
+    await call(base, '/orders');
+    expect(urls[0]).toBe(`${base}/orders`);
+  });
+
+  it('must be an origin', () => {
+    const { verifier } = recording();
+    expect(() => protect(verifier, { publicUrl: 'https://api.example.com/path' })).toThrow('origin only');
+    expect(() => protect(verifier, { publicUrl: 'http://api.example.com' })).toThrow('https');
   });
 });
 

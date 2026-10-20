@@ -112,12 +112,7 @@ export class AccessToken {
   /** Builds the view of a token whose signature and claims were already verified. */
   constructor(claims: Record<string, unknown>, audience: readonly string[]) {
     const sub = String(claims.sub);
-    const clientId =
-      typeof claims.client_id === 'string'
-        ? claims.client_id
-        : typeof claims.azp === 'string'
-          ? claims.azp
-          : '';
+    const clientId = typeof claims.client_id === 'string' ? claims.client_id : '';
     const act = claims.act as { sub?: unknown } | undefined;
     const actSub = typeof act?.sub === 'string' ? act.sub : undefined;
     const typed = parseTyped(sub);
@@ -149,7 +144,7 @@ export class AccessToken {
     this.tenantId = String(claims.tenant_id);
     this.issuer = String(claims.iss);
     this.audience = Object.freeze([...audience]);
-    this.scopes = new Set(scopeList(claims.scope ?? claims.scp));
+    this.scopes = new Set(scopeList(claims.scope));
     this.permissions = new Set(strings(claims.permissions));
     this.roles = new Set(strings(claims.roles));
     this.groups = new Set(strings(claims.groups));

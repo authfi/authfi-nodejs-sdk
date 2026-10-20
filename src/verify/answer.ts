@@ -51,7 +51,10 @@ function challenge(scheme: Scheme, params: Readonly<Record<string, string | numb
  * - a missing scope: 403 `insufficient_scope`, naming the scopes;
  * - a missing permission or role: 403 `forbidden`, naming nothing;
  * - too weak a sign-in: 401 `insufficient_user_authentication` with `acr_values` (RFC 9470);
- * - the issuer's keys unreachable: 503; a server misconfiguration: 500.
+ * - the issuer's keys or discovery unreachable (`TransportError`, `DiscoveryError`,
+ *   `TemporarilyUnavailable`): 503 with `Retry-After`, because the caller's token may be fine;
+ * - anything else, a misconfiguration or a bug: 500 `internal_error` with no `Retry-After`, because
+ *   a well-behaved client must not retry a programming error.
  *
  * The precise code is never on the wire unless `exposeRefusalCode` is set.
  */
@@ -112,9 +115,14 @@ export function refusalAnswer(
       body: withCode({ error: 'invalid_token', error_description: OPAQUE }, error),
     };
   }
-  if (isAuthFIError(error, 'ConfigurationError'))
-    return { status: 500, headers: {}, body: { error: 'internal_error' } };
-  return { status: 503, headers: { 'retry-after': '5' }, body: { error: 'service_unavailable' } };
+  if (
+    isAuthFIError(error, 'TransportError') ||
+    isAuthFIError(error, 'DiscoveryError') ||
+    isAuthFIError(error, 'TemporarilyUnavailable')
+  ) {
+    return { status: 503, headers: { 'retry-after': '5' }, body: { error: 'service_unavailable' } };
+  }
+  return { status: 500, headers: {}, body: { error: 'internal_error' } };
 }
 
 /**

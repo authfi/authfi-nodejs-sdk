@@ -35,7 +35,10 @@ All notable changes to this package. It follows [Semantic Versioning](https://se
   from either build (`isTokenVerifier`).
 - `@authfi/sdk/express`: `protect(verifier, { permissions, anyPermission, roles, scopes, optional })`
   and `authfiErrorHandler()`, answering refusals as the platform does. A caller's `X-Request-Id` is
-  echoed and logged only when it is one the platform accepts.
+  echoed and logged only when it is one the platform accepts. A key or discovery outage is a 503 with
+  `Retry-After`; anything else that is not a refusal, a bug or a misconfiguration, is a 500 with none,
+  and the error is logged with its message, stack and cause. `publicUrl` names the origin a DPoP proof
+  is checked against, so the `Host` header need not be trusted.
 - `refusalAnswer()` and the requirement helpers, for other frameworks.
 - `af.clientCredentials()`, a machine client's token source.
 - `af.check()`, the project's decision point.
@@ -44,11 +47,13 @@ All notable changes to this package. It follows [Semantic Versioning](https://se
 
 ### Changed
 
+- **An access token is read from `client_id` and `scope` only**, as the design says; `azp` and `scp`
+  are not stand-ins for them. A typed `agent:` or `app:` subject keeps its own kind when the token
+  names an actor, and a token is expired from `exp` plus the leeway, in every SDK.
 - **Verification is strict.** A missing `audience` is a `ConfigurationError`, not "accept any".
   ID tokens, transaction tokens and tokens without `kid` are refused. Agent tokens (EdDSA) verify.
 - **Refusals no longer leak to the caller.** The 0.1 middleware answered `err.message`, and a 403
   listed the missing permissions; both are now the platform's opaque answers.
-
 - **Node.js 22.12 or later is required** (Node 18 and 20 are past end of life).
 - **Install from GitHub runs a build.** The package is TypeScript now, so the codeload tarball URL
   in the previous README no longer installs a usable package; install with
