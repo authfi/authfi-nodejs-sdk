@@ -10,7 +10,14 @@ interface Vector {
   name: string;
   token: string;
   expect:
-    | { valid: true; principal: string; token_kind: string; actor: string | null }
+    | {
+        valid: true;
+        principal: string;
+        token_kind: string;
+        actor: string | null;
+        client_id?: string;
+        scopes?: string[];
+      }
     | { valid: false; code: string };
 }
 
@@ -38,6 +45,9 @@ export function runVectors(): void {
         expect(token.principal.toString()).toBe(v.expect.principal);
         expect(token.tokenKind).toBe(v.expect.token_kind);
         expect(token.actor?.toString() ?? null).toBe(v.expect.actor);
+        if (v.expect.client_id !== undefined) expect(token.clientId).toBe(v.expect.client_id);
+        if (v.expect.scopes !== undefined)
+          expect([...token.scopes].sort()).toEqual([...v.expect.scopes].sort());
       } else {
         await expect(verifier.verify(v.token)).rejects.toMatchObject({ code: v.expect.code });
       }

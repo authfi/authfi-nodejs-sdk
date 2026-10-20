@@ -88,6 +88,8 @@ jobs:
         run: npm run check:package
       - name: Check the runtime-neutral entries bundle for the browser
         run: npm run check:browser
+      - name: Check the ESM and the CommonJS build agree on what they recognise
+        run: npm run check:dual
       - name: Pack the tarball
         run: npm pack
 

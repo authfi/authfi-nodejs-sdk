@@ -23,7 +23,7 @@ import {
   traceIdOf,
 } from '../../src/core/ids.js';
 import { redact, redactingLogger, type Logger } from '../../src/core/logger.js';
-import { Secret, toSecret } from '../../src/core/secret.js';
+import { isSecret, Secret, toSecret } from '../../src/core/secret.js';
 import { MemoryTokenStore, TokenSet } from '../../src/core/token-set.js';
 import { checkIssuer, checkOrigin, isAtOrUnder, originOf } from '../../src/core/urls.js';
 import { TestClock } from '../support/issuer.js';
@@ -63,6 +63,19 @@ describe('Secret', () => {
     expect(new Secret('abc').equals(new Secret('abc'))).toBe(true);
     expect(new Secret('abc').equals(new Secret('abd'))).toBe(false);
     expect(new Secret('abc').equals(new Secret('abcd'))).toBe(false);
+  });
+
+  it("is recognised by its brand, so another copy of the SDK's Secret passes", () => {
+    const s = new Secret('x');
+    expect(isSecret(s)).toBe(true);
+    // A Secret from the other build (ESM beside CommonJS) is another class with the same brand.
+    const otherCopy: unknown = { [Symbol.for('authfi.secret')]: true, reveal: () => 'x' };
+    expect(otherCopy instanceof Secret).toBe(false);
+    expect(isSecret(otherCopy)).toBe(true);
+    expect(toSecret(otherCopy as Secret)).toBe(otherCopy);
+    expect(isSecret({ reveal: () => 'x' })).toBe(false);
+    expect(isSecret('x')).toBe(false);
+    expect(isSecret(null)).toBe(false);
   });
 
   it('wraps a string and passes a Secret through', () => {
@@ -293,6 +306,44 @@ describe('caches', () => {
     expect([a, b, calls]).toEqual([1, 1, 1]);
     await expect(flight.run('k', () => Promise.reject(new Error('x')))).rejects.toThrow('x');
     expect(await flight.run('k', slow)).toBe(2);
+  });
+
+  it("one caller's abort ends that caller's wait and no one else's", async () => {
+    const flight = new SingleFlight<string, string>();
+    const seen: (AbortSignal | undefined)[] = [];
+    let release: (v: string) => void = () => undefined;
+    const call = (signal?: AbortSignal) => {
+      seen.push(signal);
+      return new Promise<string>((r) => {
+        release = r;
+      });
+    };
+    const a = new AbortController();
+    const first = flight.run('k', () => call(), a.signal);
+    const second = flight.run('k', () => call());
+    const reason = new Error('caller A gave up');
+    a.abort(reason);
+    await expect(first).rejects.toBe(reason);
+    release('minted');
+    expect(await second).toBe('minted');
+    expect(seen).toEqual([undefined]); // one call, made with no caller's signal
+  });
+
+  it('a call that outlives the caller that started it still finishes for the others', async () => {
+    const flight = new SingleFlight<string, number>();
+    let calls = 0;
+    const slow = () =>
+      new Promise<number>((r) => {
+        calls += 1;
+        setTimeout(() => r(calls), 5);
+      });
+    const a = new AbortController();
+    const early = flight.run('k', slow, a.signal);
+    const late = flight.run('k', slow);
+    a.abort();
+    await expect(early).rejects.toBeDefined();
+    expect(await late).toBe(1);
+    expect(calls).toBe(1);
   });
 
   it('raceSignal rejects on abort and passes a value through', async () => {
