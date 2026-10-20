@@ -144,12 +144,63 @@ The token is cached per resource and scope, renewed at two thirds of its lifetim
 for concurrent callers. Without `resource` the token names the client itself as its audience, which
 no API should accept, and the SDK warns once.
 
+## AI agents
+
+An agent is an OAuth client with a key. Its token comes from the same token endpoint as a machine
+client's, and an API verifies it with the same verifier as a person's.
+
+```ts
+import { AuthFI, AgentKey } from '@authfi/sdk';
+import { agentFromEnv, writeAgentKey } from '@authfi/sdk/node';
+
+// Once: make the key, keep the private half in a 0600 file, register the public half in the console.
+const key = await AgentKey.generate('EdDSA');
+await writeAgentKey('./agent-key.pem', key);
+console.log(key.publicJwk(), await key.thumbprint());
+
+// At run time: AUTHFI_ISSUER, AUTHFI_AGENT_ID, AUTHFI_AGENT_KID, AUTHFI_AGENT_KEY_FILE.
+const af = AuthFI.fromEnv();
+const agent = await agentFromEnv(af);
+const res = await agent.fetch(`${af.issuer}/mcp`, { method: 'POST', body });
+```
+
+| | |
+|---|---|
+| `agent.token()`, `agent.fetch`, `agent.headers()` | the agent's own token (client credentials with its key); its audience is the gateway, and it goes only to AuthFI |
+| `agent.forResource(resource, { sendTo })` | a token for your own API, sent only to `sendTo` |
+| `agent.capabilities()` | what the agent is granted |
+| `agent.tokenAsUser({ loginHint, bindingMessage })` | act for a person with no browser: they approve on their own device (CIBA) |
+| `agent.exchange(personToken)` | act for a person signed in to your app (token exchange) |
+| `agent.transactionToken(action)`, `agent.authorizeAction(txn)` | freeze a high-risk action, then ask the gate |
+| `agent.requestApproval(action)`, `agent.waitForApproval(id)` | a person approves one action; no token results |
+
+**Two ways of asking a person, two names.** `tokenAsUser` (CIBA) ends in a token the agent uses to
+act for the person. `requestApproval` ends in a decision about one action, and no token.
+
+**The tokens an agent holds for a person** are `DelegatedToken`s: their `subject` is the person, their
+`actor` the agent, and `via` says how they were obtained. One from token exchange renews by
+exchanging again while the person's token is valid; one from CIBA does not renew, because only the
+person can consent again, and raises `ConsentExpired` near expiry.
+
+- `bindingMessage` is required: it is what the person reads before approving.
+- A request that asks a person something (CIBA, an approval) is sent once; a retry would ask twice.
+- Registration and key rotation are console steps. The SDK never uploads a private key.
+- The key file is the default. `AUTHFI_AGENT_PRIVATE_KEY` (the PEM in the environment) is for runtimes
+  with no file system; on Node the SDK warns when it reads one. In an edge worker, build the key with
+  `AgentKey.fromPem(env.AUTHFI_AGENT_PRIVATE_KEY, { kid })` and `af.agent({ agentId, key })`.
+- `agent.approval(id)` raises `NotSupportedError` (`agent_approval_status`) on a project that does
+  not offer approval status to agents.
+
 ## Examples
 
 | Example | |
 |---|---|
 | [`examples/protect-an-api`](examples/protect-an-api) | An Express API that verifies tokens and authorizes on permissions |
 | [`examples/machine-to-machine`](examples/machine-to-machine) | A job calling that API with a client-credentials token |
+| [`examples/agent-identity`](examples/agent-identity) | An agent's key, its token, and a call through the MCP gateway |
+| [`examples/agent-for-a-person-voice`](examples/agent-for-a-person-voice) | Acting for a caller with no browser (CIBA) |
+| [`examples/agent-for-a-signed-in-user`](examples/agent-for-a-signed-in-user) | Acting for a person signed in to your app (token exchange) |
+| [`examples/action-gate`](examples/action-gate) | Freezing a high-risk action before running it |
 
 ## Secrets
 

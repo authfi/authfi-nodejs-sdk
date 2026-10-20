@@ -59,6 +59,41 @@ function actorOf(sub: string): Principal {
   return parseTyped(sub) ?? new Principal(sub.startsWith('agt_') ? 'agent' : 'app', sub);
 }
 
+function clientIdOf(claims: Readonly<Record<string, unknown>>): string {
+  if (typeof claims.client_id === 'string') return claims.client_id;
+  return typeof claims.azp === 'string' ? claims.azp : '';
+}
+
+/**
+ * Who a token is for, who acts for them, and the kind of token, from its claims (design §2.2.2):
+ * a typed `user:` subject or an `act` makes a person's token, delegated when an actor acts; `agt_`
+ * is an agent; a subject equal to the client id is a machine client; anything else is a person.
+ */
+export function principalsOf(claims: Readonly<Record<string, unknown>>): {
+  principal: Principal;
+  actor: Principal | undefined;
+  tokenKind: TokenKind;
+} {
+  const sub = String(claims.sub);
+  const act = claims.act as { sub?: unknown } | undefined;
+  const actor = typeof act?.sub === 'string' ? actorOf(act.sub) : undefined;
+  const typed = parseTyped(sub);
+  if (typed?.kind === 'user' || (actor !== undefined && typed === undefined)) {
+    return {
+      principal: typed ?? new Principal('user', sub),
+      actor,
+      tokenKind: actor === undefined ? 'person' : 'delegated',
+    };
+  }
+  if (typed !== undefined)
+    return { principal: typed, actor, tokenKind: typed.kind === 'agent' ? 'agent' : 'machine' };
+  if (sub.startsWith('agt_'))
+    return { principal: new Principal('agent', sub), actor: undefined, tokenKind: 'agent' };
+  if (sub === clientIdOf(claims))
+    return { principal: new Principal('app', sub), actor: undefined, tokenKind: 'machine' };
+  return { principal: new Principal('user', sub), actor: undefined, tokenKind: 'person' };
+}
+
 function strings(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((v): v is string => typeof v === 'string') : [];
 }
@@ -111,38 +146,11 @@ export class AccessToken {
 
   /** Builds the view of a token whose signature and claims were already verified. */
   constructor(claims: Record<string, unknown>, audience: readonly string[]) {
-    const sub = String(claims.sub);
-    const clientId =
-      typeof claims.client_id === 'string'
-        ? claims.client_id
-        : typeof claims.azp === 'string'
-          ? claims.azp
-          : '';
-    const act = claims.act as { sub?: unknown } | undefined;
-    const actSub = typeof act?.sub === 'string' ? act.sub : undefined;
-    const typed = parseTyped(sub);
-
-    if (typed?.kind === 'user' || (actSub !== undefined && typed === undefined)) {
-      this.principal = typed ?? new Principal('user', sub);
-      this.actor = actSub === undefined ? undefined : actorOf(actSub);
-      this.tokenKind = this.actor === undefined ? 'person' : 'delegated';
-    } else if (typed !== undefined) {
-      this.principal = typed;
-      this.actor = actSub === undefined ? undefined : actorOf(actSub);
-      this.tokenKind = typed.kind === 'agent' ? 'agent' : 'machine';
-    } else if (sub.startsWith('agt_')) {
-      this.principal = new Principal('agent', sub);
-      this.actor = undefined;
-      this.tokenKind = 'agent';
-    } else if (sub === clientId) {
-      this.principal = new Principal('app', sub);
-      this.actor = undefined;
-      this.tokenKind = 'machine';
-    } else {
-      this.principal = new Principal('user', sub);
-      this.actor = undefined;
-      this.tokenKind = 'person';
-    }
+    const clientId = clientIdOf(claims);
+    const { principal, actor, tokenKind } = principalsOf(claims);
+    this.principal = principal;
+    this.actor = actor;
+    this.tokenKind = tokenKind;
 
     const custom = claims.custom as { org_id?: unknown } | undefined;
     this.clientId = clientId;

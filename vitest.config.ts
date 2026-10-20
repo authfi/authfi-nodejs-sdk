@@ -40,7 +40,9 @@ export default defineConfig({
         // 90% lines, adapters at 85% lines.
         'src/verify/**': { lines: 95, branches: 95 },
         'src/core/oauth.ts': { lines: 95, branches: 90 },
+        'src/agents/**': { lines: 95, branches: 95 },
         'src/core/**': { lines: 90, branches: 85 },
+        'src/node/**': { lines: 90 },
         'src/machine/**': { lines: 90, branches: 90 },
         'src/express/**': { lines: 85 },
       },

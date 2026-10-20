@@ -12,6 +12,7 @@ import type { TokenSource } from './token-source.js';
 import { ClientCredentials, type ClientCredentialsOptions } from '../machine/client-credentials.js';
 import { checkAccess, type CheckRequest, type CheckResult } from '../verify/check.js';
 import { TokenVerifier, type VerifierOptions } from '../verify/verifier.js';
+import { AgentAuth, type AgentOptions } from '../agents/agent.js';
 
 /** Settings for one AuthFI project. Only `issuer` is required; everything else is read from discovery. */
 export interface AuthFIOptions {
@@ -202,6 +203,17 @@ export class AuthFI {
   /** A machine client's token source (OAuth client credentials). */
   clientCredentials(options: ClientCredentialsOptions): ClientCredentials {
     return new ClientCredentials(this, options);
+  }
+
+  /**
+   * An AI agent's identity at this project: its own token, acting for a person (CIBA and token
+   * exchange), the action gate and approvals.
+   *
+   * @example
+   * const agent = af.agent({ agentId: 'agt_…', key: await AgentKey.fromPem(pem, { kid: 'k1' }) });
+   */
+  agent(options: AgentOptions): AgentAuth {
+    return new AgentAuth(this, options);
   }
 
   /**

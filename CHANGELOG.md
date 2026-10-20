@@ -30,6 +30,14 @@ All notable changes to this package. It follows [Semantic Versioning](https://se
 - `refusalAnswer()` and the requirement helpers, for other frameworks.
 - `af.clientCredentials()`, a machine client's token source.
 - `af.check()`, the project's decision point.
+- **AI agents** on the same core: `af.agent({ agentId, key })` with `AgentKey` (Ed25519, P-256 or RSA
+  3072, held as a Web Crypto key), the agent's own token (a fresh five-minute assertion per
+  attempt, cached, single-flight), `forResource` with `sendTo`, `capabilities`, CIBA
+  (`requestUserToken`, `awaitUserToken`, `tokenAsUser`; `bindingMessage` required), token exchange
+  (`exchange`, no client authentication), `DelegatedToken` (`subject`, `actor`, `via`), the
+  transaction token and gate, and approvals (`requestApproval`, `approval`, `waitForApproval`).
+- `@authfi/sdk/node`: `readAgentKey` (refuses a key file others can read), `writeAgentKey` (0600,
+  never overwrites) and `agentFromEnv`.
 - `conformance/vectors.json`: tokens with the outcome every AuthFI SDK must produce, run in Node and
   in the edge runtime.
 

@@ -7,10 +7,15 @@ export default defineConfig({
   entry: {
     index: 'src/index.ts',
     express: 'src/express/index.ts',
+    node: 'src/node/index.ts',
   },
   format: ['esm', 'cjs'],
   target: 'es2022',
   platform: 'neutral',
+  // node:* stays an import; only src/node uses it.
+  esbuildOptions: (options) => {
+    options.external = [...(options.external ?? []), 'node:*'];
+  },
   // tsup sets baseUrl for its declaration build, which TypeScript 6 deprecates.
   dts: { compilerOptions: { ignoreDeprecations: '6.0' } },
   splitting: true,

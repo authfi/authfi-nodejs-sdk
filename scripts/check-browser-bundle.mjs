@@ -4,7 +4,7 @@
 
 import { build } from 'esbuild';
 
-const ENTRIES = ['src/index.ts'];
+const ENTRIES = ['src/index.ts', 'src/express/index.ts'];
 
 process.stdout.write(`check-browser-bundle: bundling ${ENTRIES.join(', ')} for platform=browser\n`);
 const result = await build({
@@ -15,6 +15,7 @@ const result = await build({
   format: 'esm',
   logLevel: 'silent',
   metafile: true,
+  outdir: 'browser-check',
 }).catch((e) => {
   process.stderr.write(`check-browser-bundle: FAILED: ${e.message}\n`);
   process.exit(1);
