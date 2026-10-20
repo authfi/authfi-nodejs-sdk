@@ -99,3 +99,10 @@ Nothing about it was released on `main`. Code written against the open pull requ
 | `APPROVAL_ARG` | `APPROVAL_ARGUMENT` |
 | `decisionOf(result)` (`held`) | `gateway.readResult(result)` (`approval_required`) |
 | a 403 tool refusal turned into a result | removed: the gateway answers a refusal as a tool result |
+
+## Signing people in
+
+0.1 had no sign-in. Apps that wrote the code flow by hand can move to `af.webApp()`; check what it
+does that hand-written flows often miss: the callback's `iss`, an encrypted pending sign-in instead of
+a signed cookie, the ID token's `nonce` and `at_hash`, single-flight refresh, and revoking the refresh
+token at sign-out.

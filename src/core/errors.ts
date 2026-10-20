@@ -34,7 +34,11 @@ export type SdkErrorCode =
   | 'token_act_chain_unsupported'
   | 'insufficient_permission'
   | 'insufficient_scope'
-  | 'gateway_token_refused';
+  | 'gateway_token_refused'
+  | 'sign_in_state_mismatch'
+  | 'sign_in_issuer_mismatch'
+  | 'sign_in_callback_invalid'
+  | 'pending_sign_in_invalid';
 
 /** Every code this SDK knows by name. */
 export type KnownCode = KernelTokenCode | OAuthErrorCode | SdkErrorCode;
@@ -237,6 +241,22 @@ export class NotSupportedError extends AuthFIError {
   }
 }
 
+/**
+ * A sign-in callback that must not be honoured: its `state` or `iss` does not match the pending
+ * sign-in (a forged or mixed-up callback), or it carries no code.
+ */
+export class SignInError extends AuthFIError {
+  override readonly name: string = 'SignInError';
+}
+
+/** A pending sign-in blob that is expired, from another client, or tampered with. */
+export class InvalidPendingSignIn extends SignInError {
+  override readonly name: string = 'InvalidPendingSignIn';
+  constructor(message: string) {
+    super('pending_sign_in_invalid', message);
+  }
+}
+
 /** The error classes by name, for {@link isAuthFIError}'s second argument. */
 export interface AuthFIErrorKinds {
   AuthFIError: AuthFIError;
@@ -255,6 +275,8 @@ export interface AuthFIErrorKinds {
   InsufficientAuthentication: InsufficientAuthentication;
   GatewayTokenRefused: GatewayTokenRefused;
   NotSupportedError: NotSupportedError;
+  SignInError: SignInError;
+  InvalidPendingSignIn: InvalidPendingSignIn;
 }
 
 const PARENTS: Readonly<Record<string, string>> = {
@@ -273,6 +295,8 @@ const PARENTS: Readonly<Record<string, string>> = {
   InsufficientAuthentication: 'InvalidToken',
   GatewayTokenRefused: 'AuthFIError',
   NotSupportedError: 'AuthFIError',
+  SignInError: 'AuthFIError',
+  InvalidPendingSignIn: 'SignInError',
 };
 
 /**

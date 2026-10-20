@@ -62,6 +62,42 @@ Build one `AuthFI` per issuer and process and share it: it owns the caches.
   `traceparent`. Both are joined to the platform's records.
 - **Deprecations:** a `Deprecation` or `Sunset` answer is logged once per URL, with its successor.
 
+## Sign people in
+
+For a server-rendered app (the pattern the OAuth guidance for browser apps recommends):
+
+```ts
+const web = af.webApp({
+  clientId: 'app_…',
+  clientSecret: new Secret(process.env.AUTHFI_CLIENT_SECRET!), // leave out for a public client
+  redirectUri: 'https://app.example.com/callback',
+  stateKey: new Secret(process.env.AUTHFI_STATE_KEY!),         // 32 random bytes, base64
+});
+
+// GET /login
+const pending = await web.startSignIn({ acrValues: ['urn:authfi:acr:mfa'] });
+setCookie('authfi_pending', await pending.dump());            // encrypted, safe in a cookie
+redirect(pending.url);
+
+// GET /callback
+const { tokens, user } = await web.finishSignIn(req.url, await web.loadPending(cookie('authfi_pending')));
+
+const fresher = await web.refresh(tokens);                     // single-flight; rotates the refresh token
+const url = await web.signOut(tokens, { postLogoutRedirectUri }); // revokes the refresh token first
+```
+
+- PKCE (S256), `state` and `nonce` on every sign-in. The callback's `iss` is required and must be
+  the issuer; `state` is compared in constant time; a code is redeemed once.
+- `pending.dump()` is encrypted (AES-256-GCM under `stateKey`, bound to the app and redirect URI,
+  ten minutes). Never put the pending values in a signed cookie: its holder can read it.
+- The ID token is verified: the algorithm the issuer lists for ID tokens, `aud`/`azp`, `nonce`,
+  `at_hash`, and the `acr` and `max_age` asked for; a weaker sign-in is `StepUpRequired`.
+- `web.session({ key, store })` is a signed-in person's token as a `TokenSource`, refreshed through
+  a `TokenStore` with `compareAndSet`, so two workers never spend the same refresh token.
+- `web.userinfo(tokens)` reads what userinfo releases.
+- Silent sign-in (`prompt=none`) and back-channel logout are not offered by the platform; asking for
+  `prompt: 'none'` raises `NotSupportedError`.
+
 ## Protect an API
 
 ```ts
@@ -222,6 +258,7 @@ Framework packages are optional peer dependencies; install the ones you use.
 
 | Example | |
 |---|---|
+| [`examples/sign-in-web`](examples/sign-in-web) | Signing people in to an Express app, with refresh and sign-out |
 | [`examples/protect-an-api`](examples/protect-an-api) | An Express API that verifies tokens and authorizes on permissions |
 | [`examples/machine-to-machine`](examples/machine-to-machine) | A job calling that API with a client-credentials token |
 | [`examples/agent-identity`](examples/agent-identity) | An agent's key, its token, and a call through the MCP gateway |

@@ -256,7 +256,7 @@ export class AgentAuth extends BaseTokenSource {
 
   /** The capabilities granted to the agent, as its token answer lists them. */
   async capabilities(
-    options: { resource?: string | undefined; signal?: AbortSignal } = {},
+    options: { resource?: string | undefined; signal?: AbortSignal | undefined } = {},
   ): Promise<ReadonlySet<string>> {
     const { response } = await this.#tokenFor(options.resource ?? this.#resource, options);
     const listed = response.extra.capabilities;
@@ -269,7 +269,7 @@ export class AgentAuth extends BaseTokenSource {
    * A token source for one resource. For a customer API (its client id), `sendTo` names the API's
    * exact origins and the token goes nowhere else; for AuthFI's own resources it may be left out.
    */
-  forResource(resource: string, options: { sendTo?: readonly string[] } = {}): TokenSource {
+  forResource(resource: string, options: { sendTo?: readonly string[] | undefined } = {}): TokenSource {
     if (typeof resource !== 'string' || resource === '') throw new ConfigurationError('resource is required');
     const sendTo = this.#sendToFor(resource, options.sendTo);
     // eslint-disable-next-line @typescript-eslint/no-this-alias
@@ -378,7 +378,12 @@ export class AgentAuth extends BaseTokenSource {
    */
   async awaitUserToken(
     request: CibaRequest,
-    options: { timeoutMs?: number; signal?: AbortSignal; resource?: string; sendTo?: readonly string[] } = {},
+    options: {
+      timeoutMs?: number | undefined;
+      signal?: AbortSignal | undefined;
+      resource?: string | undefined;
+      sendTo?: readonly string[] | undefined;
+    } = {},
   ): Promise<DelegatedToken> {
     const sendTo = this.#sendToFor(options.resource ?? this.#resource, options.sendTo);
     const clock = this.#core.clock;
@@ -441,12 +446,12 @@ export class AgentAuth extends BaseTokenSource {
   async tokenAsUser(request: {
     loginHint: string;
     bindingMessage: string;
-    scope?: readonly string[];
-    expiresInSeconds?: number;
-    timeoutMs?: number;
-    signal?: AbortSignal;
-    resource?: string;
-    sendTo?: readonly string[];
+    scope?: readonly string[] | undefined;
+    expiresInSeconds?: number | undefined;
+    timeoutMs?: number | undefined;
+    signal?: AbortSignal | undefined;
+    resource?: string | undefined;
+    sendTo?: readonly string[] | undefined;
   }): Promise<DelegatedToken> {
     const ciba = await this.requestUserToken(request);
     return this.awaitUserToken(ciba, request);
@@ -460,10 +465,10 @@ export class AgentAuth extends BaseTokenSource {
   async exchange(
     subjectToken: TokenSource | Secret,
     options: {
-      resource?: string;
-      scope?: readonly string[];
-      sendTo?: readonly string[];
-      signal?: AbortSignal;
+      resource?: string | undefined;
+      scope?: readonly string[] | undefined;
+      sendTo?: readonly string[] | undefined;
+      signal?: AbortSignal | undefined;
     } = {},
   ): Promise<DelegatedToken> {
     if (
@@ -541,7 +546,11 @@ export class AgentAuth extends BaseTokenSource {
    */
   async transactionToken(
     action: string,
-    options: { resource?: string; context?: Readonly<Record<string, unknown>>; signal?: AbortSignal } = {},
+    options: {
+      resource?: string | undefined;
+      context?: Readonly<Record<string, unknown>> | undefined;
+      signal?: AbortSignal | undefined;
+    } = {},
   ): Promise<TransactionToken> {
     if (typeof action !== 'string' || action.trim() === '')
       throw new ConfigurationError('action is required');
@@ -581,7 +590,7 @@ export class AgentAuth extends BaseTokenSource {
   /** Asks the action gate about a frozen action. It refuses when anything differs from what was frozen. */
   async authorizeAction(
     txn: TransactionToken,
-    options: { signal?: AbortSignal } = {},
+    options: { signal?: AbortSignal | undefined } = {},
   ): Promise<ActionDecision> {
     const url = `${await this.#core.apiOrigin(options.signal)}${AGENT_API}/authorize`;
     const res = await this.#core.transport.send({
@@ -649,9 +658,9 @@ export class AgentAuth extends BaseTokenSource {
   async requestApproval(
     action: string,
     options: {
-      context?: Readonly<Record<string, unknown>>;
-      expiresInSeconds?: number;
-      signal?: AbortSignal;
+      context?: Readonly<Record<string, unknown>> | undefined;
+      expiresInSeconds?: number | undefined;
+      signal?: AbortSignal | undefined;
     } = {},
   ): Promise<Approval> {
     if (typeof action !== 'string' || action.trim() === '')
@@ -686,7 +695,7 @@ export class AgentAuth extends BaseTokenSource {
    * status to agents answers 403 on that route, which is {@link NotSupportedError}
    * (`agent_approval_status`); the method works without an SDK release once the project does.
    */
-  async approval(approvalId: string, options: { signal?: AbortSignal } = {}): Promise<Approval> {
+  async approval(approvalId: string, options: { signal?: AbortSignal | undefined } = {}): Promise<Approval> {
     const { approval } = await this.#agentConfig.get({ signal: options.signal });
     const url = approval.replace('{id}', encodeURIComponent(approvalId));
     const res = await this.#core.transport.send({
@@ -712,7 +721,11 @@ export class AgentAuth extends BaseTokenSource {
   /** Polls {@link approval} until the approval is no longer pending, or the timeout passes. */
   async waitForApproval(
     approvalId: string,
-    options: { timeoutMs?: number; intervalMs?: number; signal?: AbortSignal } = {},
+    options: {
+      timeoutMs?: number | undefined;
+      intervalMs?: number | undefined;
+      signal?: AbortSignal | undefined;
+    } = {},
   ): Promise<Approval> {
     const clock = this.#core.clock;
     const deadline = clock.monotonic() + (options.timeoutMs ?? 300_000);

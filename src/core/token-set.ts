@@ -29,7 +29,7 @@ export class TokenSet {
     refreshToken?: Secret | undefined;
     idToken?: Secret | undefined;
     expiresAt: Date;
-    scope?: readonly string[];
+    scope?: readonly string[] | undefined;
   }) {
     this.accessToken = init.accessToken;
     this.refreshToken = init.refreshToken;
