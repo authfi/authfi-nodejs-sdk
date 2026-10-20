@@ -59,13 +59,13 @@ app.get('/me', async (req, res) => {
     res.redirect('/login');
     return;
   }
-  // The person's token, refreshed through the store when it nears expiry.
-  const session = web.session({ key: sid, store });
   const tokens = await store.load(sid);
   if (tokens === undefined) {
     res.redirect('/login');
     return;
   }
+  // The person's token, refreshed through the store when it nears expiry.
+  const session = await web.session(tokens, { key: sid, store });
   await session.token();
   res.json(await web.userinfo((await store.load(sid)) ?? tokens));
 });

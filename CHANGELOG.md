@@ -30,7 +30,8 @@ All notable changes to this package. It follows [Semantic Versioning](https://se
   stateKey })` with `startSignIn` (PKCE S256, `state`, `nonce`), an encrypted `PendingSignIn`
   (`dump`, `loadPending`), `finishSignIn` (`iss` required, constant-time `state`, the code redeemed
   once, the ID token verified), `refresh` (single-flight), `userinfo`, `signOut` (revokes the refresh
-  token, then the end-session URL), `session({ key, store })`, and `StepUpRequired` for a weaker
+  token, or the access token when there is none, then the end-session URL), `session(tokens, { key,
+  store })`, and `StepUpRequired` for a weaker
   sign-in. `InvalidCallback` (`callback_*`), `InvalidIdToken` (`id_token_*`) and `InvalidPendingSignIn`
   (`pending_sign_in_malformed`, `_tampered`, `_expired`), the same classes and codes as the Python SDK.
 - **A strict verifier**, `af.verifier({ audience, expectedTenantId })`: `typ at+jwt`, the algorithm

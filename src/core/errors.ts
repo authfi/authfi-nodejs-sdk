@@ -284,7 +284,11 @@ export class InvalidCallback extends AuthFIError {
   override readonly name: string = 'InvalidCallback';
   constructor(
     code:
-      'callback_iss_missing' | 'callback_iss_mismatch' | 'callback_state_mismatch' | 'callback_code_missing',
+      | 'callback_iss_missing'
+      | 'callback_iss_mismatch'
+      | 'callback_state_mismatch'
+      | 'callback_code_missing'
+      | 'callback_parameter_repeated',
     message: string,
   ) {
     super(code, message, { status: 400 });

@@ -261,6 +261,43 @@ describe('finishing a sign-in', () => {
   });
 });
 
+describe('a callback that repeats a parameter', () => {
+  it.each([
+    'state=other',
+    'iss=https%3A%2F%2Fevil.example',
+    'code=another',
+    'error=a&error=b',
+    'error_description=x&error_description=y',
+  ])('is refused, not read as its first or last value: %s', async (extra) => {
+    const { web, idp, fake } = await setup();
+    const pending = await web.startSignIn();
+    const url = `${idp.approve(pending.url)}&${extra}`;
+    await expect(web.finishSignIn(url, pending)).rejects.toMatchObject({
+      name: 'InvalidCallback',
+      code: 'callback_parameter_repeated',
+    });
+    expect(fake.to(`${idp.issuer}/oauth/token`)).toHaveLength(0);
+  });
+
+  it('is fine for a parameter that may repeat', async () => {
+    const { web, idp } = await setup();
+    const pending = await web.startSignIn();
+    const { user } = await web.finishSignIn(`${idp.approve(pending.url)}&utm=1&utm=2`, pending);
+    expect(user.sub).toBe('usr_ada');
+  });
+
+  it('is refused whether the callback is a URL, a URLSearchParams or a string', async () => {
+    const { web, idp } = await setup();
+    const pending = await web.startSignIn();
+    const url = new URL(`${idp.approve(pending.url)}&state=other`);
+    for (const given of [url, url.searchParams, url.search]) {
+      await expect(web.finishSignIn(given, pending)).rejects.toMatchObject({
+        code: 'callback_parameter_repeated',
+      });
+    }
+  });
+});
+
 describe('after sign-in', () => {
   async function signedIn() {
     const s = await setup();
@@ -268,6 +305,42 @@ describe('after sign-in', () => {
     const { tokens } = await s.web.finishSignIn(s.idp.approve(pending.url), pending);
     return { ...s, tokens };
   }
+
+  it("one caller's abort fails that caller only: the refresh the others share still lands", async () => {
+    const { web, tokens, idp, fake } = await signedIn();
+    const a = new AbortController();
+    const first = web.refresh(tokens, { signal: a.signal });
+    const second = web.refresh(tokens);
+    a.abort(new Error('caller A gave up'));
+    await expect(first).rejects.toThrow('caller A gave up');
+    expect((await second).refreshToken?.reveal()).not.toBe(tokens.refreshToken?.reveal());
+    expect(fake.to(`${idp.issuer}/oauth/token`).filter((r) => r.body.includes('refresh_token'))).toHaveLength(
+      1,
+    );
+  });
+
+  it('verifies the ID token a refresh answers, and keeps it only for the same person', async () => {
+    const { web, tokens, idp } = await signedIn();
+    idp.refreshIdTokenClaims = {};
+    const refreshed = await web.refresh(tokens);
+    expect(refreshed.idToken?.reveal()).not.toBe(tokens.idToken?.reveal());
+    const next = await signedIn();
+    next.idp.refreshIdTokenClaims = { sub: 'usr_someone_else' };
+    await expect(next.web.refresh(next.tokens)).rejects.toMatchObject({
+      name: 'InvalidIdToken',
+      code: 'id_token_subject_changed',
+    });
+    const other = await signedIn();
+    other.idp.refreshIdTokenClaims = { aud: 'app_other' };
+    await expect(other.web.refresh(other.tokens)).rejects.toMatchObject({
+      code: 'id_token_audience_mismatch',
+    });
+    const unsigned = await signedIn();
+    unsigned.idp.refreshIdTokenClaims = { iss: 'https://evil.authfi.io' };
+    await expect(unsigned.web.refresh(unsigned.tokens)).rejects.toMatchObject({
+      code: 'id_token_issuer_mismatch',
+    });
+  });
 
   it('refreshes once for concurrent callers, rotating the refresh token', async () => {
     const { web, tokens, idp, fake } = await signedIn();
@@ -296,26 +369,37 @@ describe('after sign-in', () => {
     });
     const store = new MemoryTokenStore();
     await store.compareAndSet('sid-1', undefined, tokens);
-    const fresh = af
+    const fresh = await af
       .webApp({
         clientId: CLIENT_ID,
         clientSecret: new Secret(CLIENT_SECRET),
         redirectUri: REDIRECT,
         stateKey: STATE_KEY,
       })
-      .session({ key: 'sid-1', store });
+      .session(tokens, { key: 'sid-1', store });
     expect(await fresh.token()).toBe(tokens.accessToken.reveal());
-    const w1 = later.session({ key: 'sid-1', store });
-    const w2 = later.session({ key: 'sid-1', store });
+    const w1 = await later.session(tokens, { key: 'sid-1', store });
+    const w2 = await later.session(tokens, { key: 'sid-1', store });
     const [t1, t2] = await Promise.all([w1.token(), w2.token()]);
     expect(t1).toBe(t2);
     expect(t1).not.toBe(tokens.accessToken.reveal());
     expect([...idp.families.values()].every((f) => !f.revoked)).toBe(true);
-    await expect(later.session({ key: 'nope', store }).token()).rejects.toThrow('the person must sign in again');
-    expect(() => web.session({ key: '', store })).toThrow('key is required');
-    const toApi = web.session({ key: 'sid-1', store, sendTo: ['https://api.example.com'] });
+    const gone = await later.session(tokens, { key: 'nope', store });
+    await store.delete('nope'); // the session was cleared
+    await expect(gone.token()).rejects.toThrow('the person must sign in again');
+    await expect(web.session(tokens, { key: '', store })).rejects.toThrow('key is required');
+    const toApi = await web.session(tokens, { key: 'sid-1', store, sendTo: ['https://api.example.com'] });
     expect(toApi.sendTo).toEqual(['https://api.example.com']);
     await expect(fresh.headers('GET', 'https://api.example.com')).rejects.toThrow('refusing to send');
+  });
+
+  it('refuses a userinfo answer about another person than the one who signed in', async () => {
+    const { web, tokens, idp, fake } = await signedIn();
+    fake.on('GET', `${idp.issuer}/oauth/userinfo`, () => json({ sub: 'usr_someone_else', email: 'x@y.z' }));
+    await expect(web.userinfo(tokens)).rejects.toMatchObject({
+      name: 'InvalidIdToken',
+      code: 'userinfo_subject_mismatch',
+    });
   });
 
   it('reads userinfo', async () => {

@@ -25,7 +25,10 @@ export interface IdTokenClaims {
 /** What the ID token is checked against. */
 export interface IdTokenExpectations {
   readonly clientId: string;
-  readonly nonce: string;
+  /** The sign-in's nonce; absent for a refreshed ID token, which carries none to check. */
+  readonly nonce: string | undefined;
+  /** The `sub` the token must name, for an ID token that must be about the person already signed in. */
+  readonly subject?: string | undefined;
   readonly accessToken: Secret;
   readonly acrValues: readonly string[];
   readonly maxAge: number | undefined;
@@ -42,7 +45,8 @@ function strings(value: unknown): string[] {
  * and codes: the algorithm is one discovery lists for ID tokens and the key's own, `typ` is `JWT`,
  * `iss` is the issuer, `aud` names the app and `azp`, whenever present, is the app, `exp` and `iat`
  * are present, the `nonce` matches in constant time, `at_hash` matches the access token, and the
- * sign-in meets the `acr` and `max_age` asked for (else {@link StepUpRequired}). A refusal is an
+ * sign-in meets the `acr` and `max_age` asked for (else {@link StepUpRequired}). A refreshed ID token
+ * has no nonce to check (`nonce` is absent) and must name the same person (`subject`). A refusal is an
  * {@link InvalidIdToken} with an `id_token_*` code; it is never an access-token verifier.
  */
 export async function verifyIdToken(
@@ -105,7 +109,13 @@ export async function verifyIdToken(
   if (payload.exp + leeway <= now) throw new InvalidIdToken('id_token_expired', 'the ID token has expired');
   if (payload.iat - leeway > now)
     throw new InvalidIdToken('id_token_claims_invalid', 'the ID token was issued in the future');
-  if (typeof payload.nonce !== 'string' || !sameString(payload.nonce, expect.nonce)) {
+  if (expect.subject !== undefined && payload.sub !== expect.subject) {
+    throw new InvalidIdToken('id_token_subject_changed', 'the ID token names another person');
+  }
+  if (
+    expect.nonce !== undefined &&
+    (typeof payload.nonce !== 'string' || !sameString(payload.nonce, expect.nonce))
+  ) {
     throw new InvalidIdToken('id_token_nonce_mismatch', "the ID token's nonce is not this sign-in's");
   }
   if (typeof payload.at_hash === 'string') {

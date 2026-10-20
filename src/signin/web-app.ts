@@ -24,6 +24,7 @@ import { BaseTokenSource, checkSendTo, type TokenOptions, type TokenSource } fro
 import { TokenSet, type TokenStore } from '../core/token-set.js';
 import { contextOf, jsonOf } from '../core/transport.js';
 import { checkOrigin } from '../core/urls.js';
+import { decodeUnverified } from '../verify/verifier.js';
 import { verifyIdToken, type IdTokenClaims } from './id-token.js';
 import { importStateKey, PendingSignIn, PENDING_LIFETIME_MS, sameString } from './pending.js';
 
@@ -88,6 +89,31 @@ function callbackParams(callback: SignInCallback): URLSearchParams {
   const out = new URLSearchParams();
   for (const [k, v] of Object.entries(callback)) if (v !== undefined) out.set(k, v);
   return out;
+}
+
+/** The `sub` of the person's ID token, which was verified when the set was made; undefined without one. */
+function subjectOf(tokens: TokenSet): string | undefined {
+  if (tokens.idToken === undefined) return undefined;
+  try {
+    const { sub } = decodeUnverified(tokens.idToken.reveal()).payload;
+    return typeof sub === 'string' ? sub : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Parameters that appear at most once (RFC 6749 §3.1, RFC 9207 §2.4): a repeat is refused, never read. */
+const SINGLE = ['iss', 'state', 'code', 'error', 'error_description'] as const;
+
+function refuseRepeats(params: URLSearchParams): void {
+  for (const name of SINGLE) {
+    if (params.getAll(name).length > 1) {
+      throw new InvalidCallback(
+        'callback_parameter_repeated',
+        `the callback carries ${name} more than once; which one is meant is unknown`,
+      );
+    }
+  }
 }
 
 /**
@@ -218,6 +244,7 @@ export class WebApp {
     options: { signal?: AbortSignal | undefined } = {},
   ): Promise<SignedIn> {
     const params = callbackParams(callback);
+    refuseRepeats(params);
     const remembered = pending.remembered;
     if (remembered.expiresAt <= this.#core.clock.now())
       throw new InvalidPendingSignIn('pending_sign_in_expired', 'the sign-in expired: start again');
@@ -306,24 +333,40 @@ export class WebApp {
     const refresh = tokens.refreshToken;
     if (refresh === undefined)
       return Promise.reject(new ConfigurationError('this token set has no refresh token'));
-    return this.#refreshes.run(refresh.reveal(), async () => {
-      const meta = await this.#core.metadata({ signal: options.signal });
-      const res = await this.#token(
-        meta.token_endpoint,
-        { grant_type: GRANT.refreshToken, refresh_token: refresh.reveal() },
-        options.signal,
-      );
-      return new TokenSet({
-        accessToken: res.accessToken,
-        refreshToken: res.refreshToken ?? refresh,
-        idToken: res.idToken ?? tokens.idToken,
-        expiresAt: new Date(res.expiresAt),
-        scope: res.scope.length > 0 ? res.scope : tokens.scope,
-      });
-    });
+    // The refresh belongs to no one caller: it runs with no caller's signal, because the request
+    // that leaves rotates the refresh token, and an abort must not throw the new one away.
+    return this.#refreshes.run(
+      refresh.reveal(),
+      async () => {
+        const meta = await this.#core.metadata();
+        const res = await this.#token(meta.token_endpoint, {
+          grant_type: GRANT.refreshToken,
+          refresh_token: refresh.reveal(),
+        });
+        if (res.idToken !== undefined) {
+          // A refreshed ID token replaces the verified one, so it is verified, and names the same person.
+          await verifyIdToken(this.#core, res.idToken, {
+            clientId: this.clientId,
+            nonce: undefined,
+            subject: subjectOf(tokens),
+            accessToken: res.accessToken,
+            acrValues: [],
+            maxAge: undefined,
+          });
+        }
+        return new TokenSet({
+          accessToken: res.accessToken,
+          refreshToken: res.refreshToken ?? refresh,
+          idToken: res.idToken ?? tokens.idToken,
+          expiresAt: new Date(res.expiresAt),
+          scope: res.scope.length > 0 ? res.scope : tokens.scope,
+        });
+      },
+      options.signal,
+    );
   }
 
-  /** What the userinfo endpoint releases about the person. */
+  /** What the userinfo endpoint releases about the person, who must be the person who signed in. */
   async userinfo(tokens: TokenSet, options: { signal?: AbortSignal | undefined } = {}): Promise<UserInfo> {
     const meta = await this.#core.metadata({ signal: options.signal });
     if (meta.userinfo_endpoint === undefined)
@@ -342,6 +385,11 @@ export class WebApp {
         ...contextOf(res),
         retryable: false,
       });
+    const signedIn = subjectOf(tokens);
+    if (signedIn !== undefined && body.sub !== signedIn) {
+      // OpenID Connect Core 5.3.2: the userinfo sub must match the ID token's.
+      throw new InvalidIdToken('userinfo_subject_mismatch', 'the userinfo answer names another person');
+    }
     return {
       sub: body.sub,
       email: typeof body.email === 'string' ? body.email : undefined,
@@ -365,27 +413,31 @@ export class WebApp {
     } = {},
   ): Promise<string> {
     const meta = await this.#core.metadata({ signal: options.signal });
-    if (tokens.refreshToken !== undefined) {
-      if (meta.revocation_endpoint === undefined)
-        throw new NotSupportedError('revocation', 'This AuthFI project offers no revocation endpoint');
-      const endpoint = meta.revocation_endpoint;
-      const refresh = tokens.refreshToken;
-      const res = await this.#core.transport.send({
-        method: 'POST',
-        url: endpoint,
-        retry: 'safe',
-        signal: options.signal,
-        prepare: async () => {
-          const form = new URLSearchParams({ token: refresh.reveal(), token_type_hint: 'refresh_token' });
-          const headers: Record<string, string> = { 'content-type': 'application/x-www-form-urlencoded' };
-          await applyClientAuth(this.#auth, form, headers, endpoint);
-          return { headers, body: form.toString() };
-        },
-      });
-      if (res.status !== 200) throw oauthErrorOf(res);
-    }
+    // Both endpoints are checked before anything is revoked, so a project that cannot end the session
+    // never leaves a person with revoked tokens and a session still open.
     if (meta.end_session_endpoint === undefined)
       throw new NotSupportedError('end_session', 'This AuthFI project offers no end-session endpoint');
+    // The refresh token is revoked first; a person with none has the access token revoked instead.
+    const revoked =
+      tokens.refreshToken === undefined
+        ? { token: tokens.accessToken, hint: 'access_token' }
+        : { token: tokens.refreshToken, hint: 'refresh_token' };
+    if (meta.revocation_endpoint === undefined)
+      throw new NotSupportedError('revocation', 'This AuthFI project offers no revocation endpoint');
+    const endpoint = meta.revocation_endpoint;
+    const res = await this.#core.transport.send({
+      method: 'POST',
+      url: endpoint,
+      retry: 'safe',
+      signal: options.signal,
+      prepare: async () => {
+        const form = new URLSearchParams({ token: revoked.token.reveal(), token_type_hint: revoked.hint });
+        const headers: Record<string, string> = { 'content-type': 'application/x-www-form-urlencoded' };
+        await applyClientAuth(this.#auth, form, headers, endpoint);
+        return { headers, body: form.toString() };
+      },
+    });
+    if (res.status !== 200) throw oauthErrorOf(res);
     const url = new URL(meta.end_session_endpoint);
     url.searchParams.set('client_id', this.clientId);
     if (options.postLogoutRedirectUri !== undefined)
@@ -395,14 +447,18 @@ export class WebApp {
   }
 
   /**
-   * A signed-in person's token as a {@link TokenSource}, kept in a {@link TokenStore} under `key` (a
-   * session id) and refreshed before expiry. A refresh writes with `compareAndSet`, so two workers
-   * never both spend the same refresh token. `sendTo` names your own API's origins; without it the
-   * token goes only to AuthFI.
+   * A signed-in person's token as a {@link TokenSource}: `tokens` are stored in `store` under `key` (a
+   * session id; one already stored there is kept) and refreshed before expiry. A refresh writes with
+   * `compareAndSet`, so two workers never both spend the same refresh token. `sendTo` names your own
+   * API's origins; without it the token goes only to AuthFI.
    */
-  session(options: { key: string; store: TokenStore; sendTo?: readonly string[] | undefined }): TokenSource {
+  async session(
+    tokens: TokenSet,
+    options: { key: string; store: TokenStore; sendTo?: readonly string[] | undefined },
+  ): Promise<TokenSource> {
     if (typeof options.key !== 'string' || options.key === '')
       throw new ConfigurationError('key is required: the session the tokens belong to');
+    await options.store.compareAndSet(options.key, undefined, tokens);
     const sendTo =
       options.sendTo === undefined || options.sendTo.length === 0 ? undefined : checkSendTo(options.sendTo);
     // eslint-disable-next-line @typescript-eslint/no-this-alias

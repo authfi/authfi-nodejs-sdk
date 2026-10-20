@@ -215,7 +215,7 @@ describe('what a project may not offer', () => {
     });
     const tokens = new TokenSet({ accessToken: new Secret(await idp.t.sign()), expiresAt: new Date() });
     await expect(web.userinfo(tokens)).rejects.toMatchObject({ feature: 'userinfo' });
-    idp.t.metadataExtra = { revocation_endpoint: undefined, end_session_endpoint: undefined };
+    idp.t.metadataExtra = { revocation_endpoint: undefined };
     const fresh = new AuthFI({ issuer: idp.issuer, fetch: idp.t.fake.fetch }).webApp({
       clientId: CLIENT_ID,
       redirectUri: REDIRECT,
@@ -230,10 +230,18 @@ describe('what a project may not offer', () => {
         }),
       ),
     ).rejects.toMatchObject({ feature: 'revocation' });
-    await expect(fresh.signOut(tokens)).rejects.toMatchObject({ feature: 'end_session' });
+    await expect(fresh.signOut(tokens)).rejects.toMatchObject({ feature: 'revocation' }); // no refresh token: the access token
+    idp.t.metadataExtra = { end_session_endpoint: undefined };
+    const other = new AuthFI({ issuer: idp.issuer, fetch: idp.t.fake.fetch }).webApp({
+      clientId: CLIENT_ID,
+      redirectUri: REDIRECT,
+      stateKey: STATE_KEY,
+    });
+    await expect(other.signOut(tokens)).rejects.toMatchObject({ feature: 'end_session' });
+    expect(idp.revoked).toEqual([]); // nothing was revoked by a sign-out that could not finish
   });
 
-  it('userinfo refusals and a sign-out with nothing to revoke', async () => {
+  it('userinfo refusals, and a sign-out of a person with no refresh token', async () => {
     const { web, idp, fake } = await setup();
     const tokens = new TokenSet({ accessToken: new Secret('opaque'), expiresAt: new Date() });
     await expect(web.userinfo(tokens)).rejects.toMatchObject({ code: 'invalid_token' });
@@ -247,7 +255,8 @@ describe('what a project may not offer', () => {
       name: undefined,
     });
     expect(await web.signOut(tokens)).toBe(`${idp.issuer}/oauth/logout?client_id=${CLIENT_ID}`);
-    expect(idp.revoked).toEqual([]);
+    expect(idp.revoked).toEqual(['opaque']); // the access token, under its own hint
+    expect(idp.revokeHints).toEqual(['access_token']);
   });
 });
 
@@ -272,7 +281,7 @@ describe('a session when another worker refreshes first', () => {
       compareAndSet: async () => false,
       delete: async () => undefined,
     };
-    expect(await web.session({ key: 'sid', store }).token()).toBe('winner-token');
+    expect(await (await web.session(stale, { key: 'sid', store })).token()).toBe('winner-token');
     const again = await web.startSignIn();
     const second = (await web.finishSignIn(idp.approve(again.url), again)).tokens;
     const stale2 = new TokenSet({
@@ -282,7 +291,9 @@ describe('a session when another worker refreshes first', () => {
     });
     let calls = 0;
     const gone = { ...store, load: async () => (++calls === 1 ? stale2 : undefined) };
-    await expect(web.session({ key: 'sid', store: gone }).token()).rejects.toThrow('signed out');
+    await expect((await web.session(stale2, { key: 'sid', store: gone })).token()).rejects.toThrow(
+      'signed out',
+    );
     expect(new MemoryTokenStore()).toBeInstanceOf(MemoryTokenStore);
   });
 });

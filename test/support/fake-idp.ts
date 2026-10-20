@@ -23,10 +23,13 @@ export class FakeIdP {
   readonly codes = new Map<string, CodeGrant>();
   readonly families = new Map<string, { current: string; revoked: boolean }>();
   readonly revoked: string[] = [];
+  readonly revokeHints: string[] = [];
   acr = 'urn:authfi:acr:mfa';
   authTime = Math.floor(Date.now() / 1000) - 30;
   omitIdToken = false;
   idTokenClaims: Record<string, unknown> = {};
+  /** When set, a refresh answers an ID token with these claims over the defaults. */
+  refreshIdTokenClaims: Record<string, unknown> | undefined;
 
   private constructor(readonly t: TestIssuer) {}
 
@@ -130,11 +133,26 @@ export class FakeIdP {
         if (family !== undefined) {
           family.current = base64url(randomBytes(24));
           const access = await this.t.sign({ sub: 'usr_ada', client_id: CLIENT_ID, aud: [CLIENT_ID] });
+          const id =
+            this.refreshIdTokenClaims === undefined
+              ? undefined
+              : await this.t.sign(
+                  {
+                    sub: 'usr_ada',
+                    aud: CLIENT_ID,
+                    at_hash: base64url(createHash('sha256').update(access).digest().subarray(0, 16)),
+                    tenant_id: undefined,
+                    client_id: undefined,
+                    ...this.refreshIdTokenClaims,
+                  },
+                  { header: { typ: 'JWT' } },
+                );
           return json({
             access_token: access,
             token_type: 'Bearer',
             expires_in: 900,
             refresh_token: family.current,
+            ...(id === undefined ? {} : { id_token: id }),
             scope: 'openid profile email',
           });
         }
@@ -149,6 +167,7 @@ export class FakeIdP {
       if (!this.#clientOk(r, form)) return json({ error: 'invalid_client' }, 401);
       const token = form.get('token') ?? '';
       this.revoked.push(token);
+      this.revokeHints.push(form.get('token_type_hint') ?? '');
       for (const f of this.families.values()) if (f.current === token) f.revoked = true;
       return new Response(null, { status: 200 });
     });

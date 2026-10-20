@@ -87,14 +87,18 @@ const url = await web.signOut(tokens, { postLogoutRedirectUri }); // revokes the
 ```
 
 - PKCE (S256), `state` and `nonce` on every sign-in. The callback's `iss` is required and must be
-  the issuer; `state` is compared in constant time; a code is redeemed once.
+  the issuer exactly; `state` is compared in constant time; a code is redeemed once. A callback that
+  repeats `iss`, `state`, `code` or `error` is refused (`callback_parameter_repeated`), not read.
 - `pending.dump()` is encrypted (AES-256-GCM under `stateKey`, bound to the app and redirect URI,
   ten minutes). Never put the pending values in a signed cookie: its holder can read it.
 - The ID token is verified: the algorithm the issuer lists for ID tokens, `aud`/`azp`, `nonce`,
   `at_hash`, and the `acr` and `max_age` asked for; a weaker sign-in is `StepUpRequired`.
-- `web.session({ key, store })` is a signed-in person's token as a `TokenSource`, refreshed through
-  a `TokenStore` with `compareAndSet`, so two workers never spend the same refresh token.
-- `web.userinfo(tokens)` reads what userinfo releases.
+- `await web.session(tokens, { key, store })` stores the tokens and returns a signed-in person's
+  token as a `TokenSource`, refreshed through the `TokenStore` with `compareAndSet`, so two workers
+  never spend the same refresh token.
+- `web.userinfo(tokens)` reads what userinfo releases, and refuses an answer about another person
+  than the one who signed in. A refresh that answers an ID token is verified too, and must name the
+  same person (`id_token_subject_changed`).
 - Silent sign-in (`prompt=none`) and back-channel logout are not offered by the platform; asking for
   `prompt: 'none'` raises `NotSupportedError`.
 
