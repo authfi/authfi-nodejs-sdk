@@ -157,7 +157,8 @@ What each piece does:
   message. The AI SDK checks `toolApproval` again when the run resumes; the adapter answers from
   the outcome it remembered for that tool call, so the resume asks AuthFI for no second approval,
   and an approval AuthFI has not given is answered as a denial. An approved call runs once, when
-  AuthFI releases it, and the resumed run returns that result.
+  AuthFI releases it, and the resumed run returns that result. Append only the message
+  `awaitApprovals()` returns: a response of your own cannot change what AuthFI decided.
 - **Resuming in another process.** Give every process the same `approvalSecret` (32 bytes or
   more). The adapter reads the approval back from the request's `reason`.
 - **Telemetry.** `telemetry(integration)` turns off the recording of prompts, outputs, tool
