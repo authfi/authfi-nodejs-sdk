@@ -4,16 +4,31 @@
   "description": "AuthFI Node.js SDK — JWT validation, RBAC middleware, permission auto-sync, cloud credentials",
   "main": "index.js",
   "types": "index.d.ts",
+  "exports": {
+    ".": { "types": "./index.d.ts", "default": "./index.js" },
+    "./vercel-ai": { "types": "./vercel-ai.d.ts", "default": "./vercel-ai.js" },
+    "./package.json": "./package.json"
+  },
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
     "url": "https://github.com/authfi/authfi-nodejs-sdk"
   },
-  "keywords": ["auth", "authfi", "jwt", "rbac", "permissions", "middleware", "sso", "cloud-iam"],
+  "keywords": ["auth", "authfi", "jwt", "rbac", "permissions", "middleware", "sso", "cloud-iam", "ai-agents", "vercel-ai"],
   "engines": {
     "node": ">=18"
   },
   "scripts": {
     "test": "node --test"
+  },
+  "devDependencies": {
+    "@ai-sdk/anthropic": "4.0.84",
+    "@ai-sdk/mcp": "2.0.80",
+    "@ai-sdk/otel": "1.0.146",
+    "@opentelemetry/api": "1.9.1",
+    "@opentelemetry/context-async-hooks": "2.12.0",
+    "@opentelemetry/core": "2.12.0",
+    "@opentelemetry/sdk-trace-base": "2.12.0",
+    "ai": "7.0.146"
   }
 }

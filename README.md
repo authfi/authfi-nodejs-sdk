@@ -42,10 +42,14 @@ auth.start().then(() => app.listen(3000));
 - `auth.authenticate()` — JWT only, no permission check
 - Agent identity: an agent's own key (EdDSA, ES256 or PS256), `private_key_jwt` client
   credentials, CIBA, RFC 8693 token exchange, tokens renewed before they expire
+- Vercel AI SDK adapter (`@authfi/sdk/vercel-ai`): refreshing credentials for the model and MCP
+  clients, provider-legal tool names, refusals as tool results, approvals through `toolApproval`,
+  and telemetry that records no content by default
 - Permission auto-sync on `start()`
 - Cloud credentials (GCP/AWS/Azure/OCI)
 - TypeScript definitions included
-- Zero dependencies — uses Node.js crypto
+- Zero dependencies — uses Node.js crypto (the Vercel AI SDK adapter works on the objects `ai`
+  creates and does not import it)
 
 ## Verifying tokens
 
@@ -94,22 +98,80 @@ A refusal is an `AgentAuthError` whose `error` is the OAuth code (`invalid_clien
 ### Passing the token to a framework
 
 `agent.fetch` sets `Authorization: Bearer <current token>` on every request, so a long run never
-sends an expired token, and it refuses to send the token anywhere but the project's origin. With
-the Vercel AI SDK:
+sends an expired token, and it refuses to send the token anywhere but the project's origin. Hand it
+to a client as its `fetch`, never the token as a header set when the client is built: tracers
+record a client's construction arguments. For the Vercel AI SDK, use the adapter below.
+
+## Vercel AI SDK
+
+`@authfi/sdk/vercel-ai` connects an agent built on the Vercel AI SDK (`ai` 7) to the project's AI
+gateway and MCP gateway:
 
 ```js
-const { createAnthropic } = require('@ai-sdk/anthropic');
-const { createMCPClient } = require('@ai-sdk/mcp');
+import { generateText, stepCountIs, registerTelemetry } from 'ai';
+import { createAnthropic } from '@ai-sdk/anthropic';
+import { createMCPClient } from '@ai-sdk/mcp';
+import { OpenTelemetry } from '@ai-sdk/otel';
+import { AgentAuth } from '@authfi/sdk';
+import { createVercelAI } from '@authfi/sdk/vercel-ai';
 
-const anthropic = createAnthropic({
-  baseURL: `${agent.issuer}/mcp/v1`,
-  authToken: 'set-per-request',                     // selects Bearer; agent.fetch replaces the value
-  fetch: agent.fetch,
+const agent = AgentAuth.fromEnv();
+const authfi = createVercelAI({ agent });
+
+const anthropic = createAnthropic(authfi.anthropic());            // the model route, Bearer per request
+const mcp = await createMCPClient({ transport: authfi.mcpTransport() });
+const tools = authfi.tools(await mcp.tools());                    // names every provider accepts
+registerTelemetry(authfi.telemetry(new OpenTelemetry({ enrichSpan: authfi.enrichSpan })));
+
+const messages = [{ role: 'user', content: 'Summarise the wiki of pallets/itsdangerous.' }];
+let result = await generateText({
+  model: anthropic('claude-haiku-5-5'), tools, messages, stopWhen: stepCountIs(5), ...authfi.approvals(),
 });
-const mcp = await createMCPClient({
-  transport: { type: 'http', url: `${agent.issuer}/mcp`, fetch: agent.fetch },
-});
+while (authfi.pendingApprovals(result).length) {
+  // A person approves or denies in AuthFI; the responses are built from that decision only.
+  messages.push(...result.response.messages, await authfi.awaitApprovals(result));
+  result = await generateText({
+    model: anthropic('claude-haiku-5-5'), tools, messages, stopWhen: stepCountIs(5), ...authfi.approvals(),
+  });
+}
 ```
+
+What each piece does:
+
+- **Credentials.** `anthropic()` and `mcpTransport()` give the provider and the MCP client
+  `authfi.fetch`, which sends the agent's current token as `Authorization: Bearer` on every request.
+  To act for a person, pass the `DelegatedToken` as `credentials`:
+  `createVercelAI({ agent, credentials: delegated })`.
+- **Tool names.** `tools()` keys each MCP tool by a name that matches `^[A-Za-z0-9_-]{1,64}$`
+  (`deepwiki.read_wiki_structure` becomes `deepwiki__read_wiki_structure`), while the tool still
+  calls its MCP name. `authfi.mcpName(key)` gives the MCP name back.
+- **Refusals.** A call AuthFI refuses reaches the model as the tool's result, naming the reason
+  (`no_match`, outside what the person approved, approval denied), and the run goes on. A token the
+  gateway no longer accepts (a revoked agent) still ends the run.
+- **Approvals.** `approvals()` returns the `toolApproval` for every AuthFI tool and the
+  `experimental_toolApprovalSecret` that signs approval requests. On a tool call, AuthFI decides at
+  the gateway, so the adapter makes the governed call: an allowed call's result is what `execute`
+  returns, and a held call becomes a `tool-approval-request` whose `reason` names the AuthFI
+  approval. `awaitApprovals()` waits for the person's decision (every `pollInterval`, up to
+  `approvalTimeout`, or until its `signal` aborts) and returns the `tool-approval-response`
+  message. The AI SDK checks `toolApproval` again when the run resumes; the adapter answers from
+  the outcome it remembered for that tool call, so the resume asks AuthFI for no second approval,
+  and an approval AuthFI has not given is answered as a denial. An approved call runs once, when
+  AuthFI releases it, and the resumed run returns that result.
+- **Resuming in another process.** Give every process the same `approvalSecret` (32 bytes or
+  more). The adapter reads the approval back from the request's `reason`.
+- **Telemetry.** `telemetry(integration)` turns off the recording of prompts, outputs, tool
+  arguments and tool results, whatever a call's `recordInputs` and `recordOutputs` say. Pass
+  `captureContent: true` to `createVercelAI` to let each call decide. `enrichSpan` adds
+  `authfi.agent_id` and `authfi.run_id` to every span. Every gateway request carries
+  `X-Request-Id: <runId>.<random>` (pass your framework's run id as `runId` to choose the prefix),
+  and the span that made the request gets `authfi.request_id`, the id the gateway recorded it
+  under. With `@opentelemetry/api` loaded, requests also carry `traceparent`, and the approval
+  check runs inside an `authfi.tool_approval` span. If the SDK cannot load `@opentelemetry/api`
+  itself, pass it as `otel`.
+
+`examples/vercel-ai/` is a complete agent that makes a model call, a granted call, a refused call,
+an approved call and a denied call, with its trace sent to a local capture server.
 
 ### Acting for a person
 
@@ -145,6 +207,7 @@ const creds = await auth.cloud.credentials(userToken, 'gcp', {
 ## Running Tests
 
 ```bash
+npm ci      # the Vercel AI SDK packages the adapter's tests run against (devDependencies, Node 22)
 npm test
 ```
 

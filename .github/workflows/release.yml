@@ -16,7 +16,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
           registry-url: 'https://registry.npmjs.org'
 
       - name: Verify package version matches tag
@@ -28,6 +28,9 @@ jobs:
             echo "::error::package version ($PACKAGE_VERSION) does not match tag ($TAG_VERSION)"
             exit 1
           fi
+
+      - name: Install the test dependencies
+        run: npm ci --no-audit --no-fund
 
       - name: Test
         run: npm test
