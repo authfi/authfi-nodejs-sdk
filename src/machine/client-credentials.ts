@@ -112,14 +112,15 @@ export class ClientCredentials extends BaseTokenSource {
     const now = this.#core.clock.now();
     const cached = this.#cached;
     if (options.force !== true && cached !== undefined && now < cached.renewAt) return cached.token.reveal();
-    const res = await this.#flight.run(0, () => this.#mint(options.signal));
+    const res = await this.#flight.run(0, () => this.#mint(), options.signal);
     const lifetime = Math.max(0, res.expiresAt - now);
     this.#cached = { token: res.accessToken, renewAt: now + (lifetime * 2) / 3, expiresAt: res.expiresAt };
     return res.accessToken.reveal();
   }
 
-  async #mint(signal?: AbortSignal): Promise<TokenResponse> {
-    const meta = await this.#core.metadata({ signal });
+  /** The shared mint belongs to no caller, so it takes no caller's signal. */
+  async #mint(): Promise<TokenResponse> {
+    const meta = await this.#core.metadata();
     return requestToken(
       this.#core.transport,
       {
@@ -131,7 +132,6 @@ export class ClientCredentials extends BaseTokenSource {
         },
         auth: this.#auth,
         retry: 'safe',
-        signal,
       },
       () => this.#core.clock.now(),
     );
