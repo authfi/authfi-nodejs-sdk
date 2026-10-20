@@ -1,0 +1,42 @@
+/**
+ * The AuthFI SDK: one core (the project's issuer, discovery, keys, one HTTP transport, typed errors
+ * and secrets) under every area: verifying tokens, machine clients, AI agents, and people signing in.
+ *
+ * @packageDocumentation
+ */
+
+export { AuthFI, type AuthFIOptions } from './core/project.js';
+export type { ServerMetadata } from './core/metadata.js';
+export { Secret } from './core/secret.js';
+export { BaseTokenSource, type TokenOptions, type TokenSource } from './core/token-source.js';
+export { MemoryTokenStore, TokenSet, type StoredTokenSet, type TokenStore } from './core/token-set.js';
+export { idempotencyKey, requestId } from './core/ids.js';
+export type { Logger, LogFields } from './core/logger.js';
+export type { Clock } from './core/clock.js';
+export type { OpenTelemetryApi } from './core/transport.js';
+export { KERNEL_CODES_REF, KERNEL_TOKEN_CODES, type KernelTokenCode } from './core/codes.js';
+export {
+  APIError,
+  AuthFIError,
+  ConfigurationError,
+  ConsentDenied,
+  ConsentExpired,
+  DiscoveryError,
+  GatewayTokenRefused,
+  InsufficientAuthentication,
+  InsufficientPermission,
+  InsufficientScope,
+  InvalidToken,
+  isAuthFIError,
+  NotSupportedError,
+  OAuthError,
+  StepUpRequired,
+  TemporarilyUnavailable,
+  TransportError,
+  type AuthFIErrorKinds,
+  type ErrorCode,
+  type ErrorContext,
+  type KnownCode,
+  type OAuthErrorCode,
+  type SdkErrorCode,
+} from './core/errors.js';
