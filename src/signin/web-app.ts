@@ -2,9 +2,11 @@ import { base64url, randomBytes, sha256, utf8 } from '../core/bytes.js';
 import { SingleFlight } from '../core/cache.js';
 import {
   ConfigurationError,
+  InvalidCallback,
+  InvalidIdToken,
+  InvalidPendingSignIn,
   NotSupportedError,
   OAuthError,
-  SignInError,
   StepUpRequired,
   TransportError,
 } from '../core/errors.js';
@@ -17,7 +19,7 @@ import {
   type TokenResponse,
 } from '../core/oauth.js';
 import { coreOf, type AuthFI, type Core } from '../core/project.js';
-import { Secret } from '../core/secret.js';
+import { isSecret, Secret } from '../core/secret.js';
 import { BaseTokenSource, checkSendTo, type TokenOptions, type TokenSource } from '../core/token-source.js';
 import { TokenSet, type TokenStore } from '../core/token-set.js';
 import { contextOf, jsonOf } from '../core/transport.js';
@@ -123,7 +125,7 @@ export class WebApp {
       throw new ConfigurationError('redirectUri must be the absolute callback URL registered for the app');
     }
     checkOrigin(redirect.origin, 'redirectUri');
-    if (options.clientSecret !== undefined && !(options.clientSecret instanceof Secret)) {
+    if (options.clientSecret !== undefined && !isSecret(options.clientSecret)) {
       throw new ConfigurationError(
         'clientSecret must be a Secret: new Secret(process.env.AUTHFI_CLIENT_SECRET)',
       );
@@ -218,18 +220,18 @@ export class WebApp {
     const params = callbackParams(callback);
     const remembered = pending.remembered;
     if (remembered.expiresAt <= this.#core.clock.now())
-      throw new SignInError('sign_in_callback_invalid', 'the sign-in expired: start again');
+      throw new InvalidPendingSignIn('pending_sign_in_expired', 'the sign-in expired: start again');
     const iss = params.get('iss');
-    if (iss === null)
-      throw new SignInError(
-        'sign_in_issuer_mismatch',
-        'the callback carries no iss: it may come from another authorization server',
+    if (iss === null || iss === '')
+      throw new InvalidCallback(
+        'callback_iss_missing',
+        'the callback carries no iss (RFC 9207): it may come from another authorization server',
       );
     if (!sameString(iss, this.#core.issuer))
-      throw new SignInError('sign_in_issuer_mismatch', 'the callback comes from another issuer');
+      throw new InvalidCallback('callback_iss_mismatch', 'the callback comes from another issuer');
     const state = params.get('state');
     if (state === null || !sameString(state, remembered.state)) {
-      throw new SignInError('sign_in_state_mismatch', "the callback's state is not this sign-in's");
+      throw new InvalidCallback('callback_state_mismatch', "the callback's state is not this sign-in's");
     }
     const error = params.get('error');
     if (error !== null) {
@@ -244,7 +246,7 @@ export class WebApp {
     }
     const code = params.get('code');
     if (code === null || code === '')
-      throw new SignInError('sign_in_callback_invalid', 'the callback carries no code');
+      throw new InvalidCallback('callback_code_missing', 'the callback carries no code');
 
     const meta = await this.#core.metadata({ signal: options.signal });
     const res = await this.#token(
@@ -258,8 +260,8 @@ export class WebApp {
       options.signal,
     );
     if (res.idToken === undefined)
-      throw new SignInError(
-        'sign_in_callback_invalid',
+      throw new InvalidIdToken(
+        'id_token_missing',
         'the token endpoint answered no ID token: ask for the openid scope',
       );
     const user = await verifyIdToken(this.#core, res.idToken, {
@@ -420,9 +422,8 @@ export class WebApp {
       async token(opts: TokenOptions = {}): Promise<string> {
         const current = await options.store.load(options.key);
         if (current === undefined)
-          throw new SignInError(
-            'sign_in_callback_invalid',
-            'no tokens are stored for this session: sign the person in',
+          throw new ConfigurationError(
+            'no tokens are stored for this session: the person must sign in again',
           );
         if (opts.force !== true && !current.expiresWithin(REFRESH_SKEW_MS, app.#core.clock.now()))
           return current.accessToken.reveal();
@@ -431,7 +432,9 @@ export class WebApp {
         // Another worker refreshed first: use what it stored.
         const stored = await options.store.load(options.key);
         if (stored === undefined)
-          throw new SignInError('sign_in_callback_invalid', 'the session was signed out while refreshing');
+          throw new ConfigurationError(
+            'the session was signed out while refreshing: the person must sign in again',
+          );
         return stored.accessToken.reveal();
       }
       override toString(): string {

@@ -1,6 +1,6 @@
 import { base64url, constantTimeEqual, fromBase64url, fromUtf8, randomBytes, utf8 } from '../core/bytes.js';
 import { ConfigurationError, InvalidPendingSignIn } from '../core/errors.js';
-import { Secret } from '../core/secret.js';
+import { isSecret, Secret } from '../core/secret.js';
 
 /** How long a pending sign-in may wait for its callback. */
 export const PENDING_LIFETIME_MS = 10 * 60_000;
@@ -98,12 +98,18 @@ export class PendingSignIn {
   ): Promise<PendingSignIn> {
     const [version, body] = typeof blob === 'string' ? blob.split('.') : [];
     if (version !== VERSION || body === undefined)
-      throw new InvalidPendingSignIn('the pending sign-in is not one this SDK wrote');
+      throw new InvalidPendingSignIn(
+        'pending_sign_in_malformed',
+        'the pending sign-in is not one this SDK wrote',
+      );
     let raw: Uint8Array<ArrayBuffer>;
     try {
       raw = fromBase64url(body);
     } catch {
-      throw new InvalidPendingSignIn('the pending sign-in is not one this SDK wrote');
+      throw new InvalidPendingSignIn(
+        'pending_sign_in_malformed',
+        'the pending sign-in is not one this SDK wrote',
+      );
     }
     let plain: Uint8Array;
     try {
@@ -115,7 +121,10 @@ export class PendingSignIn {
         ),
       );
     } catch {
-      throw new InvalidPendingSignIn('the pending sign-in was altered, or belongs to another app or key');
+      throw new InvalidPendingSignIn(
+        'pending_sign_in_tampered',
+        'the pending sign-in was altered, or belongs to another app or key',
+      );
     }
     const d = JSON.parse(fromUtf8(plain)) as {
       u: string;
@@ -126,7 +135,8 @@ export class PendingSignIn {
       m?: number;
       e: number;
     };
-    if (d.e <= options.nowMs) throw new InvalidPendingSignIn('the pending sign-in expired: start again');
+    if (d.e <= options.nowMs)
+      throw new InvalidPendingSignIn('pending_sign_in_expired', 'the pending sign-in expired: start again');
     return new PendingSignIn(
       d.u,
       { verifier: new Secret(d.v), state: d.s, nonce: d.n, acrValues: d.a, maxAge: d.m, expiresAt: d.e },
@@ -140,7 +150,7 @@ export class PendingSignIn {
 export async function importStateKey(stateKey: Secret): Promise<CryptoKey> {
   const how =
     'make one with: node -e "console.log(crypto.getRandomValues(Buffer.alloc(32)).toString(\'base64\'))"';
-  if (!(stateKey instanceof Secret))
+  if (!isSecret(stateKey))
     throw new ConfigurationError(`stateKey must be a Secret holding 32 random bytes in base64; ${how}`);
   let bytes: Uint8Array<ArrayBuffer>;
   try {

@@ -35,10 +35,28 @@ export type SdkErrorCode =
   | 'insufficient_permission'
   | 'insufficient_scope'
   | 'gateway_token_refused'
-  | 'sign_in_state_mismatch'
-  | 'sign_in_issuer_mismatch'
-  | 'sign_in_callback_invalid'
-  | 'pending_sign_in_invalid'
+  | 'callback_iss_missing'
+  | 'callback_iss_mismatch'
+  | 'callback_state_mismatch'
+  | 'callback_code_missing'
+  | 'pending_sign_in_malformed'
+  | 'pending_sign_in_tampered'
+  | 'pending_sign_in_expired'
+  | 'id_token_missing'
+  | 'id_token_malformed'
+  | 'id_token_alg_refused'
+  | 'id_token_not_id_token'
+  | 'id_token_key_unknown'
+  | 'id_token_signature_invalid'
+  | 'id_token_issuer_mismatch'
+  | 'id_token_audience_mismatch'
+  | 'id_token_claims_invalid'
+  | 'id_token_expired'
+  | 'id_token_nonce_mismatch'
+  | 'id_token_at_hash_mismatch'
+  | 'callback_parameter_repeated'
+  | 'id_token_subject_changed'
+  | 'userinfo_subject_mismatch'
   | 'wait_timeout';
 
 /** Every code this SDK knows by name. */
@@ -258,18 +276,45 @@ export class NotSupportedError extends AuthFIError {
 }
 
 /**
- * A sign-in callback that must not be honoured: its `state` or `iss` does not match the pending
- * sign-in (a forged or mixed-up callback), or it carries no code.
+ * A sign-in callback refused before its code was used: `callback_iss_missing`,
+ * `callback_iss_mismatch` (RFC 9207, a mix-up), `callback_state_mismatch` or `callback_code_missing`.
+ * The same codes as the Python SDK's `InvalidCallback`.
  */
-export class SignInError extends AuthFIError {
-  override readonly name: string = 'SignInError';
+export class InvalidCallback extends AuthFIError {
+  override readonly name: string = 'InvalidCallback';
+  constructor(
+    code:
+      'callback_iss_missing' | 'callback_iss_mismatch' | 'callback_state_mismatch' | 'callback_code_missing',
+    message: string,
+  ) {
+    super(code, message, { status: 400 });
+  }
 }
 
-/** A pending sign-in blob that is expired, from another client, or tampered with. */
-export class InvalidPendingSignIn extends SignInError {
+/**
+ * An ID token refused at sign-in: `id_token_*` (`id_token_nonce_mismatch`,
+ * `id_token_audience_mismatch`, ...). It is not an {@link InvalidToken}: an access-token refusal is
+ * an API's 401, and a failed sign-in is not. The same codes as the Python SDK's `InvalidIdToken`.
+ */
+export class InvalidIdToken extends AuthFIError {
+  override readonly name: string = 'InvalidIdToken';
+  constructor(code: string, message: string) {
+    super(code, message, { status: 401 });
+  }
+}
+
+/**
+ * A pending sign-in that could not be restored: `pending_sign_in_malformed` (not one this SDK
+ * wrote), `pending_sign_in_tampered` (altered, or another app's or key's) or
+ * `pending_sign_in_expired`. Start the sign-in again.
+ */
+export class InvalidPendingSignIn extends AuthFIError {
   override readonly name: string = 'InvalidPendingSignIn';
-  constructor(message: string) {
-    super('pending_sign_in_invalid', message);
+  constructor(
+    code: 'pending_sign_in_malformed' | 'pending_sign_in_tampered' | 'pending_sign_in_expired',
+    message: string,
+  ) {
+    super(code, message, { status: 400 });
   }
 }
 
@@ -292,7 +337,8 @@ export interface AuthFIErrorKinds {
   InsufficientAuthentication: InsufficientAuthentication;
   GatewayTokenRefused: GatewayTokenRefused;
   NotSupportedError: NotSupportedError;
-  SignInError: SignInError;
+  InvalidCallback: InvalidCallback;
+  InvalidIdToken: InvalidIdToken;
   InvalidPendingSignIn: InvalidPendingSignIn;
 }
 
@@ -313,8 +359,9 @@ const PARENTS: Readonly<Record<string, string>> = {
   InsufficientAuthentication: 'InvalidToken',
   GatewayTokenRefused: 'AuthFIError',
   NotSupportedError: 'AuthFIError',
-  SignInError: 'AuthFIError',
-  InvalidPendingSignIn: 'SignInError',
+  InvalidCallback: 'AuthFIError',
+  InvalidIdToken: 'AuthFIError',
+  InvalidPendingSignIn: 'AuthFIError',
 };
 
 /**

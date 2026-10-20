@@ -31,7 +31,8 @@ All notable changes to this package. It follows [Semantic Versioning](https://se
   (`dump`, `loadPending`), `finishSignIn` (`iss` required, constant-time `state`, the code redeemed
   once, the ID token verified), `refresh` (single-flight), `userinfo`, `signOut` (revokes the refresh
   token, then the end-session URL), `session({ key, store })`, and `StepUpRequired` for a weaker
-  sign-in. `SignInError` and `InvalidPendingSignIn` for refused callbacks and blobs.
+  sign-in. `InvalidCallback` (`callback_*`), `InvalidIdToken` (`id_token_*`) and `InvalidPendingSignIn`
+  (`pending_sign_in_malformed`, `_tampered`, `_expired`), the same classes and codes as the Python SDK.
 - **A strict verifier**, `af.verifier({ audience, expectedTenantId })`: `typ at+jwt`, the algorithm
   pinned to the issuer's key (`RS256`, `ES256`, `EdDSA`), `iss`, a required audience that is never
   AuthFI's own, `exp`/`nbf`/`iat` with leeway, `sub`, the tenant pin, bound tokens and actor chains.

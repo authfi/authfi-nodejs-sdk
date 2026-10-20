@@ -1,6 +1,7 @@
 // Sign-in against refusing and unusual answers: each one a typed error, never a value.
 
 import { describe, expect, it } from 'vitest';
+import { isAuthFIError } from '../../src/core/errors.js';
 import { AuthFI } from '../../src/core/project.js';
 import { Secret } from '../../src/core/secret.js';
 import { MemoryTokenStore, TokenSet } from '../../src/core/token-set.js';
@@ -102,45 +103,78 @@ describe('ID tokens that must be refused', () => {
     [
       'typ at+jwt',
       (t: FakeIdP, n: string) => t.t.sign(base(n), { header: { typ: 'at+jwt' } }),
-      'token_claims_invalid',
+      'id_token_not_id_token',
+    ],
+    [
+      'no typ',
+      (t: FakeIdP, n: string) => t.t.sign(base(n), { header: { typ: undefined } }),
+      'id_token_not_id_token',
+    ],
+    [
+      'typ jwt in lower case',
+      (t: FakeIdP, n: string) => t.t.sign(base(n), { header: { typ: 'jwt' } }),
+      'id_token_not_id_token',
     ],
     [
       'no kid',
       (_t: FakeIdP, n: string) => unsignedJwt({ alg: 'RS256', typ: 'JWT' }, base(n)),
-      'token_key_unknown',
+      'id_token_key_unknown',
+    ],
+    [
+      'an unknown kid',
+      (_t: FakeIdP, n: string) => unsignedJwt({ alg: 'RS256', typ: 'JWT', kid: 'nope' }, base(n)),
+      'id_token_key_unknown',
     ],
     [
       'alg none',
       (_t: FakeIdP, n: string) => unsignedJwt({ alg: 'none', typ: 'JWT', kid: 'rsa-1' }, base(n)),
-      'token_signature_invalid',
+      'id_token_alg_refused',
     ],
     [
       'a bad signature',
       (_t: FakeIdP, n: string) => unsignedJwt({ alg: 'RS256', typ: 'JWT', kid: 'rsa-1' }, base(n), 'AAAA'),
-      'token_signature_invalid',
+      'id_token_signature_invalid',
     ],
     [
       'no exp',
       (t: FakeIdP, n: string) => t.t.sign({ ...base(n), exp: undefined }, { header: { typ: 'JWT' } }),
-      'token_claims_invalid',
+      'id_token_claims_invalid',
+    ],
+    [
+      'no iat',
+      (t: FakeIdP, n: string) => t.t.sign({ ...base(n), iat: undefined }, { header: { typ: 'JWT' } }),
+      'id_token_claims_invalid',
+    ],
+    [
+      'an azp naming another app, with one audience',
+      (t: FakeIdP, n: string) => t.t.sign({ ...base(n), azp: 'app_other' }, { header: { typ: 'JWT' } }),
+      'id_token_audience_mismatch',
+    ],
+    [
+      'a token over 16 KiB',
+      (t: FakeIdP, n: string) =>
+        t.t.sign({ ...base(n), padding: 'x'.repeat(16 * 1024) }, { header: { typ: 'JWT' } }),
+      'id_token_malformed',
     ],
     [
       'iat in the future',
       (t: FakeIdP, n: string) =>
         t.t.sign({ ...base(n), iat: Math.floor(Date.now() / 1000) + 600 }, { header: { typ: 'JWT' } }),
-      'token_claims_invalid',
+      'id_token_claims_invalid',
     ],
     [
       'no sub',
       (t: FakeIdP, n: string) => t.t.sign({ ...base(n), sub: undefined }, { header: { typ: 'JWT' } }),
-      'token_claims_invalid',
+      'id_token_claims_invalid',
     ],
-  ])('%s', async (_what, make, code) => {
-    await expect(withIdToken(make)).rejects.toMatchObject({ code });
+  ])('refuses %s as an InvalidIdToken, never an access-token refusal', async (_what, make, code) => {
+    const refused = withIdToken(make);
+    await expect(refused).rejects.toMatchObject({ code, name: 'InvalidIdToken' });
+    await expect(refused).rejects.toSatisfy((e: unknown) => !isAuthFIError(e, 'InvalidToken'));
   });
 
-  it('accepts one without typ or at_hash, and reads a sparse token', async () => {
-    const signed = await withIdToken((t, n) => t.t.sign({ ...base(n) }, { header: { typ: undefined } }));
+  it('accepts one without at_hash, and reads a sparse token', async () => {
+    const signed = await withIdToken((t, n) => t.t.sign({ ...base(n) }, { header: { typ: 'JWT' } }));
     expect(signed.user).toMatchObject({
       sub: 'usr_ada',
       email: undefined,

@@ -101,17 +101,18 @@ describe('the pending sign-in', () => {
     const { web, af, idp } = await setup();
     const blob = await (await web.startSignIn()).dump();
     const flipped = `${blob.slice(0, -2)}${blob.endsWith('A') ? 'B' : 'A'}${blob.slice(-1)}`;
-    await expect(web.loadPending(flipped)).rejects.toMatchObject({ name: 'InvalidPendingSignIn' });
-    await expect(web.loadPending('v1.!!!')).rejects.toMatchObject({ name: 'InvalidPendingSignIn' });
-    await expect(web.loadPending('nonsense')).rejects.toMatchObject({ name: 'InvalidPendingSignIn' });
+    const refused = (code: string) => ({ name: 'InvalidPendingSignIn', code });
+    await expect(web.loadPending(flipped)).rejects.toMatchObject(refused('pending_sign_in_tampered'));
+    await expect(web.loadPending('v1.!!!')).rejects.toMatchObject(refused('pending_sign_in_malformed'));
+    await expect(web.loadPending('nonsense')).rejects.toMatchObject(refused('pending_sign_in_malformed'));
     const otherApp = af.webApp({ clientId: 'app_other', redirectUri: REDIRECT, stateKey: STATE_KEY });
-    await expect(otherApp.loadPending(blob)).rejects.toMatchObject({ name: 'InvalidPendingSignIn' });
+    await expect(otherApp.loadPending(blob)).rejects.toMatchObject(refused('pending_sign_in_tampered'));
     const otherKey = af.webApp({
       clientId: CLIENT_ID,
       redirectUri: REDIRECT,
       stateKey: new Secret(Buffer.alloc(32, 9).toString('base64')),
     });
-    await expect(otherKey.loadPending(blob)).rejects.toMatchObject({ name: 'InvalidPendingSignIn' });
+    await expect(otherKey.loadPending(blob)).rejects.toMatchObject(refused('pending_sign_in_tampered'));
     const clock = {
       now: () => Date.now() + 11 * 60_000,
       monotonic: () => performance.now(),
@@ -122,7 +123,16 @@ describe('the pending sign-in', () => {
       redirectUri: REDIRECT,
       stateKey: STATE_KEY,
     });
-    await expect(later.loadPending(blob)).rejects.toThrow('expired');
+    await expect(later.loadPending(blob)).rejects.toMatchObject(refused('pending_sign_in_expired'));
+  });
+
+  it('compares the callback iss exactly: a trailing slash is another issuer (RFC 9207)', async () => {
+    const { web, idp, fake } = await setup();
+    const pending = await web.startSignIn();
+    await expect(
+      web.finishSignIn(idp.approve(pending.url, { iss: `${idp.issuer}/` }), pending),
+    ).rejects.toMatchObject({ name: 'InvalidCallback', code: 'callback_iss_mismatch' });
+    expect(fake.to(`${idp.issuer}/oauth/token`)).toHaveLength(0);
   });
 });
 
@@ -154,11 +164,11 @@ describe('finishing a sign-in', () => {
   });
 
   it.each([
-    ['no iss', { iss: null }, 'sign_in_issuer_mismatch'],
-    ['another iss', { iss: 'https://evil.authfi.io' }, 'sign_in_issuer_mismatch'],
-    ['another state', { state: 'forged' }, 'sign_in_state_mismatch'],
-    ['no state', { state: null }, 'sign_in_state_mismatch'],
-    ['no code', { code: null }, 'sign_in_callback_invalid'],
+    ['no iss', { iss: null }, 'callback_iss_missing'],
+    ['another iss', { iss: 'https://evil.authfi.io' }, 'callback_iss_mismatch'],
+    ['another state', { state: 'forged' }, 'callback_state_mismatch'],
+    ['no state', { state: null }, 'callback_state_mismatch'],
+    ['no code', { code: null }, 'callback_code_missing'],
   ])('refuses a callback with %s', async (_what, overrides, code) => {
     const { web, idp, fake } = await setup();
     const pending = await web.startSignIn();
@@ -202,12 +212,12 @@ describe('finishing a sign-in', () => {
 
   it('checks the ID token: nonce, audience, at_hash, alg, acr and max_age', async () => {
     const cases: [Record<string, unknown>, string, Record<string, unknown>?][] = [
-      [{ nonce: 'other' }, 'token_claims_invalid'],
-      [{ aud: 'app_other' }, 'token_audience_mismatch'],
-      [{ aud: [CLIENT_ID, 'app_other'] }, 'token_audience_mismatch'],
-      [{ at_hash: 'AAAA' }, 'token_claims_invalid'],
-      [{ iss: 'https://evil.authfi.io' }, 'token_issuer_not_accepted'],
-      [{ exp: Math.floor(Date.now() / 1000) - 600 }, 'token_expired'],
+      [{ nonce: 'other' }, 'id_token_nonce_mismatch'],
+      [{ aud: 'app_other' }, 'id_token_audience_mismatch'],
+      [{ aud: [CLIENT_ID, 'app_other'] }, 'id_token_audience_mismatch'],
+      [{ at_hash: 'AAAA' }, 'id_token_at_hash_mismatch'],
+      [{ iss: 'https://evil.authfi.io' }, 'id_token_issuer_mismatch'],
+      [{ exp: Math.floor(Date.now() / 1000) - 600 }, 'id_token_expired'],
     ];
     for (const [claims, code] of cases) {
       const { web, idp } = await setup();
@@ -239,7 +249,7 @@ describe('finishing a sign-in', () => {
     idp.t.metadataExtra = { id_token_signing_alg_values_supported: ['ES256'] };
     const pending = await web.startSignIn();
     await expect(web.finishSignIn(idp.approve(pending.url), pending)).rejects.toMatchObject({
-      code: 'token_signature_invalid',
+      code: 'id_token_alg_refused',
     });
   });
 
@@ -301,7 +311,7 @@ describe('after sign-in', () => {
     expect(t1).toBe(t2);
     expect(t1).not.toBe(tokens.accessToken.reveal());
     expect([...idp.families.values()].every((f) => !f.revoked)).toBe(true);
-    await expect(later.session({ key: 'nope', store }).token()).rejects.toThrow('sign the person in');
+    await expect(later.session({ key: 'nope', store }).token()).rejects.toThrow('the person must sign in again');
     expect(() => web.session({ key: '', store })).toThrow('key is required');
     const toApi = web.session({ key: 'sid-1', store, sendTo: ['https://api.example.com'] });
     expect(toApi.sendTo).toEqual(['https://api.example.com']);
