@@ -9,7 +9,7 @@ import {
 } from 'jose';
 import { fromBase64url } from '../core/bytes.js';
 import { ConfigurationError } from '../core/errors.js';
-import { Secret } from '../core/secret.js';
+import { isSecret, Secret } from '../core/secret.js';
 
 /** The algorithms an agent key signs with. The key type decides: Ed25519, P-256 or RSA (PSS). */
 export type AgentAlgorithm = 'EdDSA' | 'ES256' | 'PS256';
@@ -173,7 +173,7 @@ export class AgentKey implements Signer {
 
   /** Loads a PKCS#8 PEM private key. The kid is the one registered with its public key. */
   static async fromPem(pem: string | Secret, options: { kid: string }): Promise<AgentKey> {
-    const text = pem instanceof Secret ? pem.reveal() : pem;
+    const text = isSecret(pem) ? pem.reveal() : pem;
     if (typeof text !== 'string') throw new ConfigurationError('the agent key PEM must be a string');
     const alg = pemAlgorithm(text);
     let full: JWK;

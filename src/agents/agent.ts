@@ -19,7 +19,7 @@ import {
   type TokenResponse,
 } from '../core/oauth.js';
 import { coreOf, type AuthFI, type Core } from '../core/project.js';
-import { Secret } from '../core/secret.js';
+import { isSecret, Secret } from '../core/secret.js';
 import { BaseTokenSource, checkSendTo, type TokenOptions, type TokenSource } from '../core/token-source.js';
 import { contextOf, jsonOf } from '../core/transport.js';
 import { isAtOrUnder, originOf } from '../core/urls.js';
@@ -464,10 +464,7 @@ export class AgentAuth extends BaseTokenSource {
       signal?: AbortSignal;
     } = {},
   ): Promise<DelegatedToken> {
-    if (
-      !(subjectToken instanceof Secret) &&
-      typeof (subjectToken as Partial<TokenSource>).token !== 'function'
-    ) {
+    if (!isSecret(subjectToken) && typeof (subjectToken as Partial<TokenSource>).token !== 'function') {
       throw new ConfigurationError(
         'subjectToken must be a TokenSource or a Secret: wrap a raw token as new Secret(token)',
       );
@@ -475,9 +472,10 @@ export class AgentAuth extends BaseTokenSource {
     const sendTo = this.#sendToFor(options.resource, options.sendTo);
     const meta = await this.#requireGrant(GRANT.tokenExchange, 'token_exchange', options.signal);
     const exchangeOnce = async (signal?: AbortSignal): Promise<TokenResponse> => {
-      const subject =
-        subjectToken instanceof Secret ? subjectToken : new Secret(await subjectToken.token({ signal }));
-      if (subjectToken instanceof Secret && this.#expired(subject)) {
+      const subject = isSecret(subjectToken)
+        ? subjectToken
+        : new Secret(await subjectToken.token({ signal }));
+      if (isSecret(subjectToken) && this.#expired(subject)) {
         throw new ConsentExpired(
           'expired_token',
           "the person's token has expired; the agent cannot act for them until they sign in again",
