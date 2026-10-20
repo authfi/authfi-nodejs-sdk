@@ -320,3 +320,10 @@ module.exports = function authfi(config) {
 
 module.exports.TokenError = TokenError;
 module.exports.ConfigError = ConfigError;
+
+// Agent identity: an agent's own key, token, CIBA and token exchange.
+const agent = require('./lib/agent');
+module.exports.AgentKey = agent.AgentKey;
+module.exports.AgentAuth = agent.AgentAuth;
+module.exports.AgentAuthError = agent.AgentAuthError;
+module.exports.DelegatedToken = agent.DelegatedToken;
