@@ -48,6 +48,23 @@ describe('clientCredentials', () => {
     expect(await m2m.token({ force: true })).toBe('at-3');
   });
 
+  it("one caller's abort fails that caller only, and the others still get the one mint", async () => {
+    const { t, af } = await setup();
+    const m2m = af.clientCredentials({
+      clientId: 'app_m',
+      clientSecret: new Secret('s3cret'),
+      resource: API,
+      sendTo: ['https://api.example.com'],
+    });
+    const a = new AbortController();
+    const first = m2m.token({ signal: a.signal });
+    const second = m2m.token();
+    a.abort(new Error('caller A gave up'));
+    await expect(first).rejects.toThrow('caller A gave up');
+    expect(await second).toBe('at-1');
+    expect(t.fake.to(`${ISSUER}/oauth/token`)).toHaveLength(1);
+  });
+
   it('sends the token to its API and nowhere else', async () => {
     const { t, af } = await setup();
     t.fake.on('GET', 'https://api.example.com/orders', (r) => json({ auth: r.headers.get('authorization') }));
