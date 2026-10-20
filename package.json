@@ -64,6 +64,16 @@
         "default": "./dist/node.cjs"
       }
     },
+    "./vercel-ai": {
+      "import": {
+        "types": "./dist/vercel-ai.d.ts",
+        "default": "./dist/vercel-ai.js"
+      },
+      "require": {
+        "types": "./dist/vercel-ai.d.cts",
+        "default": "./dist/vercel-ai.cjs"
+      }
+    },
     "./package.json": "./package.json"
   },
   "scripts": {
@@ -83,12 +93,19 @@
     "jose": "6.2.12"
   },
   "devDependencies": {
+    "@ai-sdk/anthropic": "^4.0.72",
+    "@ai-sdk/mcp": "^2.0.67",
+    "@ai-sdk/otel": "^1.0.128",
     "@arethetypeswrong/cli": "0.18.5",
     "@edge-runtime/vm": "5.0.0",
     "@eslint/js": "10.0.1",
+    "@opentelemetry/api": "^1.9.1",
+    "@opentelemetry/context-async-hooks": "^2.1.0",
+    "@opentelemetry/sdk-trace-base": "^2.1.0",
     "@types/express": "^5.0.6",
     "@types/node": "22.20.5",
     "@vitest/coverage-v8": "5.0.3",
+    "ai": "^7.0.128",
     "esbuild": "0.28.2",
     "eslint": "10.11.0",
     "eslint-plugin-jsdoc": "65.1.0",
@@ -100,13 +117,30 @@
     "typescript": "6.0.3",
     "typescript-eslint": "8.71.0",
     "vite": "8.3.2",
-    "vitest": "5.0.3"
+    "vitest": "5.0.3",
+    "zod": "^4.1.12"
   },
   "peerDependencies": {
-    "express": ">=4.21 <6"
+    "express": ">=4.21 <6",
+    "ai": ">=7.0.0 <8",
+    "@ai-sdk/anthropic": ">=4.0.0 <5",
+    "@ai-sdk/mcp": ">=2.0.0 <3",
+    "@opentelemetry/api": ">=1.9.0 <2"
   },
   "peerDependenciesMeta": {
     "express": {
+      "optional": true
+    },
+    "ai": {
+      "optional": true
+    },
+    "@ai-sdk/anthropic": {
+      "optional": true
+    },
+    "@ai-sdk/mcp": {
+      "optional": true
+    },
+    "@opentelemetry/api": {
       "optional": true
     }
   }

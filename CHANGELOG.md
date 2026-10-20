@@ -36,6 +36,13 @@ All notable changes to this package. It follows [Semantic Versioning](https://se
   (`requestUserToken`, `awaitUserToken`, `tokenAsUser`; `bindingMessage` required), token exchange
   (`exchange`, no client authentication), `DelegatedToken` (`subject`, `actor`, `via`), the
   transaction token and gate, and approvals (`requestApproval`, `approval`, `waitForApproval`).
+- **The gateways**: `agent.gateway()` and `delegatedToken.gateway()`, with `mcpUrl`, `modelBaseUrl`,
+  an origin-pinned `fetch` (a 401 is `GatewayTokenRefused`), `readResult` returning a `ToolOutcome`
+  (`allowed`, `refused`, `approval_required`), `scopeOf`, `cloudCredentials`, and `APPROVAL_ARGUMENT`.
+- **`@authfi/sdk/vercel-ai`**: `createVercelAI({ source, approvalSecret })` for the Vercel AI SDK 7:
+  the credential per request, refusals as tool results, approvals that resume only on AuthFI's
+  decision (memo per tool call, bounded), the hold text kept from the model, a model-written approval
+  id stripped, content kept out of telemetry by default. `ai` and `@ai-sdk/*` are optional peers.
 - `@authfi/sdk/node`: `readAgentKey` (refuses a key file others can read), `writeAgentKey` (0600,
   never overwrites) and `agentFromEnv`.
 - `conformance/vectors.json`: tokens with the outcome every AuthFI SDK must produce, run in Node and

@@ -74,3 +74,11 @@ export {
   type TransactionToken,
 } from './agents/agent.js';
 export { DelegatedToken, type DelegationRoute } from './agents/delegated.js';
+export {
+  APPROVAL_ARGUMENT,
+  Gateway,
+  type CloudCredential,
+  type CloudCredentialOutcome,
+  type ToolOutcome,
+  type ToolResult,
+} from './gateway/gateway.js';

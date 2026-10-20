@@ -27,6 +27,7 @@ import { decodeUnverified } from '../verify/verifier.js';
 import type { Signer } from './agent-key.js';
 import { clientAssertion } from './assertion.js';
 import { DelegatedToken } from './delegated.js';
+import { Gateway } from '../gateway/gateway.js';
 
 /** How `af.agent()` is configured. */
 export interface AgentOptions {
@@ -139,6 +140,7 @@ export class AgentAuth extends BaseTokenSource {
   readonly #tokens = new Map<string, CachedToken>();
   readonly #flight = new SingleFlight<string, TokenResponse>();
   readonly #agentConfig: CachedDocument<AgentConfiguration>;
+  #gateway: Gateway | undefined;
 
   /** Use `af.agent()`. */
   constructor(af: AuthFI, options: AgentOptions) {
@@ -721,6 +723,12 @@ export class AgentAuth extends BaseTokenSource {
       if (clock.monotonic() + interval > deadline) return current;
       await clock.sleep(interval, options.signal);
     }
+  }
+
+  /** The project's MCP and AI gateways, with this agent's own token. */
+  gateway(): Gateway {
+    this.#gateway ??= new Gateway(this.#core, this, this.agentId);
+    return this.#gateway;
   }
 
   /** The agent id and key id only. */

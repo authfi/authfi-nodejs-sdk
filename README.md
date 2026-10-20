@@ -191,6 +191,33 @@ person can consent again, and raises `ConsentExpired` near expiry.
 - `agent.approval(id)` raises `NotSupportedError` (`agent_approval_status`) on a project that does
   not offer approval status to agents.
 
+## The gateways
+
+`agent.gateway()` (or `delegatedToken.gateway()`) is the project's MCP gateway and AI gateway for
+that credential.
+
+| | |
+|---|---|
+| `gateway.mcpUrl` | `<issuer>/mcp` |
+| `gateway.modelBaseUrl('anthropic' \| 'openai')` | the base URL for a provider SDK |
+| `gateway.fetch` | the credential per request, `X-Request-Id` and `traceparent`, AuthFI's origins only, no redirects; a 401 is `GatewayTokenRefused` |
+| `gateway.readResult(result)` | a `ToolOutcome`: `allowed`, `refused` (with `code`, `reason`, `requiredScope`) or `approval_required` (with `approvalId`) |
+| `gateway.scopeOf(tool)` | the grant object of a tool, from `tools/list` |
+| `gateway.cloudCredentials({ account, role })` | a short-lived cloud credential, or `approval_required` |
+
+A refusal and a hold are values, not exceptions: a framework hands them to the model as the tool's
+answer. Never give a hold's text to a model: it names the approval. An adapter strips an
+`_authfi_approval_id` (`APPROVAL_ARGUMENT`) a model writes, and adds it only on a resume.
+
+## Frameworks
+
+| Framework | Package | |
+|---|---|---|
+| Express | `@authfi/sdk/express` | `protect`, `authfiErrorHandler` |
+| Vercel AI SDK 7 | `@authfi/sdk/vercel-ai` | `createVercelAI({ source, approvalSecret })`: `.anthropic()`, `.mcpTransport()`, `.tools()`, `.approvals()`, `.awaitApprovals()`, `.telemetry()` |
+
+Framework packages are optional peer dependencies; install the ones you use.
+
 ## Examples
 
 | Example | |
@@ -201,6 +228,8 @@ person can consent again, and raises `ConsentExpired` near expiry.
 | [`examples/agent-for-a-person-voice`](examples/agent-for-a-person-voice) | Acting for a caller with no browser (CIBA) |
 | [`examples/agent-for-a-signed-in-user`](examples/agent-for-a-signed-in-user) | Acting for a person signed in to your app (token exchange) |
 | [`examples/action-gate`](examples/action-gate) | Freezing a high-risk action before running it |
+| [`examples/agent-model-gateway`](examples/agent-model-gateway) | Model calls through the AI gateway, the token kept out of traces |
+| [`examples/approvals-vercel-ai`](examples/approvals-vercel-ai) | A Vercel AI SDK agent that pauses on an approval and resumes on AuthFI's decision |
 
 ## Secrets
 

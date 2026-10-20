@@ -327,6 +327,14 @@ export class Transport {
     return id;
   }
 
+  /**
+   * The trace headers for a request the SDK does not send itself (a framework's call through the
+   * gateway): the active OpenTelemetry trace when the project was given the API, else a fresh one.
+   */
+  traceHeaders(): Record<string, string> {
+    return this.#traceparent();
+  }
+
   #traceparent(): Record<string, string> {
     const { otel, browser } = this.#settings;
     // The edge's CORS allow-list does not admit traceparent yet, so a browser would fail the preflight.
