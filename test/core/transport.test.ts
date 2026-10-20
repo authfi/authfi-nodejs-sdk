@@ -183,6 +183,26 @@ describe('timeouts', () => {
   });
 });
 
+describe('the scheme', () => {
+  it.each(['http://example.com/', 'http://acme.authfi.io/oauth/token', 'ftp://example.com/', 'not a url'])(
+    'refuses to send to %s, before any request leaves',
+    async (url) => {
+      const fake = new FakeFetch();
+      const { t } = transport(fake);
+      await expect(t.send({ method: 'POST', url, retry: 'unsafe' })).rejects.toMatchObject({
+        name: 'ConfigurationError',
+      });
+      expect(fake.requests).toHaveLength(0);
+    },
+  );
+
+  it('sends plain http to loopback, for local development', async () => {
+    const fake = new FakeFetch().on('GET', 'http://127.0.0.1:8080/x', () => json({ ok: true }));
+    const { t } = transport(fake);
+    expect((await t.send({ method: 'GET', url: 'http://127.0.0.1:8080/x', retry: 'safe' })).status).toBe(200);
+  });
+});
+
 describe('answers', () => {
   it('refuses a redirect', async () => {
     const fake = new FakeFetch().on(

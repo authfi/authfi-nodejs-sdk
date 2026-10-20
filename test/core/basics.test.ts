@@ -308,6 +308,44 @@ describe('caches', () => {
     expect(await flight.run('k', slow)).toBe(2);
   });
 
+  it("one caller's abort ends that caller's wait and no one else's", async () => {
+    const flight = new SingleFlight<string, string>();
+    const seen: (AbortSignal | undefined)[] = [];
+    let release: (v: string) => void = () => undefined;
+    const call = (signal?: AbortSignal) => {
+      seen.push(signal);
+      return new Promise<string>((r) => {
+        release = r;
+      });
+    };
+    const a = new AbortController();
+    const first = flight.run('k', () => call(), a.signal);
+    const second = flight.run('k', () => call());
+    const reason = new Error('caller A gave up');
+    a.abort(reason);
+    await expect(first).rejects.toBe(reason);
+    release('minted');
+    expect(await second).toBe('minted');
+    expect(seen).toEqual([undefined]); // one call, made with no caller's signal
+  });
+
+  it('a call that outlives the caller that started it still finishes for the others', async () => {
+    const flight = new SingleFlight<string, number>();
+    let calls = 0;
+    const slow = () =>
+      new Promise<number>((r) => {
+        calls += 1;
+        setTimeout(() => r(calls), 5);
+      });
+    const a = new AbortController();
+    const early = flight.run('k', slow, a.signal);
+    const late = flight.run('k', slow);
+    a.abort();
+    await expect(early).rejects.toBeDefined();
+    expect(await late).toBe(1);
+    expect(calls).toBe(1);
+  });
+
   it('raceSignal rejects on abort and passes a value through', async () => {
     const c = new AbortController();
     const p = raceSignal(new Promise(() => undefined), c.signal);

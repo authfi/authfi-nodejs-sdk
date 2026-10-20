@@ -16,7 +16,13 @@ All notable changes to this package. It follows [Semantic Versioning](https://se
 - **`Secret`**, which never prints, serialises or clones its value, and `isSecret(value)`, which
   recognises one from either build (ESM or CommonJS) where `instanceof` cannot.
 - **Typed errors** under `AuthFIError`, with `isAuthFIError(e, kind)`, carrying the kernel's token
-  refusal codes (generated from authfi-regional-kernel v0.58.0).
+  refusal codes (generated from the AuthFI kernel at v0.58.0).
+- **Plain `http` is refused** except to loopback: in a discovery document (`jwks_uri` and every
+  `*_endpoint`) and on every request the transport sends, so a hostile or misconfigured document
+  cannot make the SDK send a credential in the clear.
+- **One caller's abort ends that caller's wait only.** Concurrent calls for the same token share one
+  request, and `AbortSignal`s apply to each caller separately, so aborting one never fails the others
+  or abandons a refresh whose rotated token the platform has already issued.
 - **`TokenSource`**, the one credential interface, with an origin guard on `headers()` and `fetch`.
 - **`TokenSet`, `TokenStore` and `MemoryTokenStore`** for people's tokens.
 - TypeScript source, built to ESM and CommonJS with generated types.

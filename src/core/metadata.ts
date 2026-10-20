@@ -1,6 +1,7 @@
 import { maxAgeOf, type Loaded } from './cache.js';
-import { DiscoveryError } from './errors.js';
+import { ConfigurationError, DiscoveryError } from './errors.js';
 import { contextOf, jsonOf, MAX_DOCUMENT_BYTES, type Transport } from './transport.js';
+import { requireSecureScheme } from './urls.js';
 
 /**
  * The issuer's authorization-server metadata (RFC 8414 / OpenID Connect Discovery), with the wire
@@ -30,6 +31,27 @@ export interface ServerMetadata {
 const PATHS = ['/.well-known/openid-configuration', '/.well-known/oauth-authorization-server'] as const;
 const REQUIRED = ['token_endpoint', 'jwks_uri'] as const;
 
+/** An address in the document that credentials or a person may be sent to must be https (or loopback http). */
+function checkAddress(name: string, value: unknown, url: string): void {
+  if (typeof value !== 'string' || value === '') {
+    throw new DiscoveryError('discovery_failed', `${url} has a ${name} that is not a URL`);
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new DiscoveryError('discovery_failed', `${url} has a ${name} that is not a URL`);
+  }
+  try {
+    requireSecureScheme(parsed, name, value);
+  } catch (error) {
+    if (error instanceof ConfigurationError) {
+      throw new DiscoveryError('discovery_failed', `${url}: ${error.message}`);
+    }
+    throw error;
+  }
+}
+
 function stringList(value: unknown): boolean {
   return value === undefined || (Array.isArray(value) && value.every((v) => typeof v === 'string'));
 }
@@ -52,6 +74,7 @@ export function checkMetadata(doc: unknown, issuer: string, url: string): Server
     }
   }
   for (const [k, v] of Object.entries(record)) {
+    if (k === 'jwks_uri' || k.endsWith('_endpoint')) checkAddress(k, v, url);
     if (k.endsWith('_supported') && typeof v !== 'boolean' && !stringList(v)) {
       throw new DiscoveryError('discovery_failed', `${url} has a ${k} that is not a list of strings`);
     }
