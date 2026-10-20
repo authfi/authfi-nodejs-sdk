@@ -17,6 +17,7 @@
  * @packageDocumentation
  */
 
+import type { ToolApprovalRequestOutput, ToolApprovalStatus, ToolSet } from 'ai';
 import { base64url, constantTimeEqual, randomBytes, utf8 } from '../core/bytes.js';
 import { ConfigurationError } from '../core/errors.js';
 import { consoleLogger, type Logger } from '../core/logger.js';
@@ -60,23 +61,8 @@ export interface VercelAIOptions {
   readonly logger?: Logger | undefined;
 }
 
-/** The tool record `mcpClient.tools()` returns: tools by name, each with an `execute`. */
-export type McpTools = Readonly<Record<string, object>>;
-
-/** An approval decision of the AI SDK's `toolApproval`. */
-export type ApprovalStatus =
-  | { type: 'not-applicable' }
-  | { type: 'approved'; reason?: string }
-  | { type: 'denied'; reason?: string }
-  | { type: 'user-approval'; reason?: string };
-
-/** The tool-approval-request part of a result, as far as the adapter reads it. */
-export interface ApprovalRequestPart {
-  readonly type: 'tool-approval-request';
-  readonly approvalId: string;
-  readonly toolCall: { readonly toolCallId: string; readonly toolName: string; readonly input: unknown };
-  readonly reason?: string;
-}
+/** The object forms of the AI SDK's own `ToolApprovalStatus`, which are the ones this adapter answers with. */
+export type ApprovalDecision = Extract<ToolApprovalStatus, { type: string }>;
 
 type Status = 'new' | 'allowed' | 'refused' | 'pending' | 'approved' | 'denied';
 
@@ -236,7 +222,7 @@ export class VercelAIAdapter {
    * strips a model-written approval id, calls the gateway, and answers a refusal as the tool's
    * result. A call AuthFI already answered during approval is not made again.
    */
-  tools<T extends McpTools>(mcpTools: T): T {
+  tools<T extends ToolSet>(mcpTools: T): T {
     if (typeof mcpTools !== 'object')
       throw new ConfigurationError('tools() takes the record mcpClient.tools() returns');
     const out: Record<string, unknown> = {};
@@ -315,7 +301,7 @@ export class VercelAIAdapter {
     return async (
       raw: unknown,
       options: { toolCallId?: string; messages?: readonly unknown[] } = {},
-    ): Promise<ApprovalStatus> => {
+    ): Promise<ApprovalDecision> => {
       const id = options.toolCallId;
       if (id === undefined) return { type: 'not-applicable' };
       const input = withoutApprovalArgument(raw, this.#logger, key);
@@ -416,18 +402,18 @@ export class VercelAIAdapter {
   ): (
     input: unknown,
     options?: { toolCallId?: string; messages?: readonly unknown[] },
-  ) => Promise<ApprovalStatus> {
+  ) => Promise<ApprovalDecision> {
     return this.#approve(key);
   }
 
   /** The approval requests in a result that wait on AuthFI. */
-  pendingApprovals(result: { readonly content?: readonly unknown[] }): ApprovalRequestPart[] {
+  pendingApprovals(result: { readonly content?: readonly unknown[] }): ToolApprovalRequestOutput<ToolSet>[] {
     return (result.content ?? []).filter(
-      (p): p is ApprovalRequestPart =>
+      (p): p is ToolApprovalRequestOutput<ToolSet> =>
         typeof p === 'object' &&
         p !== null &&
         (p as { type?: unknown }).type === 'tool-approval-request' &&
-        this.#tools.has((p as ApprovalRequestPart).toolCall.toolName),
+        this.#tools.has((p as ToolApprovalRequestOutput<ToolSet>).toolCall.toolName),
     );
   }
 
@@ -462,7 +448,8 @@ export class VercelAIAdapter {
         }));
     const content = await Promise.all(
       this.pendingApprovals(result).map(async (part) => {
-        const { toolCallId, toolName, input } = part.toolCall;
+        const { toolCallId, toolName } = part.toolCall;
+        const input: unknown = part.toolCall.input;
         const entry =
           this.#memo.get(toolCallId) ??
           (await this.#restore(toolName, input, toolCallId, [{ content: [{ ...part, toolCallId }] }]));

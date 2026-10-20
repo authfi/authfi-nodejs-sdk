@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { AgentKey } from '../../src/agents/agent-key.js';
 import { AuthFI } from '../../src/core/project.js';
@@ -21,11 +22,13 @@ const text = (t: string, extra: Record<string, unknown> = {}) => ({
 });
 
 describe('reading a tool result', () => {
-  it('reads the hold in the exact format of authfi-regional-mcp dispatch.go', async () => {
+  it("reads the gateway's exact hold message, held verbatim in the shared fixture", async () => {
     const { gateway } = await setup();
-    // Contract: the format string at internal/http/mcp/dispatch.go (mcp 3617565), rendered.
-    const id = '611e6ce1-ca7e-4fab-8b76-0655a62d414b';
-    const hold = `Waiting for approval ${id} (approval_required). A person must approve this action in the AuthFI console. Retry this call with an argument "_authfi_approval_id": "${id}" once it is approved.`;
+    const fixture = JSON.parse(
+      readFileSync(new URL('../support/hold-result.json', import.meta.url), 'utf8'),
+    ) as { content: { text: string }[] };
+    const hold = fixture.content[0]!.text;
+    const id = '7f1c2a9e-5d1b-4f3a-9a77-2b0c8e1d4f00';
     expect(gateway.readResult(text(hold))).toEqual({
       kind: 'approval_required',
       approvalId: id,
@@ -41,7 +44,7 @@ describe('reading a tool result', () => {
     expect(HOLD_PATTERN).toBe(
       String.raw`^Waiting for approval ([A-Za-z0-9_-]+) \(([a-z_]+)\)\. A person must approve this action`,
     );
-    expect(HOLD_MESSAGE).toBe("This action is waiting for a person's approval.");
+    expect(HOLD_MESSAGE).toBe("This action is waiting for a person's approval in AuthFI.");
   });
 
   it("reads text that is not the whole hold as the tool's own answer", async () => {

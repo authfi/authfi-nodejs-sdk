@@ -61,7 +61,8 @@ All notable changes to this package. It follows [Semantic Versioning](https://se
   the credential per request, refusals as tool results, approvals that resume only on AuthFI's
   decision (memo per tool call, bounded), the AuthFI approval id in each approval request bound to
   its tool call by an HMAC under `approvalSecret`, the hold text kept from the model, a model-written
-  approval id stripped, content kept out of telemetry by default. `ai` and `@ai-sdk/*` are optional peers.
+  approval id stripped, content kept out of telemetry by default. `ai` (7.0.82 or later) and `@ai-sdk/*` are
+  optional peers, tested at their lowest versions in CI.
 - `@authfi/sdk/node`: `readAgentKey` (refuses a key file others can read, checked on the open file),
   `generateAgentKeyFile` (makes a key into a new 0600 file, never overwrites, and returns a key that
   cannot be written again) and `agentFromEnv`.

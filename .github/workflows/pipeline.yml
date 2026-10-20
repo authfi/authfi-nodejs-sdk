@@ -68,6 +68,29 @@ jobs:
           name: coverage
           path: coverage/
 
+  # The lockfile installs one version of each optional peer, so a declared lower bound is otherwise
+  # never installed. This installs every peer at the lowest version its range allows (the lowest
+  # published one: ai 7.0.80 and 7.0.81 were never released, and 7.0.79 and earlier fail the
+  # cross-process resume test) and runs the suites that use them.
+  lowest:
+    name: test (peer floors)
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Install every peer at its floor
+        run: npm install --no-save --legacy-peer-deps ai@7.0.82 @ai-sdk/anthropic@4.0.0 @ai-sdk/mcp@2.0.0 express@4.21.2 @opentelemetry/api@1.9.0
+      - name: Run the suites that use the peers
+        run: npx vitest run --project node test/vercel-ai test/express test/gateway
+
   # The agent key file is checked by POSIX mode on Linux and warned about on Windows: each only runs there.
   windows:
     name: test (windows)
@@ -114,13 +137,14 @@ jobs:
   ci:
     name: ci
     if: always()
-    needs: [lint, test, windows, build]
+    needs: [lint, test, lowest, windows, build]
     runs-on: ubuntu-latest
     steps:
       - name: Require every stage to pass
         run: |
-          echo "lint=${{ needs.lint.result }} test=${{ needs.test.result }} windows=${{ needs.windows.result }} build=${{ needs.build.result }}"
+          echo "lint=${{ needs.lint.result }} test=${{ needs.test.result }} lowest=${{ needs.lowest.result }} windows=${{ needs.windows.result }} build=${{ needs.build.result }}"
           test "${{ needs.lint.result }}" = success
           test "${{ needs.test.result }}" = success
+          test "${{ needs.lowest.result }}" = success
           test "${{ needs.windows.result }}" = success
           test "${{ needs.build.result }}" = success
