@@ -68,6 +68,24 @@ jobs:
           name: coverage
           path: coverage/
 
+  # The agent key file is checked by POSIX mode on Linux and warned about on Windows: each only runs there.
+  windows:
+    name: test (windows)
+    needs: lint
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Run the key-file tests
+        run: npx vitest run --project node test/node test/agents/agent-key.test.ts
+
   build:
     name: build
     needs: test
@@ -96,12 +114,13 @@ jobs:
   ci:
     name: ci
     if: always()
-    needs: [lint, test, build]
+    needs: [lint, test, windows, build]
     runs-on: ubuntu-latest
     steps:
       - name: Require every stage to pass
         run: |
-          echo "lint=${{ needs.lint.result }} test=${{ needs.test.result }} build=${{ needs.build.result }}"
+          echo "lint=${{ needs.lint.result }} test=${{ needs.test.result }} windows=${{ needs.windows.result }} build=${{ needs.build.result }}"
           test "${{ needs.lint.result }}" = success
           test "${{ needs.test.result }}" = success
+          test "${{ needs.windows.result }}" = success
           test "${{ needs.build.result }}" = success

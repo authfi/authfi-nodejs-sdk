@@ -48,8 +48,13 @@ All notable changes to this package. It follows [Semantic Versioning](https://se
   (`requestUserToken`, `awaitUserToken`, `tokenAsUser`; `bindingMessage` required), token exchange
   (`exchange`, no client authentication), `DelegatedToken` (`subject`, `actor`, `via`), the
   transaction token and gate, and approvals (`requestApproval`, `approval`, `waitForApproval`).
-- `@authfi/sdk/node`: `readAgentKey` (refuses a key file others can read), `writeAgentKey` (0600,
-  never overwrites) and `agentFromEnv`.
+  A wait that runs out its own `timeoutMs` (`awaitUserToken`, `waitForApproval`) throws `WaitTimeout`
+  (`code === 'wait_timeout'`, with the approval's id when it has one) and leaves the request open; a
+  CIBA request that really expired is `ConsentExpired`. `authorization_pending` is the server's word
+  and is never raised locally.
+- `@authfi/sdk/node`: `readAgentKey` (refuses a key file others can read, checked on the open file),
+  `generateAgentKeyFile` (makes a key into a new 0600 file, never overwrites, and returns a key that
+  cannot be written again) and `agentFromEnv`.
 - `conformance/vectors.json`: tokens with the outcome every AuthFI SDK must produce, run in Node and
   in the edge runtime.
 

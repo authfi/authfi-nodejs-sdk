@@ -33,6 +33,7 @@ export {
   StepUpRequired,
   TemporarilyUnavailable,
   TransportError,
+  WaitTimeout,
   type AuthFIErrorKinds,
   type ErrorCode,
   type ErrorContext,
