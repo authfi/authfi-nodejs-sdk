@@ -17,11 +17,18 @@ const REFUSAL_META = 'io.authfi/refusal';
 /** Where `tools/list` names the grant object (`mcp:<upstream>.<tool>`) of each tool. */
 const SCOPE_META = 'io.authfi/scope';
 /**
- * The gateway's hold, as prose until the structured hold ships (mcp#66). Pinned to the format in
- * authfi-regional-mcp `internal/http/mcp/dispatch.go`:
- * "Waiting for approval %s (%s). A person must approve this action …". This is the one parser.
+ * The gateway's hold, as prose until the structured hold ships (mcp#66), read by this one pattern
+ * in every AuthFI SDK (Python exports the same string). Pinned to authfi-regional-mcp
+ * `internal/http/mcp/dispatch.go`, unchanged from 3617565 to 1c939a3: "Waiting for approval %s (%s).
+ * A person must approve this action in the AuthFI console. …". Both sentences are required, so a
+ * tool whose output quotes only the first is not a hold.
  */
-const HOLD = /^Waiting for approval ([A-Za-z0-9_-]+) \(([a-z_]+)\)\./;
+export const HOLD_PATTERN =
+  '^Waiting for approval ([A-Za-z0-9_-]+) \\(([a-z_]+)\\)\\. A person must approve this action';
+const HOLD = new RegExp(HOLD_PATTERN);
+
+/** What a model is told about a held call: the wait, never an instruction or an id. */
+export const HOLD_MESSAGE = "This action is waiting for a person's approval.";
 
 /** An MCP `tools/call` result, as the gateway answers it. */
 export interface ToolResult {

@@ -79,6 +79,8 @@ export { DelegatedToken, type DelegationRoute } from './agents/delegated.js';
 export {
   APPROVAL_ARGUMENT,
   Gateway,
+  HOLD_MESSAGE,
+  HOLD_PATTERN,
   type CloudCredential,
   type CloudCredentialOutcome,
   type ToolOutcome,

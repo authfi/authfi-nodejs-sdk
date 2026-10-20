@@ -55,10 +55,13 @@ All notable changes to this package. It follows [Semantic Versioning](https://se
 - **The gateways**: `agent.gateway()` and `delegatedToken.gateway()`, with `mcpUrl`, `modelBaseUrl`,
   an origin-pinned `fetch` (a 401 is `GatewayTokenRefused`), `readResult` returning a `ToolOutcome`
   (`allowed`, `refused`, `approval_required`), `scopeOf`, `cloudCredentials`, and `APPROVAL_ARGUMENT`.
+  The gateway's hold is read by `HOLD_PATTERN`, the same pattern as the Python SDK's, and a model
+  is told `HOLD_MESSAGE`.
 - **`@authfi/sdk/vercel-ai`**: `createVercelAI({ source, approvalSecret })` for the Vercel AI SDK 7:
   the credential per request, refusals as tool results, approvals that resume only on AuthFI's
-  decision (memo per tool call, bounded), the hold text kept from the model, a model-written approval
-  id stripped, content kept out of telemetry by default. `ai` and `@ai-sdk/*` are optional peers.
+  decision (memo per tool call, bounded), the AuthFI approval id in each approval request bound to
+  its tool call by an HMAC under `approvalSecret`, the hold text kept from the model, a model-written
+  approval id stripped, content kept out of telemetry by default. `ai` and `@ai-sdk/*` are optional peers.
 - `@authfi/sdk/node`: `readAgentKey` (refuses a key file others can read, checked on the open file),
   `generateAgentKeyFile` (makes a key into a new 0600 file, never overwrites, and returns a key that
   cannot be written again) and `agentFromEnv`.

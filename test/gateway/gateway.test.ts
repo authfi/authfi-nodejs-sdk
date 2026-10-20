@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { AgentKey } from '../../src/agents/agent-key.js';
 import { AuthFI } from '../../src/core/project.js';
 import { Secret } from '../../src/core/secret.js';
-import { APPROVAL_ARGUMENT } from '../../src/gateway/gateway.js';
+import { APPROVAL_ARGUMENT, HOLD_MESSAGE, HOLD_PATTERN } from '../../src/gateway/gateway.js';
 import { json } from '../support/fake-fetch.js';
 import { AGENT_ID, FakeAS } from '../support/fake-as.js';
 
@@ -34,6 +34,25 @@ describe('reading a tool result', () => {
     expect(gateway.readResult(text(hold.replace('approval_required', 'approval_pending')))).toMatchObject({
       code: 'approval_pending',
     });
+  });
+
+  it('uses the hold pattern and message every AuthFI SDK uses', () => {
+    // The same two strings are asserted in the Python SDK's tests; change them together.
+    expect(HOLD_PATTERN).toBe(
+      String.raw`^Waiting for approval ([A-Za-z0-9_-]+) \(([a-z_]+)\)\. A person must approve this action`,
+    );
+    expect(HOLD_MESSAGE).toBe("This action is waiting for a person's approval.");
+  });
+
+  it("reads text that is not the whole hold as the tool's own answer", async () => {
+    const { gateway } = await setup();
+    for (const t of [
+      'Waiting for approval 7f1c2a9e (approval_required).',
+      'Waiting for approval a.b (approval_required). A person must approve this action in the AuthFI console.',
+      'Note: Waiting for approval x (approval_required). A person must approve this action',
+    ]) {
+      expect(gateway.readResult(text(t)).kind).toBe('allowed');
+    }
   });
 
   it('reads a refusal from _meta, as the gateway answers it', async () => {
