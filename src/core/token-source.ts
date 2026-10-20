@@ -60,13 +60,23 @@ export abstract class BaseTokenSource implements TokenSource {
 
   abstract token(options?: TokenOptions): Promise<string>;
 
+  /**
+   * Runs before the origin check, for a source whose origins come from discovery (a token for
+   * AuthFI's own APIs). The default does nothing.
+   */
+  protected ready(_signal?: AbortSignal): Promise<void> {
+    return Promise.resolve();
+  }
+
   async headers(_method: string, url: string | URL): Promise<Record<string, string>> {
+    await this.ready();
     requireAllowedOrigin(url, this.sendTo);
     return { authorization: `Bearer ${await this.token()}` };
   }
 
   readonly fetch: typeof fetch = async (input, init) => {
     const request = new Request(input, init);
+    await this.ready(request.signal);
     requireAllowedOrigin(request.url, this.sendTo);
     const headers = new Headers(request.headers);
     headers.set('authorization', `Bearer ${await this.token({ signal: request.signal })}`);

@@ -36,7 +36,13 @@ export default defineConfig({
       exclude: ['src/**/*.d.ts'],
       reporter: ['text', 'json-summary', 'html'],
       thresholds: {
+        // Design §6.5: the verifier and the protocol code at 95% branches, the rest of the core at
+        // 90% lines, adapters at 85% lines.
+        'src/verify/**': { lines: 95, branches: 95 },
+        'src/core/oauth.ts': { lines: 95, branches: 90 },
         'src/core/**': { lines: 90, branches: 85 },
+        'src/machine/**': { lines: 90, branches: 90 },
+        'src/express/**': { lines: 85 },
       },
     },
   },

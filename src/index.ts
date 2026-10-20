@@ -40,3 +40,27 @@ export {
   type OAuthErrorCode,
   type SdkErrorCode,
 } from './core/errors.js';
+export { AccessToken, Principal, type PrincipalKind, type TokenKind } from './verify/access-token.js';
+export {
+  loggerOf,
+  MultiIssuerVerifier,
+  TokenVerifier,
+  type RequestCredentials,
+  type Scheme,
+  type TrustedIssuer,
+  type Verifier,
+  type VerifierOptions,
+} from './verify/verifier.js';
+export {
+  applyRequirements,
+  checkRequirements,
+  refusalAnswer,
+  type AnswerOptions,
+  type RefusalAnswer,
+  type Requirements,
+} from './verify/answer.js';
+export type { CheckRequest, CheckResult } from './verify/check.js';
+export { ClientCredentials, type ClientCredentialsOptions } from './machine/client-credentials.js';
+// The 0.1 factory, deprecated and kept for one minor version.
+// eslint-disable-next-line @typescript-eslint/no-deprecated
+export { default, type LegacyClient, type LegacyConfig } from './legacy.js';

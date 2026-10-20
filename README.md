@@ -62,6 +62,95 @@ Build one `AuthFI` per issuer and process and share it: it owns the caches.
   `traceparent`. Both are joined to the platform's records.
 - **Deprecations:** a `Deprecation` or `Sunset` answer is logged once per URL, with its successor.
 
+## Protect an API
+
+```ts
+import { AuthFI } from '@authfi/sdk';
+import { protect, authfiErrorHandler } from '@authfi/sdk/express';
+
+const af = AuthFI.fromEnv();
+const verifier = af.verifier({ audience: ['api_orders', 'app_web'], expectedTenantId: process.env.AUTHFI_TENANT_ID });
+
+app.get('/orders', protect(verifier, { permissions: ['orders:read'] }), (req, res) => {
+  res.json({ caller: req.authfi!.principal.toString() });
+});
+app.use(authfiErrorHandler());
+```
+
+- **`audience` is required**, with no "skip": your API's client id (machine and agent tokens minted
+  with `resource`), and the client ids of the front ends that call it (a person's token names the app
+  they signed in to). AuthFI's own audiences (the issuer, `<issuer>/mcp`, the console) are refused.
+- **`expectedTenantId`** pins the issuer to its tenant. Set it.
+- **Authorize on `permissions` and `roles`.** On person and machine tokens `scope` is what the
+  client asked for. In one guard, `permissions` and `scopes` need all, `anyPermission` and `roles`
+  need one, and the kinds combine with AND. An empty list is a configuration error.
+- **What a caller sees** is the platform's answer: one opaque `401 invalid_token` for every refused
+  token, `403 insufficient_scope` naming the scopes, `403 forbidden` naming nothing, and RFC 9470
+  step-up (`401 insufficient_user_authentication` with `acr_values`). The precise cause
+  (`token_expired`, `token_audience_mismatch`, …) goes to your log. `exposeRefusalCode: true` puts
+  it in the body too; use it for an internal API only, because it tells a caller which check failed.
+- `resourceMetadata` adds your RFC 9728 metadata URL to the 401 challenge.
+
+The verifier checks `typ at+jwt` (so an ID token is refused), the algorithm against the issuer's key
+(`RS256`, `ES256`, `EdDSA`; never `none` or `HS*`), `iss`, `aud`, `exp`, `nbf`, `iat`, `sub`,
+`tenant_id`, a sender-constrained token presented as Bearer, and a chain of actors. Every verified
+token has one shape:
+
+| Field | |
+|---|---|
+| `principal` | who the token is for: `{ kind, id }`, kind `user`, `app` or `agent` |
+| `actor` | who acts for them (`act.sub`): the agent of a delegated token |
+| `tokenKind` | `person`, `machine`, `agent` or `delegated` |
+| `permissions`, `roles`, `groups`, `scopes` | sets |
+| `orgId`, `acr`, `amr`, `authTime`, `expiresAt`, `claims` | |
+
+Compare principals, never `sub` strings: a delegated token types its subject (`user:…`).
+
+Without Express, call `verifier.verifyRequest(request)` with a Fetch API `Request` (or its
+`authorization` header), and answer refusals with `refusalAnswer(error)`, which builds the same
+status, challenge and body.
+
+**Several projects.** A server that accepts tokens from several issuers keeps one verifier each,
+pinned to its tenant:
+
+```ts
+const verifier = new MultiIssuerVerifier({
+  'https://acme.authfi.io': { verifier: acme.verifier({ audience: 'api_orders' }), tenantId: '4e46e0c4-…' },
+  'https://globex.authfi.io': { verifier: globex.verifier({ audience: 'api_orders' }), tenantId: '9a1d…' },
+});
+```
+
+**A per-object question**, or a fresh answer, goes to the project's decision point:
+
+```ts
+const { allowed, approvalRequired } = await af.check(m2m, {
+  subject: 'user:usr_1', relation: 'orders:refund', object: 'order:4411',
+});
+```
+
+## Machine clients
+
+```ts
+const m2m = af.clientCredentials({
+  clientId: process.env.AUTHFI_CLIENT_ID!,
+  clientSecret: new Secret(process.env.AUTHFI_CLIENT_SECRET!),
+  resource: 'api_orders',              // the API's client id: the token's audience
+  sendTo: ['https://api.example.com'], // the only origin the token goes to
+});
+const res = await m2m.fetch('https://api.example.com/orders');
+```
+
+The token is cached per resource and scope, renewed at two thirds of its lifetime, and minted once
+for concurrent callers. Without `resource` the token names the client itself as its audience, which
+no API should accept, and the SDK warns once.
+
+## Examples
+
+| Example | |
+|---|---|
+| [`examples/protect-an-api`](examples/protect-an-api) | An Express API that verifies tokens and authorizes on permissions |
+| [`examples/machine-to-machine`](examples/machine-to-machine) | A job calling that API with a client-credentials token |
+
 ## Secrets
 
 Client secrets, tokens, assertions and private keys are held in a `Secret`. It prints, inspects and

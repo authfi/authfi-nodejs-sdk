@@ -1,9 +1,13 @@
+import { appendFile } from 'node:fs/promises';
 import { defineConfig } from 'tsup';
 
 // One source, two module formats, generated types for each (so the types cannot drift from the code).
-// `splitting` keeps one copy of the core per format, so every subpath export shares its classes.
+// `splitting` puts the core in shared chunks, so every subpath export uses the same classes.
 export default defineConfig({
-  entry: { index: 'src/index.ts' },
+  entry: {
+    index: 'src/index.ts',
+    express: 'src/express/index.ts',
+  },
   format: ['esm', 'cjs'],
   target: 'es2022',
   platform: 'neutral',
@@ -15,4 +19,12 @@ export default defineConfig({
   treeshake: true,
   external: ['jose'],
   outExtension: ({ format }) => ({ js: format === 'cjs' ? '.cjs' : '.js' }),
+  // 0.1 was used as `require('@authfi/sdk')(config)`. Keep that call working for one minor: the
+  // CommonJS entry is the legacy factory, carrying every named export as a property.
+  onSuccess: async () => {
+    await appendFile(
+      'dist/index.cjs',
+      '\nmodule.exports = Object.assign(module.exports.default, module.exports);\n',
+    );
+  },
 });
