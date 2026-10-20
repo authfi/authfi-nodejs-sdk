@@ -16,6 +16,7 @@
  */
 
 import { isAuthFIError } from '../core/errors.js';
+import { isValidRequestId } from '../core/ids.js';
 import type { Logger } from '../core/logger.js';
 import type { AccessToken } from '../verify/access-token.js';
 import {
@@ -98,7 +99,10 @@ function answer(
   logger: Logger,
 ): void {
   const reply = refusalAnswer(error, schemeOf(req), options);
-  const requestId = single(req.headers['x-request-id']);
+  // The caller's id is echoed and logged only when it is one the platform would accept: anything
+  // else could forge log lines or carry a value into the response.
+  const given = single(req.headers['x-request-id']);
+  const requestId = given !== undefined && isValidRequestId(given) ? given : undefined;
   const fields = {
     code: isAuthFIError(error) ? error.code : 'internal_error',
     status: reply.status,

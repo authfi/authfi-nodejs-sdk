@@ -139,7 +139,7 @@ const vectors = [
   [
     'alg disagrees with the key',
     unsigned({ alg: 'EdDSA', typ: 'at+jwt', kid: 'rsa-v1' }, { iss: ISSUER }),
-    no('token_signature_invalid'),
+    no('token_key_unknown'),
   ],
   [
     'signed by another key under a published kid',

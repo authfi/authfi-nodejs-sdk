@@ -178,7 +178,7 @@
       "token": "eyJhbGciOiJFZERTQSIsInR5cCI6ImF0K2p3dCIsImtpZCI6InJzYS12MSJ9.eyJpc3MiOiJodHRwczovL3ZlY3RvcnMuYXV0aGZpLmlvIn0.c2ln",
       "expect": {
         "valid": false,
-        "code": "token_signature_invalid"
+        "code": "token_key_unknown"
       }
     },
     {

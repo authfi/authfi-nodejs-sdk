@@ -31,9 +31,11 @@ All notable changes to this package. It follows [Semantic Versioning](https://se
   AuthFI's own, `exp`/`nbf`/`iat` with leeway, `sub`, the tenant pin, bound tokens and actor chains.
   Refusals carry the kernel's codes. One `AccessToken` shape for every kind of token, with
   `principal`, `actor` and `tokenKind`. `verifyRequest` takes a Fetch `Request` or its parts.
-- `MultiIssuerVerifier`, pinning each trusted issuer to its tenant.
+- `MultiIssuerVerifier`, pinning each trusted issuer to its tenant; it accepts a `TokenVerifier`
+  from either build (`isTokenVerifier`).
 - `@authfi/sdk/express`: `protect(verifier, { permissions, anyPermission, roles, scopes, optional })`
-  and `authfiErrorHandler()`, answering refusals as the platform does.
+  and `authfiErrorHandler()`, answering refusals as the platform does. A caller's `X-Request-Id` is
+  echoed and logged only when it is one the platform accepts.
 - `refusalAnswer()` and the requirement helpers, for other frameworks.
 - `af.clientCredentials()`, a machine client's token source.
 - `af.check()`, the project's decision point.

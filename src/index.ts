@@ -42,6 +42,7 @@ export {
 } from './core/errors.js';
 export { AccessToken, Principal, type PrincipalKind, type TokenKind } from './verify/access-token.js';
 export {
+  isTokenVerifier,
   loggerOf,
   MultiIssuerVerifier,
   TokenVerifier,

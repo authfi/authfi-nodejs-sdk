@@ -89,6 +89,22 @@ describe('protect', () => {
     expect(res.headers.get('x-request-id')).toBe('req-1');
   });
 
+  it("echoes and logs the caller's X-Request-Id only when the platform would accept it", async () => {
+    const { verifier, log } = await setup();
+    const base = await serve(verifier, { logger: log });
+    const forged = 'x	level=error msg=forged';
+    for (const given of [forged, 'a'.repeat(129), 'has space', '<script>']) {
+      const res = await call(base, '/orders', { 'x-request-id': given });
+      expect(res.status).toBe(401);
+      expect(res.headers.get('x-request-id')).toBeNull();
+    }
+    expect(JSON.stringify(log.lines)).not.toContain('forged');
+    expect(log.lines.every((l) => l.fields?.request_id === undefined)).toBe(true);
+    const ok = await call(base, '/orders', { 'x-request-id': 'req-1.a:b_c-d' });
+    expect(ok.headers.get('x-request-id')).toBe('req-1.a:b_c-d');
+    expect(log.lines.at(-1)?.fields?.request_id).toBe('req-1.a:b_c-d');
+  });
+
   it('answers every token refusal the same, byte for byte, and logs the code only', async () => {
     const answers = new Set<string>();
     const codes: string[] = KERNEL_TOKEN_CODES.filter((c) => c.startsWith('token_') && c !== 'token_missing');
