@@ -383,6 +383,8 @@ export class AgentAuth extends BaseTokenSource {
     request: CibaRequest,
     options: {
       timeoutMs?: number | undefined;
+      /** How long to wait between polls; defaults to the platform's `interval` for the request. */
+      pollIntervalMs?: number | undefined;
       signal?: AbortSignal | undefined;
       resource?: string | undefined;
       sendTo?: readonly string[] | undefined;
@@ -393,7 +395,7 @@ export class AgentAuth extends BaseTokenSource {
     const meta = await this.#core.metadata({ signal: options.signal });
     const waitDeadline = clock.monotonic() + (options.timeoutMs ?? 300_000);
     const requestDeadline = clock.monotonic() + Math.max(0, request.expiresAt.getTime() - clock.now());
-    let interval = request.intervalMs;
+    let interval = options.pollIntervalMs ?? request.intervalMs;
     for (;;) {
       if (clock.monotonic() + interval > Math.min(waitDeadline, requestDeadline)) {
         if (requestDeadline <= waitDeadline) {
@@ -452,6 +454,7 @@ export class AgentAuth extends BaseTokenSource {
     scope?: readonly string[] | undefined;
     expiresInSeconds?: number | undefined;
     timeoutMs?: number | undefined;
+    pollIntervalMs?: number | undefined;
     signal?: AbortSignal | undefined;
     resource?: string | undefined;
     sendTo?: readonly string[] | undefined;
@@ -720,7 +723,7 @@ export class AgentAuth extends BaseTokenSource {
   }
 
   /**
-   * Polls {@link approval} every `intervalMs` until the approval is no longer pending, and returns it
+   * Polls {@link approval} every `pollIntervalMs` until the approval is no longer pending, and returns it
    * whatever the person decided. When `timeoutMs` passes first it throws {@link WaitTimeout} carrying
    * the approval's id; the approval stays open, and waiting on it again continues.
    */
@@ -728,13 +731,13 @@ export class AgentAuth extends BaseTokenSource {
     approvalId: string,
     options: {
       timeoutMs?: number | undefined;
-      intervalMs?: number | undefined;
+      pollIntervalMs?: number | undefined;
       signal?: AbortSignal | undefined;
     } = {},
   ): Promise<Approval> {
     const clock = this.#core.clock;
     const deadline = clock.monotonic() + (options.timeoutMs ?? 300_000);
-    const interval = options.intervalMs ?? 3000;
+    const interval = options.pollIntervalMs ?? 3000;
     for (;;) {
       const current = await this.approval(approvalId, options);
       if (current.status !== 'pending') return current;

@@ -42,13 +42,18 @@ jobs:
         run: node scripts/gen-vectors.mjs --check
 
   test:
-    name: test (node ${{ matrix.node }})
+    name: test (node ${{ matrix.node }}, ${{ matrix.os }})
     needs: lint
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest]
         node: [22, 24, 26]
+        include:
+          # Paths, line endings and file modes differ on Windows; one leg on the oldest Node is enough.
+          - os: windows-latest
+            node: 22
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -62,18 +67,14 @@ jobs:
       - name: Run the tests in Node and the edge runtime, with coverage gates
         run: npm run test:coverage
       - name: Keep the coverage report
-        if: matrix.node == 22
+        if: matrix.node == 22 && matrix.os == 'ubuntu-latest'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: coverage
           path: coverage/
 
-  # The lockfile installs one version of each optional peer, so a declared lower bound is otherwise
-  # never installed. This installs every peer at the lowest version its range allows (the lowest
-  # published one: ai 7.0.80 and 7.0.81 were never released, and 7.0.79 and earlier fail the
-  # cross-process resume test) and runs the suites that use them.
-  lowest:
-    name: test (peer floors)
+  lowest-peers:
+    name: test (lowest peer versions)
     needs: lint
     runs-on: ubuntu-latest
     steps:
@@ -86,28 +87,10 @@ jobs:
           cache: npm
       - name: Install dependencies
         run: npm ci
-      - name: Install every peer at its floor
-        run: npm install --no-save --legacy-peer-deps ai@7.0.82 @ai-sdk/anthropic@4.0.0 @ai-sdk/mcp@2.0.0 express@4.21.2 @opentelemetry/api@1.9.0
-      - name: Run the suites that use the peers
-        run: npx vitest run --project node test/vercel-ai test/express test/gateway
-
-  # The agent key file is checked by POSIX mode on Linux and warned about on Windows: each only runs there.
-  windows:
-    name: test (windows)
-    needs: lint
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: 22
-          cache: npm
-      - name: Install dependencies
-        run: npm ci
-      - name: Run the key-file tests
-        run: npx vitest run --project node test/node test/agents/agent-key.test.ts
+      - name: Install the oldest version each peer range allows
+        run: node scripts/install-lowest-peers.mjs
+      - name: Run the tests against them
+        run: npm test
 
   build:
     name: build
@@ -137,14 +120,13 @@ jobs:
   ci:
     name: ci
     if: always()
-    needs: [lint, test, lowest, windows, build]
+    needs: [lint, test, lowest-peers, build]
     runs-on: ubuntu-latest
     steps:
       - name: Require every stage to pass
         run: |
-          echo "lint=${{ needs.lint.result }} test=${{ needs.test.result }} lowest=${{ needs.lowest.result }} windows=${{ needs.windows.result }} build=${{ needs.build.result }}"
+          echo "lint=${{ needs.lint.result }} test=${{ needs.test.result }} lowest-peers=${{ needs.lowest-peers.result }} build=${{ needs.build.result }}"
           test "${{ needs.lint.result }}" = success
           test "${{ needs.test.result }}" = success
-          test "${{ needs.lowest.result }}" = success
-          test "${{ needs.windows.result }}" = success
+          test "${{ needs.lowest-peers.result }}" = success
           test "${{ needs.build.result }}" = success

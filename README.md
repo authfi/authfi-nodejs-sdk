@@ -242,7 +242,7 @@ that credential.
 | `gateway.fetch` | the credential per request, `X-Request-Id` and `traceparent`, AuthFI's origins only, no redirects; a 401 is `GatewayTokenRefused` |
 | `gateway.readResult(result)` | a `ToolOutcome`: `allowed`, `refused` (with `code`, `reason`, `requiredScope`) or `approval_required` (with `approvalId`) |
 | `gateway.scopeOf(tool)` | the grant object of a tool, from `tools/list` |
-| `gateway.cloudCredentials({ account, role })` | a short-lived cloud credential, or `approval_required` |
+| `gateway.cloudCredentials({ account, role, expiresInSeconds? })` | a short-lived cloud credential (`expiresInSeconds` from 1 to 900, default 900), or `approval_required` |
 
 A refusal and a hold are values, not exceptions: a framework hands them to the model as the tool's
 answer. Never give a hold's text to a model: it names the approval. An adapter strips an
@@ -334,6 +334,16 @@ interface TokenSource {
 
 Framework adapters and gateway helpers take any `TokenSource`. Call `token()` or `headers()` inside
 the request path and keep no reference to the result.
+
+### Concurrent callers and a spent refresh token
+
+Callers that ask for the same token at the same moment share one request. An `AbortSignal` ends only
+its own caller's wait: aborting one caller never fails the others, and a refresh already sent is not
+abandoned, so the rotated token the platform issued is kept.
+
+The sharing lasts while the request is in flight. A refresh token is single use: a caller that arrives
+later with a refresh token that has already been spent is not handed the earlier result. It goes to
+the server and gets `invalid_grant`, so a replayed refresh token is never answered from memory.
 
 ## Contributing
 

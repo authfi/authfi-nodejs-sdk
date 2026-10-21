@@ -58,6 +58,9 @@ export type ToolOutcome =
     }
   | { readonly kind: 'approval_required'; readonly approvalId: string; readonly code: string };
 
+/** The longest credential the platform issues, in seconds. */
+const MAX_CLOUD_SECONDS = 900;
+
 /** A short-lived cloud credential the gateway issued. The secret parts are {@link Secret}s. */
 export interface CloudCredential {
   readonly provider: string;
@@ -193,6 +196,12 @@ export class Gateway {
     signal?: AbortSignal | undefined;
   }): Promise<CloudCredentialOutcome> {
     if (!request.account || !request.role) throw new ConfigurationError('account and role are required');
+    const seconds = request.expiresInSeconds;
+    if (seconds !== undefined && (!Number.isInteger(seconds) || seconds < 1 || seconds > MAX_CLOUD_SECONDS)) {
+      throw new ConfigurationError(
+        `expiresInSeconds must be a whole number of seconds from 1 to ${MAX_CLOUD_SECONDS}, the platform's limit`,
+      );
+    }
     const url = `${await this.#core.apiOrigin(request.signal)}/mcp/v1/cloud/credentials`;
     const res = await this.#core.transport.send({
       method: 'POST',
@@ -221,7 +230,19 @@ export class Gateway {
         });
       return { kind: 'approval_required', approvalId };
     }
-    if (res.status !== 201 && res.status !== 200) throw apiErrorOf(res);
+    if (res.status !== 201) {
+      if (res.status >= 200 && res.status < 300) {
+        throw new TransportError(
+          'response_invalid',
+          `${url} answered ${res.status}; only 201 or 202 mean a credential was issued`,
+          {
+            ...contextOf(res),
+            retryable: false,
+          },
+        );
+      }
+      throw apiErrorOf(res);
+    }
     const c = dataOf(res) as Record<string, unknown> | null;
     if (typeof c?.provider !== 'string')
       throw new TransportError('response_invalid', `${url} answered no credential`, {

@@ -58,11 +58,11 @@ All notable changes to this package. It follows [Semantic Versioning](https://se
   transaction token and gate, and approvals (`requestApproval`, `approval`, `waitForApproval`).
   A wait that runs out its own `timeoutMs` (`awaitUserToken`, `waitForApproval`) throws `WaitTimeout`
   (`code === 'wait_timeout'`, with the approval's id when it has one) and leaves the request open; a
-  CIBA request that really expired is `ConsentExpired`. `authorization_pending` is the server's word
+  CIBA request that really expired is `ConsentExpired`. Both waits take `pollIntervalMs`. `authorization_pending` is the server's word
   and is never raised locally.
 - **The gateways**: `agent.gateway()` and `delegatedToken.gateway()`, with `mcpUrl`, `modelBaseUrl`,
   an origin-pinned `fetch` (a 401 is `GatewayTokenRefused`), `readResult` returning a `ToolOutcome`
-  (`allowed`, `refused`, `approval_required`), `scopeOf`, `cloudCredentials`, and `APPROVAL_ARGUMENT`.
+  (`allowed`, `refused`, `approval_required`), `scopeOf`, `cloudCredentials` (a credential is issued on 201; 202 asks for approval; `expiresInSeconds` is 1 to 900), and `APPROVAL_ARGUMENT`.
   The gateway's hold is read by `HOLD_PATTERN`, the same pattern as the Python SDK's, and a model
   is told `HOLD_MESSAGE`.
 - **`@authfi/sdk/vercel-ai`**: `createVercelAI({ source, approvalSecret })` for the Vercel AI SDK 7:
