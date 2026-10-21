@@ -36,6 +36,8 @@ jobs:
         run: npm run lint
       - name: Type-check (tsc --strict)
         run: npm run typecheck
+      - name: Check no document tells people to install from the npm registry
+        run: npm run check:install-text
       - name: Check the kernel codes were not edited by hand
         run: node scripts/gen-codes.mjs --check
       - name: Check the conformance vectors against their checksum
