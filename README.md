@@ -202,7 +202,7 @@ that credential.
 | `gateway.fetch` | the credential per request, `X-Request-Id` and `traceparent`, AuthFI's origins only, no redirects; a 401 is `GatewayTokenRefused` |
 | `gateway.readResult(result)` | a `ToolOutcome`: `allowed`, `refused` (with `code`, `reason`, `requiredScope`) or `approval_required` (with `approvalId`) |
 | `gateway.scopeOf(tool)` | the grant object of a tool, from `tools/list` |
-| `gateway.cloudCredentials({ account, role })` | a short-lived cloud credential, or `approval_required` |
+| `gateway.cloudCredentials({ account, role, expiresInSeconds? })` | a short-lived cloud credential (`expiresInSeconds` from 1 to 900, default 900), or `approval_required` |
 
 A refusal and a hold are values, not exceptions: a framework hands them to the model as the tool's
 answer. Never give a hold's text to a model: it names the approval. An adapter strips an

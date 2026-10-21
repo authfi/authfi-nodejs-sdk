@@ -54,7 +54,7 @@ All notable changes to this package. It follows [Semantic Versioning](https://se
   and is never raised locally.
 - **The gateways**: `agent.gateway()` and `delegatedToken.gateway()`, with `mcpUrl`, `modelBaseUrl`,
   an origin-pinned `fetch` (a 401 is `GatewayTokenRefused`), `readResult` returning a `ToolOutcome`
-  (`allowed`, `refused`, `approval_required`), `scopeOf`, `cloudCredentials`, and `APPROVAL_ARGUMENT`.
+  (`allowed`, `refused`, `approval_required`), `scopeOf`, `cloudCredentials` (a credential is issued on 201; 202 asks for approval; `expiresInSeconds` is 1 to 900), and `APPROVAL_ARGUMENT`.
   The gateway's hold is read by `HOLD_PATTERN`, the same pattern as the Python SDK's, and a model
   is told `HOLD_MESSAGE`.
 - **`@authfi/sdk/vercel-ai`**: `createVercelAI({ source, approvalSecret })` for the Vercel AI SDK 7:

@@ -22,7 +22,7 @@ const specs = Object.entries(pkg.peerDependencies ?? {}).map(([name, range]) => 
 if (process.argv.includes('--print')) {
   process.stdout.write(`${specs.join('\n')}\n`);
 } else if (specs.length > 0) {
-  execFileSync('npm', ['install', '--no-save', '--no-audit', '--no-fund', ...specs], {
+  execFileSync('npm', ['install', '--no-save', '--legacy-peer-deps', '--no-audit', '--no-fund', ...specs], {
     stdio: 'inherit',
     shell: process.platform === 'win32',
   });

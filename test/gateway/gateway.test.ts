@@ -139,6 +139,7 @@ describe('the gateway fetch', () => {
     const delegated = await agent.exchange(new Secret(await as.t.sign()));
     expect(delegated.gateway().agentId).toBe(AGENT_ID);
     expect(delegated.gateway()).toBe(delegated.gateway());
+    expect(agent.gateway()).toBe(agent.gateway());
   });
 });
 
@@ -187,6 +188,32 @@ describe('cloud credentials', () => {
     const out = await gateway.cloudCredentials({ account: 'a', role: 'admin', approvalId: 'apr-1' });
     expect(out.kind === 'issued' && out.credential.accessToken?.reveal()).toBe('gat');
     expect(out.kind === 'issued' && out.credential.expiresAt).toBeInstanceOf(Date);
+  });
+
+  it('treats only 201 and 202 as an answer: a 200 carrying a credential is refused', async () => {
+    const { gateway, as, fake } = await setup();
+    fake.on('POST', url(as.issuer), () =>
+      json(
+        { data: { provider: 'aws', credential_id: 'c1', access_key_id: 'AKIA', secret_access_key: 'sk' } },
+        200,
+      ),
+    );
+    await expect(gateway.cloudCredentials({ account: 'a', role: 'r' })).rejects.toMatchObject({
+      code: 'response_invalid',
+    });
+  });
+
+  it('refuses a duration the platform would refuse, naming its 900 s limit, before sending anything', async () => {
+    const { gateway, as, fake } = await setup();
+    fake.on('POST', url(as.issuer), () => json({ data: { provider: 'aws' } }, 201));
+    for (const bad of [901, 43_200, 0, -5, 1.5, Number.NaN]) {
+      await expect(
+        gateway.cloudCredentials({ account: 'a', role: 'r', expiresInSeconds: bad }),
+      ).rejects.toThrow(/expiresInSeconds.*1 to 900/);
+    }
+    expect(fake.to(url(as.issuer))).toHaveLength(0);
+    const ok = await gateway.cloudCredentials({ account: 'a', role: 'r', expiresInSeconds: 900 });
+    expect(ok.kind).toBe('issued');
   });
 
   it('maps refusals: the token refused, a coded refusal, and malformed answers', async () => {
