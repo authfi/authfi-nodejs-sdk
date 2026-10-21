@@ -265,6 +265,16 @@ interface TokenSource {
 Framework adapters and gateway helpers take any `TokenSource`. Call `token()` or `headers()` inside
 the request path and keep no reference to the result.
 
+### Concurrent callers and a spent refresh token
+
+Callers that ask for the same token at the same moment share one request. An `AbortSignal` ends only
+its own caller's wait: aborting one caller never fails the others, and a refresh already sent is not
+abandoned, so the rotated token the platform issued is kept.
+
+The sharing lasts while the request is in flight. A refresh token is single use: a caller that arrives
+later with a refresh token that has already been spent is not handed the earlier result. It goes to
+the server and gets `invalid_grant`, so a replayed refresh token is never answered from memory.
+
 ## Contributing
 
 ```bash
