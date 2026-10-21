@@ -92,6 +92,14 @@ export default tseslint.config(
   {
     files: ['scripts/**/*.mjs', '*.js'],
     ...tseslint.configs.disableTypeChecked,
-    languageOptions: { globals: { process: 'readonly', console: 'readonly', Buffer: 'readonly' } },
+    languageOptions: {
+      globals: {
+        process: 'readonly',
+        console: 'readonly',
+        Buffer: 'readonly',
+        fetch: 'readonly',
+        URL: 'readonly',
+      },
+    },
   },
 );

@@ -1,0 +1,134 @@
+name: Pipeline
+
+# lint -> test -> build on every pull request; `ci` is the one required check.
+# Public repository: no secrets in any job here, never pull_request_target, every action pinned by SHA.
+# Runner: GitHub-hosted, pending the CTO's decision on public SDK repos (design 20 §7.2); our
+# self-hosted runners must not run code from a public repository's pull requests.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  merge_group:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pipeline-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Check formatting and lint (prettier, eslint)
+        run: npm run lint
+      - name: Type-check (tsc --strict)
+        run: npm run typecheck
+      - name: Check no document tells people to install from the npm registry
+        run: npm run check:install-text
+      - name: Check the kernel codes were not edited by hand
+        run: node scripts/gen-codes.mjs --check
+      - name: Check the conformance vectors against their checksum
+        run: node scripts/gen-vectors.mjs --check
+
+  test:
+    name: test (node ${{ matrix.node }}, ${{ matrix.os }})
+    needs: lint
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        node: [22, 24, 26]
+        include:
+          # Paths, line endings and file modes differ on Windows; one leg on the oldest Node is enough.
+          - os: windows-latest
+            node: 22
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Run the tests in Node and the edge runtime, with coverage gates
+        run: npm run test:coverage
+      - name: Keep the coverage report
+        if: matrix.node == 22 && matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage
+          path: coverage/
+
+  lowest-peers:
+    name: test (lowest peer versions)
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Install the oldest version each peer range allows
+        run: node scripts/install-lowest-peers.mjs
+      - name: Run the tests against them
+        run: npm test
+
+  build:
+    name: build
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Build ESM, CommonJS and types
+        run: npm run build
+      - name: Check the package resolves in every module system (publint, attw)
+        run: npm run check:package
+      - name: Check the runtime-neutral entries bundle for the browser
+        run: npm run check:browser
+      - name: Check the ESM and the CommonJS build agree on what they recognise
+        run: npm run check:dual
+      - name: Pack the tarball
+        run: npm pack
+
+  ci:
+    name: ci
+    if: always()
+    needs: [lint, test, lowest-peers, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every stage to pass
+        run: |
+          echo "lint=${{ needs.lint.result }} test=${{ needs.test.result }} lowest-peers=${{ needs.lowest-peers.result }} build=${{ needs.build.result }}"
+          test "${{ needs.lint.result }}" = success
+          test "${{ needs.test.result }}" = success
+          test "${{ needs.lowest-peers.result }}" = success
+          test "${{ needs.build.result }}" = success
