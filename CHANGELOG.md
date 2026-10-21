@@ -50,7 +50,7 @@ All notable changes to this package. It follows [Semantic Versioning](https://se
   transaction token and gate, and approvals (`requestApproval`, `approval`, `waitForApproval`).
   A wait that runs out its own `timeoutMs` (`awaitUserToken`, `waitForApproval`) throws `WaitTimeout`
   (`code === 'wait_timeout'`, with the approval's id when it has one) and leaves the request open; a
-  CIBA request that really expired is `ConsentExpired`. Both waits take `pollIntervalMs`. `authorization_pending` is the server's word
+  CIBA request that really expired is `ConsentExpired`. Both waits take `pollIntervalMs` (finite and above zero, else `ConfigurationError`; the CIBA wait never polls faster than the platform's interval, so a smaller value is raised to it). `authorization_pending` is the server's word
   and is never raised locally.
 - `@authfi/sdk/node`: `readAgentKey` (refuses a key file others can read, checked on the open file),
   `generateAgentKeyFile` (makes a key into a new 0600 file, never overwrites, and returns a key that

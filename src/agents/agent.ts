@@ -44,6 +44,15 @@ export interface AgentOptions {
   readonly refreshSkewMs?: number | undefined;
 }
 
+/** A poll interval the caller gave: finite and above zero, or a {@link ConfigurationError}. */
+function pollIntervalOf(value: number | undefined): number | undefined {
+  if (value === undefined) return undefined;
+  if (!Number.isFinite(value) || value <= 0) {
+    throw new ConfigurationError('pollIntervalMs must be a finite number of milliseconds above zero');
+  }
+  return value;
+}
+
 /** A CIBA request: the person has been asked and has not yet answered. */
 export interface CibaRequest {
   /** The handle to redeem; treat it as a secret. */
@@ -381,7 +390,10 @@ export class AgentAuth extends BaseTokenSource {
     request: CibaRequest,
     options: {
       timeoutMs?: number;
-      /** How long to wait between polls; defaults to the platform's `interval` for the request. */
+      /**
+       * How long to wait between polls. Never below the platform's `interval` for the request (a smaller
+       * value is raised to it); defaults to it. Finite and above zero.
+       */
       pollIntervalMs?: number;
       signal?: AbortSignal;
       resource?: string;
@@ -393,7 +405,7 @@ export class AgentAuth extends BaseTokenSource {
     const meta = await this.#core.metadata({ signal: options.signal });
     const waitDeadline = clock.monotonic() + (options.timeoutMs ?? 300_000);
     const requestDeadline = clock.monotonic() + Math.max(0, request.expiresAt.getTime() - clock.now());
-    let interval = options.pollIntervalMs ?? request.intervalMs;
+    let interval = Math.max(request.intervalMs, pollIntervalOf(options.pollIntervalMs) ?? 0);
     for (;;) {
       if (clock.monotonic() + interval > Math.min(waitDeadline, requestDeadline)) {
         if (requestDeadline <= waitDeadline) {
@@ -727,7 +739,7 @@ export class AgentAuth extends BaseTokenSource {
   ): Promise<Approval> {
     const clock = this.#core.clock;
     const deadline = clock.monotonic() + (options.timeoutMs ?? 300_000);
-    const interval = options.pollIntervalMs ?? 3000;
+    const interval = pollIntervalOf(options.pollIntervalMs) ?? 3000;
     for (;;) {
       const current = await this.approval(approvalId, options);
       if (current.status !== 'pending') return current;

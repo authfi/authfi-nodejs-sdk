@@ -189,12 +189,38 @@ describe('CIBA', () => {
     const { agent, as, clock } = await setup();
     as.ciba.answers = ['pending', 'slow_down', 'approve'];
     const request = await agent.requestUserToken({ loginHint: 'a', bindingMessage: 'b' });
-    await agent.awaitUserToken(request, { pollIntervalMs: 500 });
-    expect(clock.sleeps).toEqual([500, 500, 5500]);
+    await agent.awaitUserToken(request, { pollIntervalMs: 3000 });
+    expect(clock.sleeps).toEqual([3000, 3000, 8000]);
     as.ciba = { answers: ['approve'], redeemed: false };
     clock.sleeps.length = 0;
-    await agent.tokenAsUser({ loginHint: 'a', bindingMessage: 'b', pollIntervalMs: 250 });
-    expect(clock.sleeps).toEqual([250]);
+    await agent.tokenAsUser({ loginHint: 'a', bindingMessage: 'b', pollIntervalMs: 2500 });
+    expect(clock.sleeps).toEqual([2500]);
+  });
+
+  it.each([0, -1, Number.NaN, Number.POSITIVE_INFINITY])(
+    'refuses a pollIntervalMs of %s before it can poll in a tight loop',
+    async (bad) => {
+      const { agent, as, fake } = await setup();
+      as.ciba.answers = ['approve'];
+      const request = await agent.requestUserToken({ loginHint: 'a', bindingMessage: 'b' });
+      const polls = () => fake.to(`${as.issuer}/oauth/token`).length;
+      const before = polls();
+      await expect(agent.awaitUserToken(request, { pollIntervalMs: bad })).rejects.toMatchObject({
+        name: 'ConfigurationError',
+      });
+      await expect(agent.waitForApproval('apr-1', { pollIntervalMs: bad })).rejects.toMatchObject({
+        name: 'ConfigurationError',
+      });
+      expect(polls()).toBe(before);
+    },
+  );
+
+  it("never polls faster than the platform's interval: a smaller pollIntervalMs is raised to it", async () => {
+    const { agent, as, clock } = await setup();
+    as.ciba.answers = ['pending', 'approve'];
+    const request = await agent.requestUserToken({ loginHint: 'a', bindingMessage: 'b' });
+    await agent.awaitUserToken(request, { pollIntervalMs: 1 });
+    expect(clock.sleeps).toEqual([request.intervalMs, request.intervalMs]);
   });
 
   it('a refusal is ConsentDenied, a lapsed request ConsentExpired', async () => {
