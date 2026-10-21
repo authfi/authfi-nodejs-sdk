@@ -57,7 +57,7 @@ All notable changes to this package. It follows [Semantic Versioning](https://se
 - **Node.js 22.12 or later is required** (Node 18 and 20 are past end of life).
 - **Install from GitHub runs a build.** The package is TypeScript now, so the codeload tarball URL
   in the previous README no longer installs a usable package; install with
-  `npm install github:authfi/authfi-nodejs-sdk#<tag>` or from a release tarball.
+  `npm install github:authfi/authfi-nodejs-sdk#<tag>`, which needs git.
 - The hand-written `index.js` and `index.d.ts` are replaced by the TypeScript source.
 
 ### Deprecated (removed in 1.0)
