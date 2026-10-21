@@ -14,12 +14,7 @@ The package is not on npm yet. Install it from GitHub, pinned to a release tag o
 npm install github:authfi/authfi-nodejs-sdk#<tag-or-commit>
 ```
 
-npm builds the package from source on install (its `prepare` script), which needs `git` on the
-machine. In an image without `git`, install the tarball attached to a GitHub release instead:
-
-```bash
-npm install https://github.com/authfi/authfi-nodejs-sdk/releases/download/<tag>/authfi-sdk-<version>.tgz
-```
+npm builds the package from source on install (its `prepare` script), so the machine needs `git`.
 
 **Requirements:** Node.js 22.12 or later. The core uses Web APIs only (`fetch`, Web Crypto through
 [`jose`](https://github.com/panva/jose)), so it also runs in edge runtimes and browsers. `jose` is the

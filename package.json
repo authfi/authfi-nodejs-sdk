@@ -68,7 +68,8 @@
     "check:package": "publint --strict && attw --pack . --profile node16",
     "check:browser": "node scripts/check-browser-bundle.mjs",
     "check:dual": "node scripts/check-dual-package.mjs",
-    "gen:codes": "node scripts/gen-codes.mjs"
+    "gen:codes": "node scripts/gen-codes.mjs",
+    "check:install-text": "node scripts/check-install-text.mjs"
   },
   "dependencies": {
     "jose": "^6.2.12"
