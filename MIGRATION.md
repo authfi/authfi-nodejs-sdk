@@ -65,3 +65,22 @@ The 0.1 factory still works for one minor version (`require('@authfi/sdk')(confi
 |---|---|
 | `registerPermission`, `syncPermissions`, `autoSync` | none: manage permissions in the console. The calls throw `NotSupportedError` |
 | `cloud.credentials`, `cloud.token` | agents: the gateway's cloud credentials. The calls throw `NotSupportedError` |
+
+## Agents
+
+Nothing about agents was released on `main`, so there are no aliases. Code written against the
+open pull request #10 changes as follows:
+
+| PR #10 | 0.2 |
+|---|---|
+| `new AgentAuth({ issuer, agentId, key })` | `af.agent({ agentId, key })`, from the project |
+| `AgentAuth.fromEnv()` | `agentFromEnv(af)` from `@authfi/sdk/node` |
+| `AgentKey.fromFile(path, { kid })` | `readAgentKey(path, { kid })` from `@authfi/sdk/node` (refuses a file others can read) |
+| `AgentKey.generate()` (sync) | `await AgentKey.generate()` (Web Crypto) |
+| `key.privatePem()` | none: `generateAgentKeyFile(path)` makes a key straight into a new 0600 file, and no key object returns its private half |
+| `requestUserApproval({ ... })` | `requestUserToken({ loginHint, bindingMessage })`; `bindingMessage` is required |
+| `awaitUserToken(approval, { timeout })` | `awaitUserToken(request, { timeoutMs })` |
+| `exchangeToken({ subjectToken })` | `exchange(new Secret(subjectToken))` or `exchange(tokenSource)` |
+| `authHeader()` | `headers(method, url)` |
+| `AgentAuthError.error` | `AuthFIError.code`; `ConsentDenied`, `ConsentExpired` for the person's answers |
+| `allowedOrigins` | `forResource(resource, { sendTo })` |

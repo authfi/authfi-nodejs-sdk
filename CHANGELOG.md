@@ -42,6 +42,19 @@ All notable changes to this package. It follows [Semantic Versioning](https://se
 - `refusalAnswer()` and the requirement helpers, for other frameworks.
 - `af.clientCredentials()`, a machine client's token source.
 - `af.check()`, the project's decision point.
+- **AI agents** on the same core: `af.agent({ agentId, key })` with `AgentKey` (Ed25519, P-256 or RSA
+  3072, held as a Web Crypto key), the agent's own token (a fresh five-minute assertion per
+  attempt, cached, single-flight), `forResource` with `sendTo`, `capabilities`, CIBA
+  (`requestUserToken`, `awaitUserToken`, `tokenAsUser`; `bindingMessage` required), token exchange
+  (`exchange`, no client authentication), `DelegatedToken` (`subject`, `actor`, `via`), the
+  transaction token and gate, and approvals (`requestApproval`, `approval`, `waitForApproval`).
+  A wait that runs out its own `timeoutMs` (`awaitUserToken`, `waitForApproval`) throws `WaitTimeout`
+  (`code === 'wait_timeout'`, with the approval's id when it has one) and leaves the request open; a
+  CIBA request that really expired is `ConsentExpired`. Both waits take `pollIntervalMs` (finite and above zero, else `ConfigurationError`; the CIBA wait never polls faster than the platform's interval, so a smaller value is raised to it). `authorization_pending` is the server's word
+  and is never raised locally.
+- `@authfi/sdk/node`: `readAgentKey` (refuses a key file others can read, checked on the open file),
+  `generateAgentKeyFile` (makes a key into a new 0600 file, never overwrites, and returns a key that
+  cannot be written again) and `agentFromEnv`.
 - `conformance/vectors.json`: tokens with the outcome every AuthFI SDK must produce, run in Node and
   in the edge runtime.
 

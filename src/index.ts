@@ -33,6 +33,7 @@ export {
   StepUpRequired,
   TemporarilyUnavailable,
   TransportError,
+  WaitTimeout,
   type AuthFIErrorKinds,
   type ErrorCode,
   type ErrorContext,
@@ -65,3 +66,13 @@ export { ClientCredentials, type ClientCredentialsOptions } from './machine/clie
 // The 0.1 factory, deprecated and kept for one minor version.
 // eslint-disable-next-line @typescript-eslint/no-deprecated
 export { default, type LegacyClient, type LegacyConfig } from './legacy.js';
+export { AgentKey, type AgentAlgorithm, type Signer } from './agents/agent-key.js';
+export {
+  AgentAuth,
+  type ActionDecision,
+  type AgentOptions,
+  type Approval,
+  type CibaRequest,
+  type TransactionToken,
+} from './agents/agent.js';
+export { DelegatedToken, type DelegationRoute } from './agents/delegated.js';
