@@ -4,7 +4,7 @@ An Express API that verifies AuthFI access tokens and authorizes each route on p
 
 ```bash
 cp .env.example .env    # set AUTHFI_ISSUER and API_AUDIENCE
-npm install @authfi/sdk express
+npm install github:authfi/authfi-nodejs-sdk#<ref> express
 node --env-file=.env --import tsx server.ts
 ```
 
