@@ -329,6 +329,27 @@ describe('caches', () => {
     expect(seen).toEqual([undefined]); // one call, made with no caller's signal
   });
 
+  it('a caller whose signal is already aborted leaves no unhandled rejection when the shared call fails', async () => {
+    const flight = new SingleFlight<string, number>();
+    const unhandled: unknown[] = [];
+    const onUnhandled = (e: unknown): void => {
+      unhandled.push(e);
+    };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const gone = flight.run(
+        'k',
+        () => new Promise<number>((_, rej) => setTimeout(() => rej(new Error('boom')), 5)),
+        AbortSignal.abort(new Error('early')),
+      );
+      await expect(gone).rejects.toThrow('early');
+      await new Promise((r) => setTimeout(r, 30));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
+
   it('a call that outlives the caller that started it still finishes for the others', async () => {
     const flight = new SingleFlight<string, number>();
     let calls = 0;
