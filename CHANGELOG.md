@@ -50,7 +50,7 @@ All notable changes to this package. It follows [Semantic Versioning](https://se
   transaction token and gate, and approvals (`requestApproval`, `approval`, `waitForApproval`).
   A wait that runs out its own `timeoutMs` (`awaitUserToken`, `waitForApproval`) throws `WaitTimeout`
   (`code === 'wait_timeout'`, with the approval's id when it has one) and leaves the request open; a
-  CIBA request that really expired is `ConsentExpired`. `authorization_pending` is the server's word
+  CIBA request that really expired is `ConsentExpired`. Both waits take `pollIntervalMs`. `authorization_pending` is the server's word
   and is never raised locally.
 - **The gateways**: `agent.gateway()` and `delegatedToken.gateway()`, with `mcpUrl`, `modelBaseUrl`,
   an origin-pinned `fetch` (a 401 is `GatewayTokenRefused`), `readResult` returning a `ToolOutcome`

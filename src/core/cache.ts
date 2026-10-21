@@ -3,7 +3,11 @@ import type { Clock } from './clock.js';
 /** Resolves as `promise` does, or rejects with the signal's reason when it aborts first. */
 export function raceSignal<T>(promise: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
   if (signal === undefined) return promise;
-  if (signal.aborted) return Promise.reject(signal.reason as Error);
+  if (signal.aborted) {
+    // The caller is gone, but the promise may still reject later; that rejection has no other reader.
+    promise.catch(() => undefined);
+    return Promise.reject(signal.reason as Error);
+  }
   return new Promise<T>((resolve, reject) => {
     const onAbort = (): void => {
       reject(signal.reason as Error);

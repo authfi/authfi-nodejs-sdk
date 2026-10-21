@@ -185,6 +185,18 @@ describe('CIBA', () => {
     expect(inspect(token)).toBe(`DelegatedToken(user:usr_9 by agent:${AGENT_ID} via ciba)`);
   });
 
+  it('polls at the pollIntervalMs the caller gives instead of the platform one, and still honours slow_down', async () => {
+    const { agent, as, clock } = await setup();
+    as.ciba.answers = ['pending', 'slow_down', 'approve'];
+    const request = await agent.requestUserToken({ loginHint: 'a', bindingMessage: 'b' });
+    await agent.awaitUserToken(request, { pollIntervalMs: 500 });
+    expect(clock.sleeps).toEqual([500, 500, 5500]);
+    as.ciba = { answers: ['approve'], redeemed: false };
+    clock.sleeps.length = 0;
+    await agent.tokenAsUser({ loginHint: 'a', bindingMessage: 'b', pollIntervalMs: 250 });
+    expect(clock.sleeps).toEqual([250]);
+  });
+
   it('a refusal is ConsentDenied, a lapsed request ConsentExpired', async () => {
     const { agent, as } = await setup();
     as.ciba.answers = ['deny'];
@@ -425,17 +437,17 @@ describe('approvals', () => {
   it('waits for the decision once the project opens approval status to agents', async () => {
     const { agent, as, clock } = await setup();
     as.approvalStatus = 'approved';
-    const done = await agent.waitForApproval('apr-1', { intervalMs: 1000 });
+    const done = await agent.waitForApproval('apr-1', { pollIntervalMs: 1000 });
     expect(done.status).toBe('approved');
     expect(clock.sleeps).toContain(1000);
     as.approvalStatus = 'pending';
-    await expect(agent.waitForApproval('apr-1', { timeoutMs: 2500, intervalMs: 1000 })).rejects.toMatchObject(
-      {
-        name: 'WaitTimeout',
-        code: 'wait_timeout',
-        pendingId: 'apr-1',
-      },
-    );
+    await expect(
+      agent.waitForApproval('apr-1', { timeoutMs: 2500, pollIntervalMs: 1000 }),
+    ).rejects.toMatchObject({
+      name: 'WaitTimeout',
+      code: 'wait_timeout',
+      pendingId: 'apr-1',
+    });
   });
 
   it('refuses an agent-configuration that points elsewhere', async () => {
