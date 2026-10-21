@@ -1,19 +1,85 @@
 {
   "name": "@authfi/sdk",
-  "version": "0.1.0",
-  "description": "AuthFI Node.js SDK — JWT validation, RBAC middleware, permission auto-sync, cloud credentials",
-  "main": "index.js",
-  "types": "index.d.ts",
+  "version": "0.2.0-dev.0",
+  "description": "The AuthFI SDK for Node.js, edge runtimes and browsers: verify tokens, machine clients, AI agents and people signing in, on one core.",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/authfi/authfi-nodejs-sdk"
+    "url": "git+https://github.com/authfi/authfi-nodejs-sdk.git"
   },
-  "keywords": ["auth", "authfi", "jwt", "rbac", "permissions", "middleware", "sso", "cloud-iam"],
+  "homepage": "https://authfi.io/docs",
+  "keywords": [
+    "authfi",
+    "oauth",
+    "oidc",
+    "jwt",
+    "access-token",
+    "ai-agents",
+    "mcp"
+  ],
+  "type": "module",
+  "sideEffects": false,
   "engines": {
-    "node": ">=18"
+    "node": ">=22.12.0"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "CHANGELOG.md",
+    "MIGRATION.md",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.cts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    },
+    "./package.json": "./package.json"
   },
   "scripts": {
-    "test": "node --test test.js"
+    "build": "tsup",
+    "prepare": "tsup",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "lint": "eslint . && prettier --check .",
+    "format": "prettier --write .",
+    "test": "vitest run --project node --project edge",
+    "test:coverage": "vitest run --project node --project edge --coverage",
+    "test:live": "vitest run --project live",
+    "check:package": "publint --strict && attw --pack . --profile node16",
+    "check:browser": "node scripts/check-browser-bundle.mjs",
+    "check:dual": "node scripts/check-dual-package.mjs",
+    "gen:codes": "node scripts/gen-codes.mjs",
+    "check:install-text": "node scripts/check-install-text.mjs"
+  },
+  "dependencies": {
+    "jose": "^6.2.12"
+  },
+  "devDependencies": {
+    "@arethetypeswrong/cli": "0.18.5",
+    "@edge-runtime/vm": "5.0.0",
+    "@eslint/js": "10.0.1",
+    "@types/node": "22.20.5",
+    "@vitest/coverage-v8": "5.0.3",
+    "esbuild": "0.28.2",
+    "eslint": "10.11.0",
+    "eslint-plugin-jsdoc": "65.1.0",
+    "fast-check": "4.10.2",
+    "prettier": "3.9.9",
+    "publint": "0.3.25",
+    "tsup": "8.5.1",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.71.0",
+    "vitest": "5.0.3",
+    "vite": "8.3.2"
   }
 }
