@@ -13,6 +13,7 @@ import { ClientCredentials, type ClientCredentialsOptions } from '../machine/cli
 import { checkAccess, type CheckRequest, type CheckResult } from '../verify/check.js';
 import { TokenVerifier, type VerifierOptions } from '../verify/verifier.js';
 import { AgentAuth, type AgentOptions } from '../agents/agent.js';
+import { WebApp, type WebAppOptions } from '../signin/web-app.js';
 
 /** Settings for one AuthFI project. Only `issuer` is required; everything else is read from discovery. */
 export interface AuthFIOptions {
@@ -186,7 +187,9 @@ export class AuthFI {
   }
 
   /** The issuer's metadata, cached for its `max-age`. `refresh` fetches it again. */
-  metadata(options: { refresh?: boolean; signal?: AbortSignal } = {}): Promise<ServerMetadata> {
+  metadata(
+    options: { refresh?: boolean | undefined; signal?: AbortSignal | undefined } = {},
+  ): Promise<ServerMetadata> {
     return coreOf(this).metadata(options);
   }
 
@@ -203,6 +206,14 @@ export class AuthFI {
   /** A machine client's token source (OAuth client credentials). */
   clientCredentials(options: ClientCredentialsOptions): ClientCredentials {
     return new ClientCredentials(this, options);
+  }
+
+  /**
+   * Signs people in to a server-rendered app (authorization code with PKCE), refreshes and signs
+   * them out.
+   */
+  webApp(options: WebAppOptions): WebApp {
+    return new WebApp(this, options);
   }
 
   /**
