@@ -4,14 +4,19 @@ Official Node.js SDK for [AuthFI](https://authfi.io) — the identity control pl
 
 ## Install
 
-Install from GitHub, pinned to a release tag or a commit on `main`:
+Install from the GitHub repository, pinned to a release tag or a commit on `main`:
+
+```bash
+npm install github:authfi/authfi-nodejs-sdk#<ref>
+```
+
+`<ref>` is a release tag or a full commit SHA. This needs git on the machine. In an image without git,
+install the tarball instead; no git is needed:
 
 ```bash
 npm install https://codeload.github.com/authfi/authfi-nodejs-sdk/tar.gz/<ref>
 ```
 
-`<ref>` is a release tag (`refs/tags/v<version>`) or a full commit SHA. The tarball URL needs no
-git in the image; `npm install github:authfi/authfi-nodejs-sdk#<tag>` does, and fails without it.
 The package installs as `@authfi/sdk`, so `require('@authfi/sdk')` works either way.
 
 ## Quick Start (Express)
