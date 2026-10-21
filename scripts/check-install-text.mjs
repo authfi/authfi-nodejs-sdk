@@ -17,7 +17,8 @@ const TEXT = /\.(md|mdx|txt|ts|mts|cts|js|mjs|cjs|json|yml|yaml)$/;
 const SELF = new Set(['scripts/check-install-text.mjs', 'test/scripts/install-text.test.ts']);
 
 // A package manager's add/install verb followed, on the same line, by @authfi/sdk that is not a github: spec.
-const REGISTRY = /\b(?:npm|pnpm|yarn|bun)\s+(?:i|install|add)\b[^\n]*?@authfi\/sdk(?!\S*(?:github|git\+|https?:))/;
+const REGISTRY =
+  /\b(?:npm|pnpm|yarn|bun)\s+(?:i|install|add)\b[^\n]*?@authfi\/sdk(?!\S*(?:github|git\+|https?:))/;
 const TARBALL = /\b(?:npm|pnpm|yarn|bun)\s+(?:i|install|add)\b[^\n]*(?:releases\/download|\.tgz)/;
 
 function* walk(dir) {
@@ -36,8 +37,10 @@ for (const path of walk(root)) {
   readFileSync(path, 'utf8')
     .split('\n')
     .forEach((line, i) => {
-      if (REGISTRY.test(line)) problems.push(`${rel}:${i + 1}: installs @authfi/sdk from the npm registry: ${line.trim()}`);
-      else if (TARBALL.test(line)) problems.push(`${rel}:${i + 1}: installs from a release tarball nothing builds: ${line.trim()}`);
+      if (REGISTRY.test(line))
+        problems.push(`${rel}:${i + 1}: installs @authfi/sdk from the npm registry: ${line.trim()}`);
+      else if (TARBALL.test(line))
+        problems.push(`${rel}:${i + 1}: installs from a release tarball nothing builds: ${line.trim()}`);
     });
 }
 
