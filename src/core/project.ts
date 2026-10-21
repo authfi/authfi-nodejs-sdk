@@ -7,6 +7,11 @@ import { loadMetadata, type ServerMetadata } from './metadata.js';
 import { runtimeUserAgent, Transport, type OpenTelemetryApi } from './transport.js';
 import { checkIssuer, checkOrigin, originOf } from './urls.js';
 import { SDK_VERSION } from './version.js';
+import type { Secret } from './secret.js';
+import type { TokenSource } from './token-source.js';
+import { ClientCredentials, type ClientCredentialsOptions } from '../machine/client-credentials.js';
+import { checkAccess, type CheckRequest, type CheckResult } from '../verify/check.js';
+import { TokenVerifier, type VerifierOptions } from '../verify/verifier.js';
 
 /** Settings for one AuthFI project. Only `issuer` is required; everything else is read from discovery. */
 export interface AuthFIOptions {
@@ -182,6 +187,29 @@ export class AuthFI {
   /** The issuer's metadata, cached for its `max-age`. `refresh` fetches it again. */
   metadata(options: { refresh?: boolean; signal?: AbortSignal } = {}): Promise<ServerMetadata> {
     return coreOf(this).metadata(options);
+  }
+
+  /**
+   * A verifier for the access tokens your API receives from this project.
+   *
+   * @example
+   * const verifier = af.verifier({ audience: ['api_orders', 'app_frontend'], expectedTenantId: '4e46e0c4-…' });
+   */
+  verifier(options: VerifierOptions): TokenVerifier {
+    return new TokenVerifier(this, options);
+  }
+
+  /** A machine client's token source (OAuth client credentials). */
+  clientCredentials(options: ClientCredentialsOptions): ClientCredentials {
+    return new ClientCredentials(this, options);
+  }
+
+  /**
+   * Asks the project's decision point whether `subject` may have `relation` on `object`: for a
+   * per-object question, a fresh answer, or a delegated token, which carries no permissions.
+   */
+  check(credential: TokenSource | Secret, request: CheckRequest): Promise<CheckResult> {
+    return checkAccess(coreOf(this), credential, request);
   }
 
   #learnApiOrigin(doc: ServerMetadata): void {

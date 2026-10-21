@@ -85,12 +85,13 @@ export default tseslint.config(
       '@typescript-eslint/no-dynamic-delete': 'off',
       '@typescript-eslint/no-confusing-void-expression': 'off',
       '@typescript-eslint/no-unnecessary-condition': 'off',
+      '@typescript-eslint/no-deprecated': 'off',
       'no-console': 'off',
     },
   },
   {
     files: ['scripts/**/*.mjs', '*.js'],
     ...tseslint.configs.disableTypeChecked,
-    languageOptions: { globals: { process: 'readonly', console: 'readonly' } },
+    languageOptions: { globals: { process: 'readonly', console: 'readonly', Buffer: 'readonly' } },
   },
 );

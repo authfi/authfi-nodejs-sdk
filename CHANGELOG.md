@@ -26,11 +26,49 @@ All notable changes to this package. It follows [Semantic Versioning](https://se
 - **`TokenSource`**, the one credential interface, with an origin guard on `headers()` and `fetch`.
 - **`TokenSet`, `TokenStore` and `MemoryTokenStore`** for people's tokens.
 - TypeScript source, built to ESM and CommonJS with generated types.
+- **A strict verifier**, `af.verifier({ audience, expectedTenantId })`: `typ at+jwt`, the algorithm
+  pinned to the issuer's key (`RS256`, `ES256`, `EdDSA`), `iss`, a required audience that is never
+  AuthFI's own, `exp`/`nbf`/`iat` with leeway, `sub`, the tenant pin, bound tokens and actor chains.
+  Refusals carry the kernel's codes. One `AccessToken` shape for every kind of token, with
+  `principal`, `actor` and `tokenKind`. `verifyRequest` takes a Fetch `Request` or its parts.
+- `MultiIssuerVerifier`, pinning each trusted issuer to its tenant; it accepts a `TokenVerifier`
+  from either build (`isTokenVerifier`).
+- `@authfi/sdk/express`: `protect(verifier, { permissions, anyPermission, roles, scopes, optional })`
+  and `authfiErrorHandler()`, answering refusals as the platform does. A caller's `X-Request-Id` is
+  echoed and logged only when it is one the platform accepts. A key or discovery outage is a 503 with
+  `Retry-After`; anything else that is not a refusal, a bug or a misconfiguration, is a 500 with none,
+  and the error is logged with its message, stack and cause. `publicUrl` names the origin a DPoP proof
+  is checked against, so the `Host` header need not be trusted.
+- `refusalAnswer()` and the requirement helpers, for other frameworks.
+- `af.clientCredentials()`, a machine client's token source.
+- `af.check()`, the project's decision point.
+- `conformance/vectors.json`: tokens with the outcome every AuthFI SDK must produce, run in Node and
+  in the edge runtime.
 
 ### Changed
 
+- **An access token is read from `client_id` and `scope` only**, as the design says; `azp` and `scp`
+  are not stand-ins for them. A typed `agent:` or `app:` subject keeps its own kind when the token
+  names an actor, and a token is expired from `exp` plus the leeway, in every SDK.
+- **Verification is strict.** A missing `audience` is a `ConfigurationError`, not "accept any".
+  ID tokens, transaction tokens and tokens without `kid` are refused. Agent tokens (EdDSA) verify.
+- **Refusals no longer leak to the caller.** The 0.1 middleware answered `err.message`, and a 403
+  listed the missing permissions; both are now the platform's opaque answers.
 - **Node.js 22.12 or later is required** (Node 18 and 20 are past end of life).
 - **Install from GitHub runs a build.** The package is TypeScript now, so the codeload tarball URL
   in the previous README no longer installs a usable package; install with
   `npm install github:authfi/authfi-nodejs-sdk#<tag>`, which needs git.
 - The hand-written `index.js` and `index.d.ts` are replaced by the TypeScript source.
+
+### Deprecated (removed in 1.0)
+
+- The 0.1 factory `authfi(config)`, kept as the default export in ESM and CommonJS and rebuilt on
+  the new core: `require`, `requireRole` and `authenticate` delegate to `protect` (and still set
+  `req.user`), `verifyToken` uses the strict verifier, `start` reads discovery. Each warns once.
+
+### Removed
+
+- `registerPermission`, `syncPermissions` and `autoSync`: no permission sync exists on the platform.
+  The calls throw `NotSupportedError`.
+- `cloud.credentials` and `cloud.token`: their route is not open to applications. They throw
+  `NotSupportedError`; agents get cloud credentials through the gateway.
