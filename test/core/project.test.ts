@@ -105,6 +105,7 @@ describe('discovery', () => {
     [{ issuer: 'https://evil.authfi.io' }, 'issuer_mismatch'],
     [{ issuer: `${ISSUER}/` }, 'issuer_mismatch'],
     [{ token_endpoint: undefined }, 'discovery_failed'],
+    [{ jwks_uri: undefined }, 'discovery_failed'],
     [{ jwks_uri: '' }, 'discovery_failed'],
     [{ grant_types_supported: 'client_credentials' }, 'discovery_failed'],
   ])('refuses a document with %j', async (patch, code) => {
