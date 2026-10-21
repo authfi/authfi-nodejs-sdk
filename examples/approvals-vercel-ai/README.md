@@ -3,7 +3,7 @@
 An agent built on the Vercel AI SDK (`ai` 7), governed by AuthFI through `@authfi/sdk/vercel-ai`.
 
 ```bash
-npm install @authfi/sdk ai @ai-sdk/anthropic @ai-sdk/mcp
+npm install github:authfi/authfi-nodejs-sdk#<ref> ai @ai-sdk/anthropic @ai-sdk/mcp
 cp .env.example .env    # APPROVAL_SECRET: 32 random bytes, the same for every process of the agent
 node --env-file=.env --import tsx agent.ts
 ```
