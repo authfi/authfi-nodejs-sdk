@@ -52,6 +52,17 @@ All notable changes to this package. It follows [Semantic Versioning](https://se
   (`code === 'wait_timeout'`, with the approval's id when it has one) and leaves the request open; a
   CIBA request that really expired is `ConsentExpired`. Both waits take `pollIntervalMs` (finite and above zero, else `ConfigurationError`; the CIBA wait never polls faster than the platform's interval, so a smaller value is raised to it). `authorization_pending` is the server's word
   and is never raised locally.
+- **The gateways**: `agent.gateway()` and `delegatedToken.gateway()`, with `mcpUrl`, `modelBaseUrl`,
+  an origin-pinned `fetch` (a 401 is `GatewayTokenRefused`), `readResult` returning a `ToolOutcome`
+  (`allowed`, `refused`, `approval_required`), `scopeOf`, `cloudCredentials` (a credential is issued on 201; 202 asks for approval; `expiresInSeconds` is 1 to 900), and `APPROVAL_ARGUMENT`.
+  The gateway's hold is read by `HOLD_PATTERN`, the same pattern as the Python SDK's, and a model
+  is told `HOLD_MESSAGE`.
+- **`@authfi/sdk/vercel-ai`**: `createVercelAI({ source, approvalSecret })` for the Vercel AI SDK 7:
+  the credential per request, refusals as tool results, approvals that resume only on AuthFI's
+  decision (memo per tool call, bounded), the AuthFI approval id in each approval request bound to
+  its tool call by an HMAC under `approvalSecret`, the hold text kept from the model, a model-written
+  approval id stripped, content kept out of telemetry by default. `ai` (7.0.82 or later) and `@ai-sdk/*` are
+  optional peers, tested at their lowest versions in CI.
 - `@authfi/sdk/node`: `readAgentKey` (refuses a key file others can read, checked on the open file),
   `generateAgentKeyFile` (makes a key into a new 0600 file, never overwrites, and returns a key that
   cannot be written again) and `agentFromEnv`.

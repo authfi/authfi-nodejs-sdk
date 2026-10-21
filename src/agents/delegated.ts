@@ -6,6 +6,7 @@ import type { Secret } from '../core/secret.js';
 import { BaseTokenSource, type TokenOptions } from '../core/token-source.js';
 import { principalsOf, type Principal } from '../verify/access-token.js';
 import { decodeUnverified } from '../verify/verifier.js';
+import { Gateway } from '../gateway/gateway.js';
 
 /** How a delegated token was obtained: CIBA (the person approved on their own device) or token exchange. */
 export type DelegationRoute = 'ciba' | 'exchange';
@@ -49,6 +50,7 @@ export class DelegatedToken extends BaseTokenSource {
   #token: Secret;
   #expiresAt: number;
   #scopes: ReadonlySet<string>;
+  #gateway: Gateway | undefined;
 
   /** Built by the agent's CIBA and exchange calls. */
   constructor(init: DelegatedInit) {
@@ -110,6 +112,12 @@ export class DelegatedToken extends BaseTokenSource {
     this.#expiresAt = res.expiresAt;
     if (res.scope.length > 0) this.#scopes = new Set(res.scope);
     return res.accessToken.reveal();
+  }
+
+  /** The project's MCP and AI gateways, acting for the person with this token. */
+  gateway(): Gateway {
+    this.#gateway ??= new Gateway(this.#core, this, this.actor?.id);
+    return this.#gateway;
   }
 
   /** The route and expiry only. */

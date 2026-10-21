@@ -84,3 +84,17 @@ open pull request #10 changes as follows:
 | `authHeader()` | `headers(method, url)` |
 | `AgentAuthError.error` | `AuthFIError.code`; `ConsentDenied`, `ConsentExpired` for the person's answers |
 | `allowedOrigins` | `forResource(resource, { sendTo })` |
+
+## The Vercel AI adapter
+
+Nothing about it was released on `main`. Code written against the open pull request #12:
+
+| PR #12 | 0.2 |
+|---|---|
+| `createVercelAI({ agent, credentials })` | `createVercelAI({ source })`: an `AgentAuth` or a `DelegatedToken` |
+| `approvalSecret` optional (random per process) | required, 32 bytes or more, the same in every process that may resume a run |
+| `pollInterval`, `approvalTimeout` | `pollIntervalMs`, `approvalTimeoutMs` |
+| tool names mapped from `<server>.<tool>` | the gateway's names (`<server>__<tool>`), unchanged |
+| `APPROVAL_ARG` | `APPROVAL_ARGUMENT` |
+| `decisionOf(result)` (`held`) | `gateway.readResult(result)` (`approval_required`) |
+| a 403 tool refusal turned into a result | removed: the gateway answers a refusal as a tool result |
