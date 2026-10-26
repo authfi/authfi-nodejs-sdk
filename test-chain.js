@@ -97,6 +97,8 @@ describe('the chain proves the signing key', () => {
   });
   it('chain_not_proven: a certificate follows the self-signed root', () =>
     chainRefused('chain_not_proven', { x5cFn: (p) => [...p.x5c, p.x5c[1]] }));
+  it('chain_not_proven: the leaf names an issuer that is not the next certificate (names must chain)', () =>
+    chainRefused('chain_not_proven', { pki: { leaf: { issuer: 'Some Other CA' } } }));
   it('chain_not_proven: a critical extension this SDK does not understand', () => {
     const odd = seq(oid('1.2.3.4.5'), bool(true), octet(Buffer.from([0x05, 0x00])));
     return chainRefused('chain_not_proven', { pki: { leaf: { extra: [odd] } } });
@@ -149,6 +151,12 @@ describe('the chain proves the signing key', () => {
     // root(pathLen 0) -> intermediate -> leaf: the intermediate is a CA below a pathLen 0 root.
     await chainRefused('chain_policy', { pki: { root: { pathLen: 0 } } });
   });
+  it('chain_policy: a CA with pathLen 0 that has another CA below it', () =>
+    chainRefused('chain_policy', { pki: { inter: { pathLen: 0 }, extraInter: {} } }));
+  it('chain_policy: the second intermediate states no policy', () =>
+    chainRefused('chain_policy', { pki: { extraInter: { policies: undefined } } }));
+  it('a four-certificate chain with a pathLen that allows it is accepted', () =>
+    chainAccepted({ pki: { inter: { pathLen: 1 }, extraInter: { pathLen: 0 } } }));
   it('a pathLenConstraint that is large enough is accepted', () => chainAccepted({ pki: { root: { pathLen: 1 }, inter: { pathLen: 0 } } }));
 });
 
@@ -158,6 +166,35 @@ describe('the chain cache', () => {
     await s.client.verifyRequest(s.request(s.agentToken()));
     s.clock.t = T0 + 2 * 3600 * 1000;
     const t = s.agentToken({ iat: Math.floor(s.clock.t / 1000), exp: Math.floor(s.clock.t / 1000) + 600 });
+    await rejectsWith(s.client.verifyRequest(s.request(t)), 'chain_not_proven', assert);
+  });
+  it('a cached chain is checked against the clock before its leaf was valid', async () => {
+    const s = scenario({ pki: { leaf: { notBefore: T0 - 60000, notAfter: T0 + 30 * DAY } } });
+    await s.client.verifyRequest(s.request(s.agentToken()));
+    s.clock.t = T0 - 120000;
+    const now = Math.floor(s.clock.t / 1000);
+    await rejectsWith(s.client.verifyRequest(s.request(s.agentToken({ iat: now, exp: now + 600 }))), 'chain_not_proven', assert);
+  });
+  it('a cached chain is checked against its expiry inside the cache window', async () => {
+    const s = scenario({ pki: { leaf: { notBefore: T0 - DAY, notAfter: T0 + 5 * 60 * 1000 } } });
+    await s.client.verifyRequest(s.request(s.agentToken()));
+    s.clock.t = T0 + 6 * 60 * 1000; // inside the 10 min cache window, past the leaf's end
+    const now = Math.floor(s.clock.t / 1000);
+    await rejectsWith(s.client.verifyRequest(s.request(s.agentToken({ iat: now, exp: now + 600 }))), 'chain_not_proven', assert);
+  });
+  it('a cached chain still needs the token header x5t#S256 to name the leaf', async () => {
+    const s = scenario();
+    await s.client.verifyRequest(s.request(s.agentToken()));
+    const t = s.agentToken({}, { 'x5t#S256': Buffer.alloc(32, 7).toString('base64url') });
+    await rejectsWith(s.client.verifyRequest(s.request(t)), 'chain_not_proven', assert);
+  });
+  it('a cached chain still needs the JWKS x5t#S256 to name the leaf', async () => {
+    const s = scenario();
+    await s.client.verifyRequest(s.request(s.agentToken()));
+    s.jwks.keys.push({ ...s.jwks.keys[0], kid: 'k2', 'x5t#S256': Buffer.alloc(32, 7).toString('base64url') });
+    s.clock.t += 20000;
+    const now = Math.floor(s.clock.t / 1000);
+    const t = s.token(s.agentClaims({ iat: now, exp: now + 600 }), { kid: 'k2' });
     await rejectsWith(s.client.verifyRequest(s.request(t)), 'chain_not_proven', assert);
   });
   it('a cached chain is not reused for another key under the same certificates', async () => {
@@ -207,6 +244,12 @@ describe('the DER walker', () => {
     const e = seq(oid('2.5.29.32'), octet(seq(seq(oid(PEN_POLICY)))));
     const p = makePKI({ leaf: { extra: [e] } });
     assert.throws(() => der.parseCertificate(p.leafDer));
+  });
+  it('refuses a child whose length runs past its parent', () => {
+    // SEQUENCE of 3 holding an OCTET STRING that claims 5 bytes, with more bytes after the parent
+    const buf = Buffer.from([0x30, 0x03, 0x04, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00]);
+    const parent = der.readTLV(buf, 0, buf.length);
+    assert.throws(() => der.readTLV(buf, parent.start, parent.end));
   });
   it('decodes object identifiers with multi-byte arcs', () => {
     assert.equal(der.decodeOID(Buffer.from(oid('1.3.6.1.4.1.67322.1.1')).subarray(2)), '1.3.6.1.4.1.67322.1.1');

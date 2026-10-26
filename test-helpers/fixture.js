@@ -51,11 +51,23 @@ function makePKI(o = {}) {
     subject: 'Test Intermediate', issuer: 'Test Root', subjectKey: inter.publicKey, signerKey: root.privateKey,
     ...valid, ca: true, keyUsage: KU.keyCertSign | KU.cRLSign, policies: [PEN_POLICY], ...o.inter,
   });
+  let leafIssuer = 'Test Intermediate';
+  let leafSigner = inter.privateKey;
+  const mid = [];
+  if (o.extraInter) { // a second intermediate between the first and the leaf
+    const inter2 = ec();
+    mid.push(buildCert({
+      subject: 'Test Intermediate 2', issuer: 'Test Intermediate', subjectKey: inter2.publicKey, signerKey: inter.privateKey,
+      ...valid, ca: true, keyUsage: KU.keyCertSign | KU.cRLSign, policies: [PEN_POLICY], ...o.extraInter,
+    }));
+    leafIssuer = 'Test Intermediate 2';
+    leafSigner = inter2.privateKey;
+  }
   const leafDer = buildCert({
-    subject: 'Test Leaf', issuer: 'Test Intermediate', subjectKey: o.leafCertifies || tokenKey.publicKey,
-    signerKey: inter.privateKey, ...valid, ca: false, keyUsage: KU.digitalSignature, policies: [PEN_POLICY], ...o.leaf,
+    subject: 'Test Leaf', issuer: leafIssuer, subjectKey: o.leafCertifies || tokenKey.publicKey,
+    signerKey: leafSigner, ...valid, ca: false, keyUsage: KU.digitalSignature, policies: [PEN_POLICY], ...o.leaf,
   });
-  const x5c = [leafDer, interDer, ...(o.omitRoot ? [] : [rootDer])].map((d) => d.toString('base64'));
+  const x5c = [leafDer, ...mid, interDer, ...(o.omitRoot ? [] : [rootDer])].map((d) => d.toString('base64'));
   return {
     root, inter, tokenKey, rootDer, interDer, leafDer, x5c,
     rootPin: sha256(root.publicKey.export({ type: 'spki', format: 'der' })).toString('hex'),
@@ -78,8 +90,10 @@ function scenario(o = {}) {
   const dpop = o.dpopKey || ed();
   const dpopJwk = dpop.publicKey.export({ format: 'jwk' });
   const fetches = [];
-  const fetchImpl = async (url) => {
+  const fetchOpts = [];
+  const fetchImpl = async (url, opts) => {
     fetches.push(String(url));
+    fetchOpts.push(opts);
     return new Response(JSON.stringify(o.jwks || jwks), { status: 200, headers: { 'content-type': 'application/json' } });
   };
   const config = {
@@ -87,7 +101,7 @@ function scenario(o = {}) {
     rootPins: [pki.rootPin], ...o.config, ...(o.configFn ? o.configFn(pki) : {}),
   };
   const client = authfi({ tenant: 'acme', apiKey: 'sk_test', ...config });
-  const s = { clock, pki, kid, jwks, dpop, dpopJwk, fetches, client, config };
+  const s = { clock, pki, kid, jwks, dpop, dpopJwk, fetches, fetchOpts, client, config };
 
   const sec = () => Math.floor(clock.t / 1000);
   s.claims = (extra = {}) => ({

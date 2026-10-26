@@ -82,6 +82,11 @@ describe('DPoP refusals', () => {
     delete r.rawHeaders;
     return r;
   }));
+  it('dpop_multiple: two DPoP entries in rawHeaders while the parsed headers hold one', () => refused('dpop_multiple', (s, t) => {
+    const r = s.request(t);
+    r.rawHeaders.push('DPoP', s.proof(t));
+    return r;
+  }));
   it('dpop_malformed: not a JWS', () => refused('dpop_malformed', (s, t) => s.request(t, { proofs: ['abc.def'] })));
   it('dpop_malformed: payload is not JSON', () => refused('dpop_malformed', (s, t) =>
     s.request(t, { proofs: [signJWS({ typ: 'dpop+jwt', alg: 'EdDSA', jwk: s.dpopJwk }, b64u('not json'), s.dpop.privateKey, 'EdDSA')] })));
@@ -90,11 +95,20 @@ describe('DPoP refusals', () => {
   it('dpop_malformed: no jwk', () => refused('dpop_malformed', (s, t) => s.request(t, { proof: { jwk: null } })));
   it('dpop_malformed: no jti', () => refused('dpop_malformed', (s, t) => s.request(t, { proof: { claims: { jti: undefined } } })));
   it('dpop_malformed: proof larger than 8 KiB', () => refused('dpop_malformed', (s, t) => s.request(t, { proofs: ['a'.repeat(9000) + '.b.c'] })));
+  it('dpop_malformed: a valid proof padded beyond 8 KiB', () => refused('dpop_malformed', (s, t) => s.request(t, { proof: { header: { pad: 'x'.repeat(9000) } } })));
+  it('dpop_malformed: a valid proof with a fourth part', () => refused('dpop_malformed', (s, t) => s.request(t, { proofs: [`${s.proof(t)}.x`] })));
   it('dpop_malformed: crit header', () => refused('dpop_malformed', (s, t) => s.request(t, { proof: { header: { crit: ['x'] } } })));
   it('dpop_type: typ is JWT', () => refused('dpop_type', (s, t) => s.request(t, { proof: { header: { typ: 'JWT' } } })));
   it('dpop_alg: none', () => refused('dpop_alg', (s, t) => s.request(t, { proof: { header: { alg: 'none' } } })));
   it('dpop_alg: HS256', () => refused('dpop_alg', (s, t) => s.request(t, { proof: { header: { alg: 'HS256' } } })));
-  it('dpop_alg: RS256 is not in the list', () => refused('dpop_alg', (s, t) => s.request(t, { proof: { header: { alg: 'RS256' } } })));
+  it('dpop_alg: RS256 is not in the list, even for a valid RS256 proof', () => refused('dpop_alg', (s, t) => {
+    const rsa = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
+    return s.request(t, { proof: { alg: 'RS256', pair: rsa } });
+  }));
+  it('dpop_alg: EdDSA with an EC key, PS256 with an OKP key', async () => {
+    await refused('dpop_alg', (s, t) => s.request(t, { proof: { jwk: ec().publicKey.export({ format: 'jwk' }) } }));
+    await refused('dpop_alg', (s, t) => s.request(t, { proof: { header: { alg: 'PS256' } } }));
+  });
   it('dpop_alg: a PS256 proof key under 2048 bits', () => refused('dpop_alg', (s, t) => {
     const small = crypto.generateKeyPairSync('rsa', { modulusLength: 1024 });
     return s.request(t, { proof: { alg: 'PS256', pair: small } });
@@ -323,6 +337,19 @@ describe('modes', () => {
     const s = scenario({ config: { agentTokens: 'watch', logger: { warn: (...a) => logs.push(a), debug: (...a) => logs.push(a) } } });
     await s.client.verifyRequest(s.request(s.agentToken()));
     assert.equal(logs.length, 0);
+  });
+  it('watch: a bound person token still needs its proof (watch is for agent tokens only)', async () => {
+    const s = scenario({ config: { agentTokens: 'watch' } });
+    const bound = s.token(s.claims({ cnf: { jkt: thumbprint(s.dpop.publicKey) } }));
+    await rejectsWith(s.client.verifyRequest(s.request(bound, { scheme: 'Bearer', proofs: [] })), 'dpop_missing', assert);
+  });
+  it('watch: an unexpected internal error is thrown, never turned into a pass', async () => {
+    const s = scenario({ config: { agentTokens: 'watch' } });
+    const t = s.agentToken();
+    const req = s.request(t);
+    const real = req.headers;
+    req.headers = new Proxy(real, { get(target, p) { if (p === 'dpop') throw new TypeError('boom'); return target[p]; } });
+    await assert.rejects(s.client.verifyRequest(req), TypeError);
   });
   it('watch: a baseline refusal is still a refusal', async () => {
     const s = scenario({ config: { agentTokens: 'watch' } });

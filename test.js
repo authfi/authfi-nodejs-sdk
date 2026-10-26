@@ -39,6 +39,7 @@ describe('configuration fails closed', () => {
     'the AuthFI console as audience': { issuer: ISSUER, audience: 'authfi-console' },
     'the AuthFI workspace as audience': { issuer: ISSUER, audience: ['api', 'authfi-workspace'] },
     'the API URL as audience': { issuer: ISSUER, audience: 'https://api.authfi.io', apiUrl: 'https://api.authfi.io' },
+    'an issuer with a query': { issuer: `${ISSUER}?x=1`, audience: AUD },
     'a plain http issuer': { issuer: 'http://acme.authfi.io', audience: AUD },
     'an issuer that is not a URL': { issuer: 'acme', audience: AUD },
     'leeway above 300 s': { issuer: ISSUER, audience: AUD, leeway: 301 },
@@ -176,6 +177,10 @@ describe('baseline verification', () => {
     await refuse('token_not_yet_valid', (s) => s.token(s.claims({ nbf: nowSec(s) + 120 })));
     await refuse('token_not_yet_valid', (s) => s.token(s.claims({ iat: nowSec(s) + 120 })));
   });
+  it('token_malformed: nbf or iat that is not a valid date', async () => {
+    await refuse('token_malformed', (s) => s.token(s.claims({ nbf: 'later' })));
+    await refuse('token_malformed', (s) => s.token(s.claims({ iat: -5 })));
+  });
   it('token_sub_required', () => refuse('token_sub_required', (s) => s.token(s.claims({ sub: undefined }))));
   it('token_tenant_required', () => refuse('token_tenant_required', (s) => s.token(s.claims({ tenant_id: undefined }))));
   it('token_tenant_not_issuers: tenant_id differs from the configured tenantId', async () => {
@@ -191,6 +196,8 @@ describe('the key set', () => {
     await s.client.verifyToken(s.token(s.claims()));
     await s.client.verifyToken(s.token(s.claims()));
     assert.deepEqual(s.fetches, [`${ISSUER}/.well-known/jwks.json`]);
+    assert.equal(s.fetchOpts[0].redirect, 'error', 'a redirect from the key set URL must not be followed');
+    assert.ok(s.fetchOpts[0].signal, 'the fetch has a timeout');
   });
   it('is fetched from jwksUrl when one is configured', async () => {
     const s = scenario({ config: { jwksUrl: 'https://keys.example.com/jwks' } });
@@ -207,11 +214,13 @@ describe('the key set', () => {
     assert.equal(s.fetches.length, 2);
   });
   it('jwks_unavailable: the fetch fails, answers 500, is not JSON, is too large, or holds no key', async () => {
+    const body = JSON.stringify(scenario().jwks);
     const fetches = [
       async () => { throw new Error('down'); },
       async () => new Response('x', { status: 500 }),
+      async () => new Response(body, { status: 500 }), // a good document under an error status is not trusted
+      async () => new Response(body + ' '.repeat(1100000), { status: 200 }), // valid JSON, only the size is wrong
       async () => new Response('not json', { status: 200 }),
-      async () => new Response(' '.repeat(1100000), { status: 200 }),
       async () => new Response(JSON.stringify({ keys: [] }), { status: 200 }),
     ];
     for (const fetch of fetches) {
@@ -241,6 +250,7 @@ describe('the key set', () => {
     s.jwks.keys.push({ ...enc.publicKey.export({ format: 'jwk' }), kid: 'enc', use: 'enc' });
     s.jwks.keys.push({ kty: 'EC', crv: 'P-256', x: 'AA', y: 'AA', kid: 'junk' });
     s.jwks.keys.push({ ...enc.publicKey.export({ format: 'jwk' }), kid: 'wrongalg', use: 'sig', alg: 'RS256' });
+    s.jwks.keys.push({ ...small.publicKey.export({ format: 'jwk' }), kid: 'rsaec', use: 'sig', alg: 'ES256' });
     assert.equal((await s.client.verifyToken(s.token(s.claims()))).sub, 'usr_1');
     await rejectsWith(s.client.verifyToken(signJWS({ alg: 'RS256', typ: 'at+jwt', kid: 'small' }, s.claims(), small.privateKey, 'RS256')), 'token_unknown_key', assert);
     await rejectsWith(s.client.verifyToken(s.token(s.claims(), { kid: 'enc' }, enc.privateKey)), 'token_unknown_key', assert);
