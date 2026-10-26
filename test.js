@@ -250,12 +250,14 @@ describe('the key set', () => {
     s.jwks.keys.push({ ...enc.publicKey.export({ format: 'jwk' }), kid: 'enc', use: 'enc' });
     s.jwks.keys.push({ kty: 'EC', crv: 'P-256', x: 'AA', y: 'AA', kid: 'junk' });
     s.jwks.keys.push({ ...enc.publicKey.export({ format: 'jwk' }), kid: 'wrongalg', use: 'sig', alg: 'RS256' });
-    s.jwks.keys.push({ ...small.publicKey.export({ format: 'jwk' }), kid: 'rsaec', use: 'sig', alg: 'ES256' });
+    const rsa = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
+    s.jwks.keys.push({ ...rsa.publicKey.export({ format: 'jwk' }), kid: 'rsaec', use: 'sig', alg: 'ES256' });
     assert.equal((await s.client.verifyToken(s.token(s.claims()))).sub, 'usr_1');
     await rejectsWith(s.client.verifyToken(signJWS({ alg: 'RS256', typ: 'at+jwt', kid: 'small' }, s.claims(), small.privateKey, 'RS256')), 'token_unknown_key', assert);
     await rejectsWith(s.client.verifyToken(s.token(s.claims(), { kid: 'enc' }, enc.privateKey)), 'token_unknown_key', assert);
     await rejectsWith(s.client.verifyToken(s.token(s.claims(), { kid: 'junk' })), 'token_unknown_key', assert);
     await rejectsWith(s.client.verifyToken(s.token(s.claims(), { kid: 'wrongalg', alg: 'RS256' }, enc.privateKey)), 'token_unknown_key', assert);
+    await rejectsWith(s.client.verifyToken(signJWS({ alg: 'RS256', typ: 'at+jwt', kid: 'rsaec' }, s.claims(), rsa.privateKey, 'RS256')), 'token_unknown_key', assert);
   });
 });
 
