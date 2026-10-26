@@ -125,6 +125,12 @@ describe('baseline verification', () => {
     refuse('token_alg_key_mismatch', (s) => s.token(s.claims(), { alg: 'RS256' })));
   it('token_alg_key_mismatch: a key pinned to ES256 by its alg refuses PS256', () =>
     refuse('token_alg_key_mismatch', (s) => s.token(s.claims(), { alg: 'PS256' })));
+  it('token_alg_key_mismatch: an RSA key whose alg is RS256 refuses PS256', async () => {
+    const pair = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
+    const s = scenario({ jwks: { keys: [{ ...pair.publicKey.export({ format: 'jwk' }), kid: 'k1', use: 'sig', alg: 'RS256' }] } });
+    const t = signJWS({ alg: 'PS256', typ: 'at+jwt', kid: 'k1' }, s.claims(), pair.privateKey, 'PS256');
+    await rejectsWith(s.client.verifyToken(t), 'token_alg_key_mismatch', assert);
+  });
   it('token_kid_required: no kid', () => refuse('token_kid_required', (s) => s.token(s.claims(), { kid: undefined })));
   it('token_crit_not_supported: a crit header', () => refuse('token_crit_not_supported', (s) => s.token(s.claims(), { crit: ['exp'] })));
   it('token_typ_invalid: an ID token, a plain JWT, a missing typ, a proof type', async () => {
@@ -234,10 +240,12 @@ describe('the key set', () => {
     s.jwks.keys.push({ ...small.publicKey.export({ format: 'jwk' }), kid: 'small', use: 'sig' });
     s.jwks.keys.push({ ...enc.publicKey.export({ format: 'jwk' }), kid: 'enc', use: 'enc' });
     s.jwks.keys.push({ kty: 'EC', crv: 'P-256', x: 'AA', y: 'AA', kid: 'junk' });
+    s.jwks.keys.push({ ...enc.publicKey.export({ format: 'jwk' }), kid: 'wrongalg', use: 'sig', alg: 'RS256' });
     assert.equal((await s.client.verifyToken(s.token(s.claims()))).sub, 'usr_1');
     await rejectsWith(s.client.verifyToken(signJWS({ alg: 'RS256', typ: 'at+jwt', kid: 'small' }, s.claims(), small.privateKey, 'RS256')), 'token_unknown_key', assert);
     await rejectsWith(s.client.verifyToken(s.token(s.claims(), { kid: 'enc' }, enc.privateKey)), 'token_unknown_key', assert);
     await rejectsWith(s.client.verifyToken(s.token(s.claims(), { kid: 'junk' })), 'token_unknown_key', assert);
+    await rejectsWith(s.client.verifyToken(s.token(s.claims(), { kid: 'wrongalg', alg: 'RS256' }, enc.privateKey)), 'token_unknown_key', assert);
   });
 });
 

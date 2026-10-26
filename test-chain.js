@@ -29,6 +29,8 @@ describe('the chain proves the signing key', () => {
     chainAccepted({ pki: { leaf: { policies: [OTHER_POLICY, PEN_POLICY] } } }));
   it('accepts a chain whose root is not in x5c when the pinned root is supplied as rootCerts', () =>
     chainAccepted({ pki: { omitRoot: true }, configFn: (p) => ({ rootCerts: [new crypto.X509Certificate(p.rootDer).toString()] }) }));
+  it('chain_not_proven: a pinned rootCerts root that has expired', () =>
+    chainRefused('chain_not_proven', { pki: { omitRoot: true, root: { notBefore: T0 - 30 * DAY, notAfter: T0 - DAY } }, configFn: (p) => ({ rootCerts: [new crypto.X509Certificate(p.rootDer).toString()] }) }));
   it('chain_pin: a rootCerts root that is not pinned does not complete the chain', () =>
     chainRefused('chain_pin', { pki: { omitRoot: true }, configFn: (p) => ({ rootPins: ['11'.repeat(32)], rootCerts: [new crypto.X509Certificate(p.rootDer).toString()] }) }));
   it('chain_pin: a pinned rootCerts root that did not issue the chain does not complete it', async () => {

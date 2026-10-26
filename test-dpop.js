@@ -54,6 +54,11 @@ describe('agent token with a valid proof', () => {
     const s = scenario();
     await s.client.verifyRequest(s.request(s.agentToken(), { url: '/orders?id=1' }));
   });
+  it('is detected by a sub that starts with agt_ even with no client_id', async () => {
+    const s = scenario();
+    const t = s.token(s.agentClaims({ client_id: undefined, cnf: undefined }));
+    await rejectsWith(s.client.verifyRequest(s.request(t, { scheme: 'Bearer', proofs: [] })), 'dpop_key_mismatch', assert);
+  });
   it('refuses a nested act chain', async () => {
     const s = scenario();
     const t = s.agentToken({ act: { sub: 'a', act: { sub: 'b' } } });
@@ -90,6 +95,10 @@ describe('DPoP refusals', () => {
   it('dpop_alg: none', () => refused('dpop_alg', (s, t) => s.request(t, { proof: { header: { alg: 'none' } } })));
   it('dpop_alg: HS256', () => refused('dpop_alg', (s, t) => s.request(t, { proof: { header: { alg: 'HS256' } } })));
   it('dpop_alg: RS256 is not in the list', () => refused('dpop_alg', (s, t) => s.request(t, { proof: { header: { alg: 'RS256' } } })));
+  it('dpop_alg: a PS256 proof key under 2048 bits', () => refused('dpop_alg', (s, t) => {
+    const small = crypto.generateKeyPairSync('rsa', { modulusLength: 1024 });
+    return s.request(t, { proof: { alg: 'PS256', pair: small } });
+  }));
   it('dpop_alg: alg does not fit the embedded key type', () => refused('dpop_alg', (s, t) => s.request(t, { proof: { header: { alg: 'ES256' } } })));
   it('dpop_signature: signed by another key than the embedded one', () => refused('dpop_signature', (s, t) =>
     s.request(t, { proof: { jwk: s.dpopJwk, pair: { privateKey: ed().privateKey, publicKey: s.dpop.publicKey } } })));
@@ -121,6 +130,15 @@ describe('DPoP refusals', () => {
     await rejectsWith(s.client.verifyRequest(s.request(t)), 'dpop_key_mismatch', assert);
     const t2 = s.token(s.agentClaims({ cnf: undefined }));
     await rejectsWith(s.client.verifyRequest(s.request(t2)), 'dpop_key_mismatch', assert);
+  });
+});
+
+describe('RFC 7638 thumbprints', () => {
+  it('matches the RFC 7638 RSA vector and the RFC 8037 Ed25519 vector', () => {
+    const { thumbprint: tp } = require('./lib/jws');
+    const n = '0vx7agoebGcQSuuPiLJXZptN9nndrQmbXEps2aiAFbWhM78LhWx4cbbfAAtVT86zwu1RK7aPFFxuhDR1L6tSoc_BJECPebWKRXjBZCiFV4n3oknjhMstn64tZ_2W-5JsGY4Hc5n9yBXArwl93lqt7_RN5w6Cf0h4QyQ5v-65YGjQR0_FDW2QvzqY368QQMicAtaSqzs8KJZgnYb9c7d0zgdAZHzu6qMQvRL5hajrn1n91CbOpbISD08qNLyrdkt-bFTWhAI4vMQFh6WeZu0fM4lFd2NcRwr3XPksINHaQ-G_xBniIqbw0Ls1jF44-csFCur-kEgU8awapJzKnqDKgw';
+    assert.equal(tp(crypto.createPublicKey({ key: { kty: 'RSA', n, e: 'AQAB' }, format: 'jwk' })), 'NzbLsXh8uDCcd-6MNwXF4W_7noWXFZAfHkxZsRGC9Xs');
+    assert.equal(tp(crypto.createPublicKey({ key: { kty: 'OKP', crv: 'Ed25519', x: '11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo' }, format: 'jwk' })), 'kPrK_qmxVWaYVA9wwBF6Iuo3vVzz7TxHCTwXBygrS4k');
   });
 });
 
@@ -176,6 +194,10 @@ describe('replay', () => {
   });
   it('a replayGuard that throws fails closed', async () => {
     const s = scenario({ config: { replayGuard: { record: () => { throw new Error('store down'); } } } });
+    await rejectsWith(s.client.verifyRequest(s.request(s.agentToken())), 'dpop_replayed', assert);
+  });
+  it('a replayGuard that answers anything but true refuses', async () => {
+    const s = scenario({ config: { replayGuard: { record: () => undefined } } });
     await rejectsWith(s.client.verifyRequest(s.request(s.agentToken())), 'dpop_replayed', assert);
   });
   it('the default guard is bounded and fails closed when full', async () => {
