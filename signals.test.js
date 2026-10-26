@@ -1,0 +1,683 @@
+'use strict';
+
+const { describe, it, afterEach } = require('node:test');
+const assert = require('node:assert/strict');
+const crypto = require('crypto');
+const http = require('http');
+const authfi = require('./index');
+const { createSeenSet } = require('./signals');
+
+const STREAM_AUD = 'stream-aud-1';
+const API_AUD = 'api-orders';
+const AGENT = 'agent:agt_42';
+const EV = {
+  revoked: 'https://schemas.openid.net/secevent/caep/event-type/session-revoked',
+  claims: 'https://schemas.openid.net/secevent/caep/event-type/token-claims-change',
+  purged: 'https://schemas.openid.net/secevent/risc/event-type/account-purged',
+  compromise: 'https://schemas.openid.net/secevent/risc/event-type/credential-compromise',
+};
+const SECEVENT = 'application/secevent+jwt';
+
+const b64 = (buf) => Buffer.from(buf).toString('base64url');
+
+/** A fake issuer: serves a key set over HTTP and signs with the keys in it. */
+class Issuer {
+  constructor() {
+    this.nowMs = Date.UTC(2026, 9, 26, 12, 0, 0);
+    this.keys = new Map();
+    this.jwksHits = 0;
+    this.jwksStatus = 200;
+    const ed = crypto.generateKeyPairSync('ed25519');
+    const rsa = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
+    const ec = crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' });
+    this.add('ed1', 'EdDSA', ed);
+    this.add('rs1', 'RS256', rsa);
+    this.add('ps1', 'PS256', rsa);
+    this.add('es1', 'ES256', ec);
+  }
+
+  add(kid, alg, pair) {
+    this.keys.set(kid, { kid, alg, pair });
+  }
+
+  async listen() {
+    this.server = http.createServer((req, res) => {
+      if (req.url !== '/.well-known/jwks.json') {
+        res.statusCode = 404;
+        res.end();
+        return;
+      }
+      this.jwksHits += 1;
+      res.statusCode = this.jwksStatus;
+      res.setHeader('Content-Type', 'application/json');
+      const keys = [...this.keys.values()].map((k) => ({ ...k.pair.publicKey.export({ format: 'jwk' }), kid: k.kid, use: 'sig', alg: k.alg }));
+      if (this.kidless) keys.push({ ...this.keys.get('ed1').pair.publicKey.export({ format: 'jwk' }), use: 'sig', alg: 'EdDSA' });
+      res.end(JSON.stringify({ keys }));
+    });
+    await new Promise((r) => this.server.listen(0, '127.0.0.1', r));
+    this.url = `http://127.0.0.1:${this.server.address().port}`;
+    return this;
+  }
+
+  close() {
+    this.server.closeAllConnections();
+    this.server.close();
+  }
+
+  clock() {
+    return this.nowMs;
+  }
+
+  seconds() {
+    return Math.floor(this.nowMs / 1000);
+  }
+
+  advance(ms) {
+    this.nowMs += ms;
+  }
+
+  sign(kid, header, payload) {
+    const k = this.keys.get(kid);
+    const h = b64(JSON.stringify({ alg: k.alg, typ: 'secevent+jwt', kid, ...header }));
+    const p = b64(JSON.stringify(payload));
+    const data = Buffer.from(`${h}.${p}`);
+    let sig;
+    switch (k.alg) {
+      case 'EdDSA':
+        sig = crypto.sign(null, data, k.pair.privateKey);
+        break;
+      case 'RS256':
+        sig = crypto.sign('sha256', data, k.pair.privateKey);
+        break;
+      case 'PS256':
+        sig = crypto.sign('sha256', data, { key: k.pair.privateKey, padding: crypto.constants.RSA_PKCS1_PSS_PADDING, saltLength: crypto.constants.RSA_PSS_SALTLEN_DIGEST });
+        break;
+      default:
+        sig = crypto.sign('sha256', data, { key: k.pair.privateKey, dsaEncoding: 'ieee-p1363' });
+    }
+    return `${h}.${p}.${b64(sig)}`;
+  }
+
+  setClaims(event = EV.revoked, detail = {}) {
+    return {
+      iss: this.url,
+      jti: crypto.randomUUID(),
+      iat: this.seconds(),
+      aud: STREAM_AUD,
+      sub_id: { format: 'opaque', id: AGENT },
+      events: { [event]: { event_timestamp: this.seconds(), ...detail } },
+    };
+  }
+
+  set({ kid = 'ed1', header, claims, drop = [] } = {}) {
+    const c = { ...(claims || this.setClaims()) };
+    for (const d of drop) delete c[d];
+    return this.sign(kid, header, c);
+  }
+
+  /** An access token as the platform mints it. */
+  token(sub, iat, extra = {}) {
+    const payload = { iss: this.url, sub, aud: API_AUD, tenant_id: 't1', iat, exp: this.seconds() + 3600, ...extra };
+    return this.sign('ed1', { typ: 'at+jwt' }, payload);
+  }
+}
+
+const open = [];
+afterEach(() => {
+  while (open.length) open.pop()();
+});
+
+async function rig({ store, receiver = {}, client = {} } = {}) {
+  const issuer = await new Issuer().listen();
+  const revocations = store || authfi.createRevocationStore({ clock: () => issuer.clock() });
+  const signals = [];
+  const logs = [];
+  const logger = { info: (m, f) => logs.push(['info', m, f]), warn: (m, f) => logs.push(['warn', m, f]) };
+  const auth = authfi({ tenant: 'acme', apiKey: 'sk_test', issuer: issuer.url, revocations, clock: () => issuer.clock(), logger, ...client });
+  const handler = auth.receiver({ audience: STREAM_AUD, onSignal: (s) => signals.push(s), ...receiver });
+  const server = http.createServer(handler);
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const url = `http://127.0.0.1:${server.address().port}/ssf/push`;
+  open.push(() => {
+    server.closeAllConnections();
+    server.close();
+    issuer.close();
+  });
+  const push = (body, headers = {}, method = 'POST') =>
+    fetch(url, { method, headers: { 'Content-Type': SECEVENT, ...headers }, body: method === 'POST' ? body : undefined }).then(async (r) => ({ status: r.status, text: await r.text(), headers: r.headers }));
+  return { issuer, auth, store: revocations, signals, logs, push, url };
+}
+
+const err = (r) => JSON.parse(r.text).err;
+const refused = async (promise, code) => {
+  await assert.rejects(promise, (e) => e.code === code || e.message === code, `expected ${code}`);
+};
+
+describe('an accepted revocation', () => {
+  it('refuses earlier tokens and allows later ones', async () => {
+    const r = await rig();
+    const now = r.issuer.seconds();
+    const before = r.issuer.token(AGENT, now - 10);
+    await r.auth.verifyToken(before); // fine before any revocation
+    assert.equal((await r.push(r.issuer.set())).status, 202);
+
+    await refused(r.auth.verifyToken(before), 'token_revoked');
+    await refused(r.auth.verifyToken(r.issuer.token(AGENT, now)), 'token_revoked'); // same second: not provably later
+    r.issuer.advance(2000);
+    await r.auth.verifyToken(r.issuer.token(AGENT, r.issuer.seconds()));
+    await r.auth.verifyToken(r.issuer.token('agent:agt_other', now - 10));
+    assert.equal(r.signals.length, 1);
+    assert.equal(r.signals[0].revoked, true);
+    assert.equal(r.signals[0].subject, AGENT);
+    assert.equal(r.signals[0].event, EV.revoked);
+  });
+
+  for (const [name, ev] of [['session-revoked', EV.revoked], ['account-purged', EV.purged], ['credential-compromise', EV.compromise]]) {
+    it(`${name} revokes`, async () => {
+      const r = await rig();
+      const tok = r.issuer.token(AGENT, r.issuer.seconds() - 1);
+      assert.equal((await r.push(r.issuer.set({ claims: r.issuer.setClaims(ev) }))).status, 202);
+      await refused(r.auth.verifyToken(tok), 'token_revoked');
+    });
+  }
+
+  it('refuses a delegated token whose actor is revoked, and leaves the person alone', async () => {
+    const r = await rig();
+    const tok = r.issuer.token('usr_7', r.issuer.seconds() - 1, { act: { sub: AGENT } });
+    await r.auth.verifyToken(tok);
+    await r.push(r.issuer.set());
+    await refused(r.auth.verifyToken(tok), 'token_revoked');
+    await r.auth.verifyToken(r.issuer.token('usr_7', r.issuer.seconds() - 1));
+  });
+
+  it('refuses a token with no iat while its subject is revoked', async () => {
+    const r = await rig();
+    await r.push(r.issuer.set());
+    const noIat = (sub) => {
+      const p = { iss: r.issuer.url, sub, aud: API_AUD, exp: r.issuer.seconds() + 3600 };
+      return r.issuer.sign('ed1', { typ: 'at+jwt' }, p);
+    };
+    await refused(r.auth.verifyToken(noIat(AGENT)), 'token_revoked');
+    await r.auth.verifyToken(noIat('agent:agt_9'));
+  });
+
+  it('uses the iat of the SET, so a late delivery does not refuse newer tokens', async () => {
+    const r = await rig();
+    const now = r.issuer.seconds();
+    const claims = r.issuer.setClaims();
+    claims.iat = now - 30;
+    await r.push(r.issuer.set({ claims }));
+    await r.auth.verifyToken(r.issuer.token(AGENT, now - 5));
+    await refused(r.auth.verifyToken(r.issuer.token(AGENT, now - 40)), 'token_revoked');
+  });
+
+  it('accepts a resume, tells the hook, and does not lift the revocation', async () => {
+    const r = await rig();
+    const tok = r.issuer.token(AGENT, r.issuer.seconds() - 1);
+    await r.push(r.issuer.set());
+    r.issuer.advance(1000);
+    assert.equal((await r.push(r.issuer.set({ claims: r.issuer.setClaims(EV.claims, { resumed: true }) }))).status, 202);
+    await refused(r.auth.verifyToken(tok), 'token_revoked');
+    await r.auth.verifyToken(r.issuer.token(AGENT, r.issuer.seconds() + 1));
+    assert.equal(r.signals.length, 2);
+    assert.equal(r.signals[1].resumed, true);
+    assert.equal(r.signals[1].revoked, false);
+  });
+
+  it('revokes nothing for a claims change without resume or for an unknown event', async () => {
+    const r = await rig();
+    const tok = r.issuer.token(AGENT, r.issuer.seconds() - 1);
+    assert.equal((await r.push(r.issuer.set({ claims: r.issuer.setClaims(EV.claims, { revoked_permission: 'x' }) }))).status, 202);
+    assert.equal((await r.push(r.issuer.set({ claims: r.issuer.setClaims('https://example.test/unknown') }))).status, 202);
+    await r.auth.verifyToken(tok);
+    assert.equal(r.store.size, 0);
+  });
+
+  it('reads the iss_sub subject format, for this issuer only', async () => {
+    const r = await rig();
+    const good = r.issuer.setClaims();
+    good.sub_id = { format: 'iss_sub', iss: r.issuer.url, sub: 'usr_5' };
+    assert.equal((await r.push(r.issuer.set({ claims: good }))).status, 202);
+    await refused(r.auth.verifyToken(r.issuer.token('usr_5', r.issuer.seconds() - 1)), 'token_revoked');
+    const foreign = r.issuer.setClaims();
+    foreign.sub_id = { format: 'iss_sub', iss: 'https://elsewhere.test', sub: 'usr_6' };
+    const res = await r.push(r.issuer.set({ claims: foreign }));
+    assert.equal(res.status, 400);
+    assert.equal(err(res), 'invalid_request');
+  });
+});
+
+describe('a refused SET changes nothing', () => {
+  const flipSig = (tok) => {
+    const i = tok.lastIndexOf('.');
+    const sig = Buffer.from(tok.slice(i + 1), 'base64url');
+    sig[0] ^= 0xff;
+    return `${tok.slice(0, i + 1)}${b64(sig)}`;
+  };
+  const withClaims = (i, mut) => {
+    const c = i.setClaims();
+    mut(c);
+    return i.set({ claims: c });
+  };
+  const cases = [
+    ['bad signature', (i) => flipSig(i.set()), 'authentication_failed'],
+    ['payload tampered', (i) => {
+      const parts = i.set().split('.');
+      const c = i.setClaims();
+      c.sub_id = { format: 'opaque', id: 'agent:agt_attacker_choice' };
+      return `${parts[0]}.${b64(JSON.stringify(c))}.${parts[2]}`;
+    }, 'authentication_failed'],
+    ['unknown kid', (i) => i.set({ header: { kid: 'nope' } }), 'invalid_key'],
+    ['no kid', (i) => i.set({ header: { kid: '' } }), 'invalid_key'],
+    ['alg none', (i) => i.set({ header: { alg: 'none' } }), 'invalid_key'],
+    ['alg HS256', (i) => i.set({ header: { alg: 'HS256' } }), 'invalid_key'],
+    ['alg does not match the key', (i) => i.set({ header: { alg: 'RS256' } }), 'invalid_key'],
+    ['crit header', (i) => i.set({ header: { crit: ['x'] } }), 'invalid_key'],
+    ['wrong issuer', (i) => withClaims(i, (c) => { c.iss = 'https://evil.test'; }), 'invalid_issuer'],
+    ['no issuer', (i) => i.set({ drop: ['iss'] }), 'invalid_issuer'],
+    ['wrong audience', (i) => withClaims(i, (c) => { c.aud = 'someone-else'; }), 'invalid_audience'],
+    ['no audience', (i) => i.set({ drop: ['aud'] }), 'invalid_audience'],
+    ['the API audience is not the stream audience', (i) => withClaims(i, (c) => { c.aud = API_AUD; }), 'invalid_audience'],
+    ['expired', (i) => withClaims(i, (c) => { c.exp = i.seconds() - 600; }), 'invalid_request'],
+    ['exp is not a number', (i) => withClaims(i, (c) => { c.exp = 'soon'; }), 'invalid_request'],
+    ['iat in the future', (i) => withClaims(i, (c) => { c.iat = i.seconds() + 600; }), 'invalid_request'],
+    ['iat older than any token could live', (i) => withClaims(i, (c) => { c.iat = i.seconds() - 25 * 3600; }), 'invalid_request'],
+    ['iat is a string', (i) => withClaims(i, (c) => { c.iat = String(i.seconds()); }), 'invalid_request'],
+    ['no iat', (i) => i.set({ drop: ['iat'] }), 'invalid_request'],
+    ['no jti', (i) => i.set({ drop: ['jti'] }), 'invalid_request'],
+    ['no events', (i) => i.set({ drop: ['events'] }), 'invalid_request'],
+    ['empty events', (i) => withClaims(i, (c) => { c.events = {}; }), 'invalid_request'],
+    ['event body is not an object', (i) => withClaims(i, (c) => { c.events = { [EV.revoked]: 'yes' }; }), 'invalid_request'],
+    ['no subject', (i) => i.set({ drop: ['sub_id'] }), 'invalid_request'],
+    ['empty subject', (i) => withClaims(i, (c) => { c.sub_id = { format: 'opaque', id: '' }; }), 'invalid_request'],
+    ['unsupported subject format', (i) => withClaims(i, (c) => { c.sub_id = { format: 'email', email: 'a@b.test' }; }), 'invalid_request'],
+    ['an access token is not a SET', (i) => i.token(AGENT, i.seconds()), 'invalid_request'],
+    ['not a JWT', () => 'hello', 'invalid_request'],
+    ['empty body', () => '', 'invalid_request'],
+    ['too large', () => 'a'.repeat(20 * 1024), 'invalid_request'],
+  ];
+  for (const [name, build, code] of cases) {
+    it(name, async () => {
+      const r = await rig();
+      const res = await r.push(build(r.issuer));
+      assert.equal(res.status, 400, res.text);
+      assert.equal(err(res), code);
+      assert.equal(r.store.size, 0);
+      assert.equal(r.signals.length, 0);
+      await r.auth.verifyToken(r.issuer.token(AGENT, r.issuer.seconds() - 1)); // nothing was revoked
+    });
+  }
+
+  it('enforces the request shape', async () => {
+    const r = await rig();
+    const set = r.issuer.set();
+    for (const ct of ['', 'application/json', 'application/jwt', 'text/plain']) {
+      const res = await r.push(set, { 'Content-Type': ct });
+      assert.equal(res.status, 400, `content-type ${ct}`);
+      assert.equal(err(res), 'invalid_request');
+    }
+    for (const m of ['GET', 'PUT', 'DELETE']) {
+      const res = await r.push(undefined, {}, m);
+      assert.equal(res.status, 405, m);
+      assert.equal(res.headers.get('allow'), 'POST');
+    }
+    assert.equal(r.store.size, 0);
+    assert.equal((await r.push(set, { 'Content-Type': 'Application/SecEvent+JWT; charset=utf-8' })).status, 202);
+  });
+
+  it('bounds a body that a body parser already read', async () => {
+    const r = await rig();
+    const auth = authfi({ tenant: 't', apiKey: 'k', issuer: r.issuer.url, revocations: r.store, clock: () => r.issuer.clock() });
+    const handler = auth.receiver({ audience: STREAM_AUD });
+    const server = http.createServer((req, res) => {
+      req.body = 'a'.repeat(20 * 1024);
+      handler(req, res);
+    });
+    await new Promise((x) => server.listen(0, '127.0.0.1', x));
+    open.push(() => { server.closeAllConnections(); server.close(); });
+    const res = await fetch(`http://127.0.0.1:${server.address().port}/`, { method: 'POST', headers: { 'Content-Type': SECEVENT }, body: 'x' });
+    assert.equal(res.status, 400);
+    assert.equal(JSON.parse(await res.text()).err, 'invalid_request');
+  });
+
+  it('echoes nothing of the input', async () => {
+    const r = await rig();
+    const set = r.issuer.set({ header: { kid: 'nope' } });
+    const res = await r.push(set);
+    assert.ok(!res.text.includes(set.slice(0, 20)) && !res.text.includes(AGENT), res.text);
+    assert.equal(res.headers.get('content-type'), 'application/json');
+  });
+});
+
+describe('replay', () => {
+  it('applies a repeated jti once and answers 202 each time', async () => {
+    const r = await rig();
+    const set = r.issuer.set();
+    for (let i = 0; i < 3; i++) assert.equal((await r.push(set)).status, 202);
+    assert.equal(r.signals.length, 1);
+  });
+
+  it('does not burn the jti of a refused SET', async () => {
+    const r = await rig();
+    const good = r.issuer.setClaims();
+    const bad = { ...good, aud: 'wrong' };
+    assert.equal(err(await r.push(r.issuer.set({ claims: bad }))), 'invalid_audience');
+    assert.equal((await r.push(r.issuer.set({ claims: good }))).status, 202);
+    assert.equal(r.signals.length, 1);
+  });
+
+  it('applies concurrent duplicates once', async () => {
+    const r = await rig();
+    const set = r.issuer.set();
+    const results = await Promise.all(Array.from({ length: 30 }, () => r.push(set)));
+    assert.ok(results.every((x) => x.status === 202));
+    assert.equal(r.signals.length, 1);
+  });
+
+  it('keeps the seen set bounded and expiring', () => {
+    let now = 1_000_000_000;
+    const s = createSeenSet(3, 60, () => now);
+    for (const id of ['a', 'b', 'c']) assert.equal(s.claim(id), true);
+    assert.equal(s.claim('b'), false);
+    assert.equal(s.claim('d'), true); // full: forgets the oldest
+    assert.equal(s.size, 3);
+    assert.equal(s.claim('a'), true); // a was forgotten
+    now += 120_000;
+    assert.equal(s.claim('b'), true);
+    assert.equal(s.size, 1); // everything else expired
+    for (let i = 0; i < 5000; i++) s.claim(`x${i}`);
+    assert.ok(s.size <= 3);
+  });
+});
+
+describe('authentication of the push', () => {
+  it('requires the bearer when one is configured', async () => {
+    const r = await rig({ receiver: { authToken: 's3cret-push' } });
+    const set = r.issuer.set();
+    for (const h of [undefined, 'Bearer wrong', 'Bearer s3cret-pus', 'Bearer s3cret-pushX', 'Basic s3cret-push', 's3cret-push']) {
+      const res = await r.push(set, h ? { Authorization: h } : {});
+      assert.equal(res.status, 401, String(h));
+    }
+    assert.equal(r.store.size, 0);
+    assert.equal((await r.push(set, { Authorization: 'Bearer s3cret-push' })).status, 202);
+  });
+});
+
+describe('the key set', () => {
+  it('answers 503 under an outage, records nothing, and takes the retry', async () => {
+    const r = await rig();
+    const set = r.issuer.set();
+    r.issuer.jwksStatus = 500;
+    const res = await r.push(set);
+    assert.equal(res.status, 503);
+    assert.equal(res.headers.get('retry-after'), '5');
+    assert.equal(r.store.size, 0);
+    r.issuer.jwksStatus = 200;
+    assert.equal((await r.push(set)).status, 202); // its jti was not burned
+  });
+
+  it('picks up a rotated key, with at most one refetch per 15 seconds for an unknown kid', async () => {
+    const r = await rig();
+    await r.push(r.issuer.set()); // loads the key set
+    const hits = r.issuer.jwksHits;
+    r.issuer.add('ed2', 'EdDSA', crypto.generateKeyPairSync('ed25519'));
+    for (let i = 0; i < 5; i++) assert.equal(err(await r.push(r.issuer.set({ kid: 'ed2' }))), 'invalid_key');
+    assert.equal(r.issuer.jwksHits, hits, 'forged-kid traffic inside the interval must not refetch');
+    r.issuer.advance(16000);
+    assert.equal((await r.push(r.issuer.set({ kid: 'ed2' }))).status, 202);
+    assert.equal(r.issuer.jwksHits, hits + 1);
+  });
+
+  it('does not let a kid-less SET match a kid-less key', async () => {
+    const r = await rig();
+    r.issuer.kidless = true;
+    const res = await r.push(r.issuer.set({ header: { kid: undefined } }));
+    assert.equal(res.status, 400);
+    assert.equal(err(res), 'invalid_key');
+    assert.equal(r.store.size, 0);
+  });
+
+  it('fetches the key set once for a burst of pushes', async () => {
+    const r = await rig();
+    const results = await Promise.all(Array.from({ length: 20 }, () => r.push(r.issuer.set())));
+    assert.ok(results.every((x) => x.status === 202));
+    assert.equal(r.issuer.jwksHits, 1);
+  });
+
+  it('verifies a SET signed with RS256, PS256 or ES256 as well', async () => {
+    const r = await rig();
+    for (const kid of ['rs1', 'ps1', 'es1']) assert.equal((await r.push(r.issuer.set({ kid }))).status, 202, kid);
+  });
+});
+
+describe('configuration fails closed', () => {
+  it('refuses a receiver that cannot work', async () => {
+    const issuer = await new Issuer().listen();
+    open.push(() => issuer.close());
+    const store = authfi.createRevocationStore();
+    assert.throws(() => authfi({ tenant: 't', apiKey: 'k', issuer: issuer.url }).receiver({ audience: 'a' }), /revocations/);
+    assert.throws(() => authfi({ tenant: 't', apiKey: 'k', revocations: store }).receiver({ audience: 'a' }), /issuer/);
+    assert.throws(() => authfi({ tenant: 't', apiKey: 'k', issuer: issuer.url, revocations: store }).receiver({}), /audience/);
+    assert.throws(() => authfi({ tenant: 't', apiKey: 'k', issuer: issuer.url, revocations: store }).receiver(), /audience/);
+    assert.throws(() => authfi({ tenant: 't', apiKey: 'k', issuer: 'http://acme.example.com', revocations: store }).receiver({ audience: 'a' }), /https/);
+  });
+
+  it('checks nothing without a store, and refuses a SET as an access token', async () => {
+    const issuer = await new Issuer().listen();
+    open.push(() => issuer.close());
+    const auth = authfi({ tenant: 't', apiKey: 'k', issuer: issuer.url, clock: () => issuer.clock() });
+    await auth.verifyToken(issuer.token(AGENT, issuer.seconds()));
+    await assert.rejects(auth.verifyToken(issuer.set()), /Not an access token/);
+  });
+
+  it('verifies agent tokens signed with EdDSA, ES256 and PS256', async () => {
+    const issuer = await new Issuer().listen();
+    open.push(() => issuer.close());
+    const auth = authfi({ tenant: 't', apiKey: 'k', issuer: issuer.url, clock: () => issuer.clock() });
+    for (const kid of ['ed1', 'es1', 'ps1', 'rs1']) {
+      const tok = issuer.sign(kid, { typ: 'at+jwt' }, { iss: issuer.url, sub: AGENT, iat: issuer.seconds(), exp: issuer.seconds() + 60 });
+      assert.equal((await auth.verifyToken(tok)).sub, AGENT, kid);
+    }
+    await assert.rejects(auth.verifyToken(issuer.sign('ed1', { typ: 'at+jwt', alg: 'HS256' }, { sub: 'x' })), /Unsupported algorithm/);
+    await assert.rejects(auth.verifyToken(issuer.sign('ed1', { typ: 'at+jwt', alg: 'RS256' }, { sub: 'x' })), /Unsupported algorithm|Invalid signature/);
+  });
+
+  it('keeps the revocation when the hook throws or rejects', async () => {
+    for (const hook of [() => { throw new Error('boom'); }, async () => { throw new Error('boom'); }]) {
+      const r = await rig({ receiver: { onSignal: hook } });
+      const tok = r.issuer.token(AGENT, r.issuer.seconds() - 1);
+      assert.equal((await r.push(r.issuer.set())).status, 202);
+      await refused(r.auth.verifyToken(tok), 'token_revoked');
+    }
+  });
+
+  it('logs refusals without the token', async () => {
+    const r = await rig();
+    const set = r.issuer.set({ header: { kid: 'nope' } });
+    await r.push(set);
+    const text = JSON.stringify(r.logs);
+    assert.ok(r.logs.some((l) => l[0] === 'warn'));
+    assert.ok(!text.includes(set.slice(0, 30)));
+  });
+});
+
+describe('the revocation store', () => {
+  const fixed = (state) => authfi.createRevocationStore({ ...state.opts, clock: () => state.now });
+
+  it('is monotone and expires', () => {
+    const st = { now: 2_000_000_000, opts: { tokenLifetimeSeconds: 3600 } };
+    const s = fixed(st);
+    const t = st.now / 1000;
+    s.revoke('a', t);
+    s.revoke('a', t - 60); // an earlier time never lowers the line
+    assert.equal(s.isRevoked('a', t), true);
+    s.revoke('a', t + 60);
+    assert.equal(s.isRevoked('a', t + 60), true);
+    assert.equal(s.isRevoked('a', t + 61), false);
+    assert.equal(s.isRevoked('a', undefined), true); // unknown issue time
+    assert.equal(s.isRevoked('a', 'x'), true);
+    assert.equal(s.isRevoked('y', undefined), false);
+    st.now += 3600_000 + 120_000;
+    assert.equal(s.isRevoked('a', t - 7200), false);
+    s.revoke('old', st.now / 1000 - 7200);
+    assert.equal(s.size, 1, 'a revocation already past the lifetime is not stored');
+    assert.equal(s.revoke('', t), 0);
+    assert.equal(s.revoke('z', 'not a number'), 0);
+    assert.equal(s.size, 1);
+  });
+
+  it('raises a floor instead of forgetting a revocation when full', () => {
+    const st = { now: 3_000_000_000, opts: { maxEntries: 20, tokenLifetimeSeconds: 3600 } };
+    const s = fixed(st);
+    const t = st.now / 1000;
+    for (let i = 0; i < 20; i++) s.revoke(`s${i}`, t + i);
+    assert.equal(s.size, 20);
+    const dropped = s.revoke('newcomer', t + 30);
+    assert.ok(dropped > 0 && s.size <= 20, `dropped ${dropped} size ${s.size}`);
+    assert.equal(s.isRevoked('s0', t - 60), true, 'a dropped revocation still refuses what it covered');
+    assert.equal(s.isRevoked('unrelated', t - 60), true, 'the floor applies to every subject');
+    assert.equal(s.isRevoked('unrelated', t + 20), false, 'newer than the floor');
+    st.now += 7200_000;
+    assert.equal(s.isRevoked('unrelated', t - 60), false, 'the floor ages out');
+  });
+
+  it('stays bounded under a flood', () => {
+    const st = { now: 4_000_000_000, opts: { maxEntries: 500, tokenLifetimeSeconds: 3600 } };
+    const s = fixed(st);
+    for (let i = 0; i < 20000; i++) s.revoke(`subject-${i}`, st.now / 1000 + i / 100);
+    assert.ok(s.size <= 500, `size ${s.size}`);
+  });
+});
+
+describe('registerStream', () => {
+  async function transmitter({ meta, status = 201, reply }) {
+    const hits = [];
+    const server = http.createServer((req, res) => {
+      const chunks = [];
+      req.on('data', (c) => chunks.push(c));
+      req.on('end', () => {
+        if (req.url === '/.well-known/ssf-configuration') {
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify(meta(`http://127.0.0.1:${server.address().port}`)));
+          return;
+        }
+        hits.push({ url: req.url, method: req.method, auth: req.headers.authorization, body: Buffer.concat(chunks).toString() });
+        res.statusCode = status;
+        res.end(reply || JSON.stringify({ data: { id: 'str_1', audience: STREAM_AUD, endpoint_url: 'https://rp.test/ssf', status: 'enabled', events_requested: [EV.revoked] } }));
+      });
+    });
+    await new Promise((r) => server.listen(0, '127.0.0.1', r));
+    open.push(() => {
+      server.closeAllConnections();
+      server.close();
+    });
+    return { url: `http://127.0.0.1:${server.address().port}`, hits };
+  }
+  const client = (url) => authfi({ tenant: 't', apiKey: 'k', issuer: url });
+  const request = { audience: STREAM_AUD, endpointUrl: 'https://rp.test/ssf', authToken: 'push-secret', events: [EV.revoked] };
+
+  it('registers a stream with the bearer and the documented body', async () => {
+    const t = await transmitter({ meta: (b) => ({ issuer: b, configuration_endpoint: `${b}/v1/ssf/streams` }) });
+    const st = await client(t.url).registerStream('operator-token', request);
+    assert.deepEqual(st, { id: 'str_1', audience: STREAM_AUD, endpointUrl: 'https://rp.test/ssf', status: 'enabled', events: [EV.revoked] });
+    assert.equal(t.hits.length, 1);
+    assert.equal(t.hits[0].url, '/v1/ssf/streams');
+    assert.equal(t.hits[0].auth, 'Bearer operator-token');
+    assert.deepEqual(JSON.parse(t.hits[0].body), { audience: STREAM_AUD, endpoint_url: 'https://rp.test/ssf', auth_token: 'push-secret', events_requested: [EV.revoked] });
+    assert.ok(!JSON.stringify(st).includes('push-secret'));
+  });
+
+  it('never sends the bearer to another host', async () => {
+    const evil = await transmitter({ meta: () => ({}) });
+    const t = await transmitter({ meta: (b) => ({ issuer: b, configuration_endpoint: `${evil.url}/v1/ssf/streams` }) });
+    await assert.rejects(client(t.url).registerStream('operator-token', request), /not on the issuer/);
+    assert.equal(evil.hits.length, 0);
+    assert.equal(t.hits.length, 0);
+  });
+
+  it('does not follow a redirect with the bearer', async () => {
+    const evil = await transmitter({ meta: () => ({}) });
+    const redirecting = http.createServer((req, res) => {
+      res.statusCode = 307;
+      res.setHeader('Location', `${evil.url}${req.url}`);
+      res.end();
+    });
+    await new Promise((x) => redirecting.listen(0, '127.0.0.1', x));
+    open.push(() => { redirecting.closeAllConnections(); redirecting.close(); });
+    await assert.rejects(client(`http://127.0.0.1:${redirecting.address().port}`).registerStream('operator-token', request));
+    const t = await transmitter({ meta: (b) => ({ issuer: b, configuration_endpoint: `${b}/v1/ssf/streams` }) });
+    const post = http.createServer((req, res) => {
+      if (req.method === 'GET') {
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({ issuer: `http://127.0.0.1:${post.address().port}`, configuration_endpoint: `http://127.0.0.1:${post.address().port}/v1/ssf/streams` }));
+        return;
+      }
+      res.statusCode = 307;
+      res.setHeader('Location', `${evil.url}/stolen`);
+      res.end();
+    });
+    await new Promise((x) => post.listen(0, '127.0.0.1', x));
+    open.push(() => { post.closeAllConnections(); post.close(); });
+    await assert.rejects(client(`http://127.0.0.1:${post.address().port}`).registerStream('operator-token', request));
+    assert.equal(evil.hits.length, 0, 'the bearer must never reach the redirect target');
+    assert.equal(t.hits.length, 0);
+  });
+
+  it('refuses metadata that names another issuer', async () => {
+    const t = await transmitter({ meta: (b) => ({ issuer: 'https://other.test', configuration_endpoint: `${b}/v1/ssf/streams` }) });
+    await assert.rejects(client(t.url).registerStream('operator-token', request), /another issuer/);
+    assert.equal(t.hits.length, 0);
+  });
+
+  it('turns a refusal into an error that holds no secret', async () => {
+    const t = await transmitter({ meta: (b) => ({ issuer: b, configuration_endpoint: `${b}/v1/ssf/streams` }), status: 403, reply: '{"error":"operator-token and push-secret leaked"}' });
+    await assert.rejects(client(t.url).registerStream('operator-token', request), (e) => /refused \(403\)/.test(e.message) && !e.message.includes('operator-token') && !e.message.includes('push-secret'));
+  });
+
+  it('refuses invalid requests before any request is made', async () => {
+    const t = await transmitter({ meta: (b) => ({ issuer: b, configuration_endpoint: `${b}/v1/ssf/streams` }) });
+    const c = client(t.url);
+    await assert.rejects(c.registerStream('', request), /bearer/);
+    await assert.rejects(c.registerStream('b', { ...request, audience: '' }), /audience/);
+    await assert.rejects(c.registerStream('b', { ...request, endpointUrl: 'http://rp.test/ssf' }), /https/);
+    await assert.rejects(c.registerStream('b', { ...request, endpointUrl: 'https://u:p@rp.test/ssf' }), /https/);
+    await assert.rejects(c.registerStream('b', { ...request, endpointUrl: 'nonsense' }), /https/);
+    await assert.rejects(authfi({ tenant: 't', apiKey: 'k' }).registerStream('b', request), /issuer/);
+    assert.equal(t.hits.length, 0);
+    await c.registerStream('b', request); // control
+    assert.equal(t.hits.length, 1);
+  });
+});
+
+describe('receipt to refusal latency', () => {
+  it('measures push start to verifyToken refusal over 50 runs', async () => {
+    const r = await rig();
+    const runs = 50;
+    const total = [];
+    for (let i = 0; i < runs; i++) {
+      const sub = `agent:agt_lat_${i}`;
+      const tok = r.issuer.token(sub, r.issuer.seconds() - 1);
+      await r.auth.verifyToken(tok);
+      const claims = r.issuer.setClaims();
+      claims.sub_id = { format: 'opaque', id: sub };
+      const set = r.issuer.set({ claims });
+      const start = process.hrtime.bigint();
+      const res = await r.push(set);
+      assert.equal(res.status, 202);
+      await refused(r.auth.verifyToken(tok), 'token_revoked');
+      total.push(Number(process.hrtime.bigint() - start) / 1e6);
+    }
+    const sorted = [...total].sort((a, b) => a - b);
+    const q = (p) => sorted[Math.min(sorted.length - 1, Math.floor((sorted.length * p) / 100))];
+    const mean = sorted.reduce((a, b) => a + b, 0) / sorted.length;
+    const f = (n) => `${n.toFixed(3)}ms`;
+    const out = [
+      'Node SDK receiver: push start to verifyToken refusal, loopback HTTP, 50 runs',
+      `push -> refused (HTTP + handler)   n=${sorted.length} min=${f(sorted[0])} p50=${f(q(50))} p95=${f(q(95))} p99=${f(q(99))} max=${f(sorted[sorted.length - 1])} mean=${f(mean)}`,
+      'Excludes the transmitter queue and drain delay; that part is measured on the platform side.',
+      '',
+    ].join('\n');
+    if (process.env.LATENCY_OUT) require('fs').writeFileSync(process.env.LATENCY_OUT, out);
+    assert.ok(q(99) < 1000, `p99 ${q(99)}ms is not under 1s`);
+  });
+});
