@@ -219,10 +219,18 @@ module.exports = function authfi(config) {
     const signature = Buffer.from(signatureB64, 'base64url');
     if (!checkSignature(header.alg, key, `${headerB64}.${payloadB64}`, signature)) throw new Error('Invalid signature');
 
-    // A subject (or the actor on a delegated token) revoked after this token was issued.
+    // A subject, or any actor in the delegation chain, revoked after this token was issued.
     if (revocations) {
-      const actor = payload.act && typeof payload.act === 'object' ? payload.act.sub : undefined;
-      if (revocations.isRevoked(payload.sub, payload.iat) || (actor && revocations.isRevoked(actor, payload.iat))) {
+      // The store forgets a revocation once the longest token it was told about has expired; a
+      // longer-lived token would outlive its revocation, so it is refused rather than trusted.
+      if (Number.isFinite(payload.iat) && Number.isFinite(payload.exp) && payload.exp - payload.iat > revocations.tokenLifetimeSeconds) {
+        const err = new Error('The revocation store tokenLifetimeSeconds is shorter than this token\'s lifetime; raise it');
+        err.code = 'revocation_store_misconfigured';
+        throw err;
+      }
+      const subjects = [payload.sub];
+      for (let act = payload.act, depth = 0; act && typeof act === 'object' && depth < 16; act = act.act, depth += 1) subjects.push(act.sub);
+      if (subjects.some((subject) => revocations.isRevoked(subject, payload.iat))) {
         const err = new Error('Token revoked');
         err.code = 'token_revoked';
         throw err;

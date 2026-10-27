@@ -153,6 +153,9 @@ function refuseWith(res, status, err, description) {
 function readBody(req) {
   if (typeof req.body === 'string') return Promise.resolve(req.body);
   if (Buffer.isBuffer(req.body)) return Promise.resolve(req.body.toString('utf8'));
+  // A body parser already consumed the stream and left something that is not the raw SET: there is
+  // nothing left to read, and waiting for 'end' would hang the request.
+  if ((req.body !== undefined && req.body !== null) || req.readableEnded) return Promise.reject(new Error('body already consumed'));
   return new Promise((resolve, reject) => {
     const chunks = [];
     let size = 0;
@@ -213,9 +216,12 @@ function mapJwsError(err) {
   switch (err && err.code) {
     case 'key_set_unavailable':
       return [503, 'temporarily_unavailable', 'the issuer\'s keys could not be read'];
+    case 'unknown_key':
+      // The key may be one the issuer rotated in since the last (throttled) fetch. A 400 is final
+      // for the transmitter and would lose this revocation, so ask for a retry.
+      return [503, 'temporarily_unavailable', 'the signing key is not in the issuer\'s key set (yet)'];
     case 'bad_signature':
       return [400, 'authentication_failed', 'the signature does not verify'];
-    case 'unknown_key':
     case 'alg_not_allowed':
     case 'alg_key_mismatch':
     case 'kid_required':
@@ -241,8 +247,15 @@ function createReceiver(deps, config) {
   if (!config || typeof config.audience !== 'string' || config.audience.trim() === '') {
     throw new Error('authfi: receiver needs audience: the audience your stream was registered with');
   }
+  if (typeof store.revoke !== 'function' || typeof store.isRevoked !== 'function' ||
+      !(store.tokenLifetimeSeconds > 0) || !Number.isInteger(store.maxEntries) || store.maxEntries < 1) {
+    throw new Error('authfi: revocations must be a store from authfi.createRevocationStore()');
+  }
+  if (config.authToken !== undefined && (typeof config.authToken !== 'string' || config.authToken === '')) {
+    throw new Error('authfi: authToken must be a non-empty string, or left out to not require a bearer');
+  }
   const audience = config.audience;
-  const pushToken = typeof config.authToken === 'string' && config.authToken !== '' ? digest(config.authToken) : null;
+  const pushToken = config.authToken === undefined ? null : digest(config.authToken);
   const onSignal = typeof config.onSignal === 'function' ? config.onSignal : null;
   const leewaySeconds = 60;
   const life = store.tokenLifetimeSeconds;
@@ -251,9 +264,9 @@ function createReceiver(deps, config) {
   const warn = (msg, fields) => logger.warn(`authfi: receiver: ${msg}`, fields);
 
   function bearerOk(req) {
-    const [scheme, token] = String(req.headers.authorization || '').trim().split(/\s+/, 2);
-    if (!scheme || scheme.toLowerCase() !== 'bearer' || !token) return false;
-    return crypto.timingSafeEqual(digest(token), pushToken);
+    const match = /^bearer\s+(\S+)$/i.exec(String(req.headers.authorization || '').trim());
+    if (!match) return false;
+    return crypto.timingSafeEqual(digest(match[1]), pushToken);
   }
 
   function refuse(res, status, err, description) {
@@ -307,8 +320,11 @@ function createReceiver(deps, config) {
     }
     const now = Math.floor(clock() / 1000);
     if (!validDate(payload.iat)) return [400, 'invalid_request', 'the SET has no usable iat'];
-    if (payload.iat > now + leewaySeconds) return [400, 'invalid_request', 'the SET was issued in the future'];
-    if (now >= payload.iat + life) return [400, 'invalid_request', 'the SET is older than any token it could affect'];
+    if (payload.iat > now + leewaySeconds) {
+      // Not a refusal of the SET: this clock is behind the transmitter's. A 400 is final for the
+      // transmitter and disables the stream, so ask for a retry instead.
+      return [503, 'temporarily_unavailable', 'the SET is dated ahead of this server\'s clock'];
+    }
     if (payload.exp !== undefined && (!validDate(payload.exp) || now >= payload.exp + leewaySeconds)) {
       return [400, 'invalid_request', 'the SET has expired'];
     }
@@ -322,6 +338,12 @@ function createReceiver(deps, config) {
       if (!detail || typeof detail !== 'object' || Array.isArray(detail)) {
         return [400, 'invalid_request', 'an event of the SET is not an object'];
       }
+    }
+    if (now >= payload.iat + life) {
+      // Every token this could refuse has expired: accepted so the transmitter does not take it for
+      // a failure, and not applied.
+      logger.info('authfi: receiver: SET ignored: older than any token it could affect', { jti: payload.jti });
+      return null;
     }
     if (!seen.claim(payload.jti)) return null; // a retry of a SET already applied: accepted again, applied once
     await apply(payload, subject, payload.iat);

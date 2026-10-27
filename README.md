@@ -68,20 +68,21 @@ app.post('/ssf/push', auth.receiver({
 The receiver reads the request body itself (or `req.body` if a body parser already made it a string or Buffer), so it also works in a plain `http.createServer`. What it does, and what it refuses:
 
 - POST with `Content-Type: application/secevent+jwt`, at most 16 KiB; any other method is 405. If you set `authToken`, the push must carry that bearer (401 otherwise).
-- The SET is a JWS signed by a key in the project's key set (the one that verifies agent tokens), with `typ` `secevent+jwt`. `none`, HMAC and unknown keys are refused; a key set that cannot be read answers 503 so AuthFI retries.
-- `iss` is the configured issuer, `aud` includes your stream audience, `jti` and `iat` are present, `iat` is not in the future and not older than `tokenLifetimeSeconds`, `exp` (if present) has not passed, `sub_id` names the subject, `events` holds objects.
+- The SET is a JWS signed by a key in the project's key set (the one that verifies agent tokens), with `typ` `secevent+jwt`. `none` and HMAC are refused. AuthFI treats a 400 as final and stops the stream, so a condition that can heal answers 503 and AuthFI retries: a key that is not in the key set yet (a rotation), a key set that cannot be read, or an `iat` more than 60 seconds ahead of this server's clock.
+- `iss` is the configured issuer, `aud` includes your stream audience, `jti` and `iat` are present, `iat` is present, `exp` (if present) has not passed, `sub_id` names the subject, `events` holds objects.
 - Accepted: `202`. Refused: `400` with `{"err": ..., "description": ...}` where `err` is `invalid_request`, `invalid_key`, `invalid_issuer`, `invalid_audience` or `authentication_failed`. Nothing is recorded for a refused SET.
+- A SET older than any token it could affect (`tokenLifetimeSeconds`) is answered `202` and not applied.
 - A `jti` seen before is answered `202` and applied once, so AuthFI can retry a push whose answer was lost. The set of seen ids is bounded.
 
-`session-revoked`, `account-purged` and `credential-compromise` revoke the subject: tokens issued at or before the SET's `iat` are refused (`verifyToken` throws an error with `code` `token_revoked`), and a token issued after it is accepted. A delegated token is refused when its actor (`act.sub`) is revoked. A token with no `iat` is refused while its subject has a live revocation. `token-claims-change` with `resumed: true` reaches `onSignal` with `resumed` set and changes nothing else: a resumed agent mints a new token, which is newer than the revocation.
+`session-revoked`, `account-purged` and `credential-compromise` revoke the subject: tokens issued at or before the SET's `iat` are refused (`verifyToken` throws an error with `code` `token_revoked`), and a token issued after it is accepted. A delegated token is refused when any actor in its `act` chain is revoked. A token with no `iat` is refused while its subject has a live revocation. `token-claims-change` with `resumed: true` reaches `onSignal` with `resumed` set and changes nothing else: a resumed agent mints a new token, which is newer than the revocation.
 
-`store.revoke(subject, notBefore)` and `store.isRevoked(subject, issuedAt)` take Unix seconds and are there for your own use. The store holds at most `maxEntries` subjects (default 100,000) and forgets a revocation once it is older than `tokenLifetimeSeconds`. When it is full it drops the oldest revocations and refuses every token issued before the newest one it dropped, whatever its subject, until that time passes `tokenLifetimeSeconds`: a full store costs some holders a new token and never lets a revoked one through.
+`store.revoke(subject, notBefore)` and `store.isRevoked(subject, issuedAt)` take Unix seconds and are there for your own use. The store holds at most `maxEntries` subjects (default 100,000) and forgets a revocation once it is older than `tokenLifetimeSeconds`. `verifyToken` refuses a token that lives longer than that (error code `revocation_store_misconfigured`): set it to your longest token lifetime. When it is full it drops the oldest revocations and refuses every token issued before the newest one it dropped, whatever its subject, until that time passes `tokenLifetimeSeconds`: a full store costs some holders a new token and never lets a revoked one through.
 
 `verifyToken` verifies RS256, PS256, ES256 and EdDSA tokens, which is what agent tokens use, and refuses a Security Event Token presented as an access token.
 
 To register the stream from code, `auth.registerStream(bearer, { audience: 'my-stream', endpointUrl: 'https://api.example.com/ssf/push', authToken })` reads the issuer's `/.well-known/ssf-configuration` and posts the registration to the `configuration_endpoint` it names, which must be on the issuer's host. The bearer is a credential allowed to register streams, and no redirect is followed with it.
 
-The store lives in memory: run one per process, and feed every replica (register one stream per replica or share the events yourself).
+The store lives in memory. A restart empties it, so until the tokens issued before the restart expire, a revoked agent is accepted again; a replica only learns of revocations pushed to its own endpoint. Run one stream per process and keep the token lifetime short.
 
 ## Cloud Credentials (AuthFI Connect)
 
