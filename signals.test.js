@@ -190,15 +190,15 @@ describe('an accepted revocation', () => {
     await r.auth.verifyToken(r.issuer.token('usr_7', r.issuer.seconds() - 1));
   });
 
-  it('refuses a token with no iat while its subject is revoked', async () => {
+  it('refuses a token with no iat, whatever its subject, when a store is configured', async () => {
     const r = await rig();
     await r.push(r.issuer.set());
     const noIat = (sub) => {
       const p = { iss: r.issuer.url, sub, aud: API_AUD, exp: r.issuer.seconds() + 3600 };
       return r.issuer.sign('ed1', { typ: 'at+jwt' }, p);
     };
-    await refused(r.auth.verifyToken(noIat(AGENT)), 'token_revoked');
-    await r.auth.verifyToken(noIat('agent:agt_9'));
+    await refused(r.auth.verifyToken(noIat(AGENT)), 'token_iat_exp_required');
+    await refused(r.auth.verifyToken(noIat('agent:agt_9')), 'token_iat_exp_required');
   });
 
   it('uses the iat of the SET, so a late delivery does not refuse newer tokens', async () => {
@@ -1110,5 +1110,69 @@ describe('stale boundary', () => {
       assert.equal((await r.push(r.issuer.set({ claims: c }))).status, 202);
       assert.equal(r.store.size === 1, applied, `age ${age}`);
     }
+  });
+});
+
+describe('round 2', () => {
+  it('Express 4 + global express.json(): req.body is {} for a non-JSON type and the stream is unread', async () => {
+    const r = await rig();
+    const handler = r.auth.receiver({ audience: STREAM_AUD });
+    const server = http.createServer((req, res) => { req.body = {}; handler(req, res); }); // what body-parser 1.x does for a skipped type
+    await new Promise((ok) => server.listen(0, '127.0.0.1', ok));
+    open.push(() => { server.closeAllConnections(); server.close(); });
+    const res = await fetch(`http://127.0.0.1:${server.address().port}/`, { method: 'POST', headers: { 'Content-Type': SECEVENT }, body: r.issuer.set() });
+    assert.equal(res.status, 202, await res.text());
+  });
+
+  it('an unknown kid heals: 503 inside the window, 202 on the retry after it', async () => {
+    const r = await rig();
+    assert.equal((await r.push(r.issuer.set())).status, 202);
+    r.issuer.add('ed2', 'EdDSA', crypto.generateKeyPairSync('ed25519'));
+    r.issuer.advance(2000);
+    const set = r.issuer.set({ kid: 'ed2', claims: r.issuer.setClaims() });
+    assert.equal((await r.push(set)).status, 503);
+    r.issuer.advance(16000);
+    assert.equal((await r.push(set)).status, 202);
+  });
+
+  it('a token with no exp is refused outright, so it is never forgotten into validity', async () => {
+    const r = await rig();
+    const now = r.issuer.seconds();
+    const noExp = r.issuer.sign('ed1', { typ: 'at+jwt' }, { iss: r.issuer.url, sub: AGENT, aud: API_AUD, tenant_id: 't1', iat: now - 5 });
+    await r.push(r.issuer.set());
+    await refused(r.auth.verifyToken(noExp), 'token_iat_exp_required');
+    r.issuer.advance(86400 * 1000 + 5000);
+    await refused(r.auth.verifyToken(noExp), 'token_iat_exp_required');
+  });
+});
+
+describe('r2 kill', () => {
+  it('a SET exactly one lifetime old is ignored, not applied', async () => {
+    const r = await rig();
+    const c = r.issuer.setClaims();
+    c.iat = r.issuer.seconds() - 86400;
+    assert.equal((await r.push(r.issuer.set({ claims: c }))).status, 202);
+    assert.equal(r.store.size, 0);
+  });
+  it('a chain three actors deep is walked', async () => {
+    const r = await rig();
+    const tok = r.issuer.token('usr_7', r.issuer.seconds() - 1, { act: { sub: 'agent:a', act: { sub: 'agent:b', act: { sub: AGENT } } } });
+    await r.push(r.issuer.set());
+    await refused(r.auth.verifyToken(tok), 'token_revoked');
+  });
+  it('store shape: each missing part is refused', () => {
+    const good = authfi.createRevocationStore();
+    for (const bad of [{ ...good, revoke: undefined }, { isRevoked: good.isRevoked, revoke: good.revoke, tokenLifetimeSeconds: 0, maxEntries: 5 }, { isRevoked: good.isRevoked, revoke: good.revoke, tokenLifetimeSeconds: 10 }, { revoke: good.revoke, tokenLifetimeSeconds: 10, maxEntries: 5 }]) {
+      assert.throws(() => createReceiver(mk({ store: bad }), { audience: 'a' }));
+    }
+  });
+  it('Express 4 body-parser leaves req.body = {} with the stream unread: the SET must be read', async () => {
+    const r = await rig();
+    const handler = r.auth.receiver({ audience: STREAM_AUD });
+    const server = http.createServer((req, res) => { req.body = {}; handler(req, res); });
+    await new Promise((ok) => server.listen(0, '127.0.0.1', ok));
+    open.push(() => { server.closeAllConnections(); server.close(); });
+    const res = await fetch(`http://127.0.0.1:${server.address().port}/`, { method: 'POST', headers: { 'Content-Type': SECEVENT }, body: r.issuer.set() });
+    assert.equal(res.status, 202);
   });
 });

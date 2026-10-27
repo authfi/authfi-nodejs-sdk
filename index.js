@@ -223,7 +223,12 @@ module.exports = function authfi(config) {
     if (revocations) {
       // The store forgets a revocation once the longest token it was told about has expired; a
       // longer-lived token would outlive its revocation, so it is refused rather than trusted.
-      if (Number.isFinite(payload.iat) && Number.isFinite(payload.exp) && payload.exp - payload.iat > revocations.tokenLifetimeSeconds) {
+      if (!Number.isFinite(payload.iat) || !Number.isFinite(payload.exp)) {
+        const err = new Error('Token has no issue or expiry time, which revocation needs');
+        err.code = 'token_iat_exp_required';
+        throw err;
+      }
+      if (payload.exp - payload.iat > revocations.tokenLifetimeSeconds) {
         const err = new Error('The revocation store tokenLifetimeSeconds is shorter than this token\'s lifetime; raise it');
         err.code = 'revocation_store_misconfigured';
         throw err;

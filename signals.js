@@ -154,8 +154,9 @@ function readBody(req) {
   if (typeof req.body === 'string') return Promise.resolve(req.body);
   if (Buffer.isBuffer(req.body)) return Promise.resolve(req.body.toString('utf8'));
   // A body parser already consumed the stream and left something that is not the raw SET: there is
-  // nothing left to read, and waiting for 'end' would hang the request.
-  if ((req.body !== undefined && req.body !== null) || req.readableEnded) return Promise.reject(new Error('body already consumed'));
+  // nothing left to read, and waiting for 'end' would hang the request. A parser that skipped this
+  // content type may leave req.body = {} with the stream unread, which is read below.
+  if (req.readableEnded) return Promise.reject(new Error('body already consumed'));
   return new Promise((resolve, reject) => {
     const chunks = [];
     let size = 0;
