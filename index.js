@@ -235,9 +235,15 @@ module.exports = function authfi(config) {
       }
       const subjects = [payload.sub];
       for (let act = payload.act, depth = 0; act && typeof act === 'object' && depth < 16; act = act.act, depth += 1) subjects.push(act.sub);
-      if (subjects.some((subject) => revocations.isRevoked(subject, payload.iat))) {
-        const err = new Error('Token revoked');
+      let hit = null;
+      for (const subject of subjects) {
+        hit = revocations.find(subject, payload.iat);
+        if (hit) break;
+      }
+      if (hit) {
+        const err = new Error(hit.ref ? `Token revoked (ref ${hit.ref})` : 'Token revoked');
         err.code = 'token_revoked';
+        err.ref = hit.ref;
         throw err;
       }
     }

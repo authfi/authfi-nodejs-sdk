@@ -25,7 +25,9 @@ interface RevocationStoreOptions {
 
 interface RevocationStore {
   /** Tokens of `subject` issued at or before `notBefore` (Unix seconds) are dead. Returns how many other subjects were dropped to make room. */
-  revoke(subject: string, notBefore: number): number;
+  revoke(subject: string, notBefore: number, ref?: string): number;
+  /** Like isRevoked, but returns the reference (the jti of the revoking SET) of the revocation that applies, or null. */
+  find(subject: string, issuedAt?: number): { ref: string } | null;
   /** Whether a token of `subject` issued at `issuedAt` (Unix seconds) is revoked. An unknown issue time counts as older than every revocation. */
   isRevoked(subject: string, issuedAt?: number): boolean;
   readonly size: number;

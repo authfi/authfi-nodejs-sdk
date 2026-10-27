@@ -53,39 +53,44 @@ function createRevocationStore(options = {}) {
   const clock = typeof options.clock === 'function' ? options.clock : Date.now;
   const notBefore = new Map();
   let floor = 0;
+  let floorRef = '';
 
   const nowSeconds = () => Math.floor(clock() / 1000);
 
   function makeRoom(now) {
-    for (const [subject, at] of notBefore) {
-      if (at + life <= now) notBefore.delete(subject);
+    for (const [subject, entry] of notBefore) {
+      if (entry.at + life <= now) notBefore.delete(subject);
     }
     if (notBefore.size < max) return 0;
-    const oldest = [...notBefore.entries()].sort((a, b) => a[1] - b[1]);
+    const oldest = [...notBefore.entries()].sort((a, b) => a[1].at - b[1].at);
     const n = Math.min(Math.floor(max / EVICT_FRACTION) + 1, oldest.length);
     for (let i = 0; i < n; i++) notBefore.delete(oldest[i][0]);
-    if (oldest[n - 1][1] > floor) floor = oldest[n - 1][1];
+    if (oldest[n - 1][1].at > floor) {
+      floor = oldest[n - 1][1].at;
+      floorRef = oldest[n - 1][1].ref;
+    }
     return n;
   }
 
-  return {
+  const store = {
     /**
      * Records that tokens of `subject` issued at or before `at` (Unix seconds) are dead. A later
      * call with an earlier time changes nothing. Returns how many other subjects were dropped to
-     * make room; zero in normal operation.
+     * make room; zero in normal operation. `ref` is the reference of the decision, the jti of the
+     * SET that withdrew the subject; a token refused because of it carries it as `error.ref`.
      */
-    revoke(subject, at) {
+    revoke(subject, at, ref = '') {
       const t = toSeconds(at);
       if (typeof subject !== 'string' || subject === '' || t === null) return 0;
       const now = nowSeconds();
       if (t + life <= now) return 0; // every token this could refuse has already expired
       const current = notBefore.get(subject);
       if (current !== undefined) {
-        if (t > current) notBefore.set(subject, t);
+        if (t > current.at) notBefore.set(subject, { at: t, ref });
         return 0;
       }
       const dropped = notBefore.size >= max ? makeRoom(now) : 0;
-      notBefore.set(subject, t);
+      notBefore.set(subject, { at: t, ref });
       return dropped;
     },
 
@@ -95,12 +100,17 @@ function createRevocationStore(options = {}) {
      * live one, because it cannot be shown to be newer.
      */
     isRevoked(subject, issuedAt) {
+      return store.find(subject, issuedAt) !== null;
+    },
+
+    /** Like isRevoked, but returns { ref } of the revocation that applies, or null. */
+    find(subject, issuedAt) {
       const now = nowSeconds();
       const iat = toSeconds(issuedAt) === null ? -Infinity : issuedAt;
-      if (floor !== 0 && floor + life > now && iat <= floor) return true;
-      const at = notBefore.get(subject);
-      if (at === undefined || at + life <= now) return false;
-      return iat <= at;
+      if (floor !== 0 && floor + life > now && iat <= floor) return { ref: floorRef };
+      const entry = notBefore.get(subject);
+      if (entry === undefined || entry.at + life <= now) return null;
+      return iat <= entry.at ? { ref: entry.ref } : null;
     },
 
     /** Subjects remembered, expired ones included until they are next swept. */
@@ -118,6 +128,7 @@ function createRevocationStore(options = {}) {
       return life;
     },
   };
+  return store;
 }
 
 /** A bounded set of recently accepted jti values. */
@@ -289,7 +300,7 @@ function createReceiver(deps, config) {
       const signal = { event, subject, jti: claims.jti, issuedAt: iat, revoked: false, resumed: false };
       if (REVOKING.has(event)) {
         signal.revoked = true;
-        const dropped = store.revoke(subject, iat);
+        const dropped = store.revoke(subject, iat, claims.jti);
         if (dropped > 0) warn('revocation store is full; the oldest revocations were folded into a floor', { dropped });
       } else if (event === EVENTS.TOKEN_CLAIMS_CHANGE) {
         signal.resumed = detail.resumed === true;
