@@ -36,6 +36,7 @@ const crypto = require('crypto');
 
 const MODES = ['enforce', 'watch', 'off'];
 const REPLAY_DEFAULT_MAX = 100000;
+const REPLAY_PER_KEY_DEFAULT = 1000;
 const PIN_FORMAT = /^[0-9a-f]{64}$/;
 
 const isAgentClaims = (c) => (typeof c.sub === 'string' && c.sub.startsWith('agt_'))
@@ -110,7 +111,7 @@ function authfi(config) {
       key = Buffer.isBuffer(nonceKey) ? nonceKey : typeof nonceKey === 'string' ? Buffer.from(nonceKey) : null;
       if (!key || key.length < 16) throw refuse('sdk_not_configured', 'nonceKey must be at least 16 bytes');
     }
-    const guard = replayGuard || memoryReplayGuard(config.replayMax || REPLAY_DEFAULT_MAX, now);
+    const guard = replayGuard || memoryReplayGuard(config.replayMax || REPLAY_DEFAULT_MAX, now, config.replayPerKey || REPLAY_PER_KEY_DEFAULT);
     if (typeof guard.record !== 'function') throw refuse('sdk_not_configured', 'replayGuard needs a record(key, expiresAtMs) method');
     proofCfg = { publicOrigin, trustForwarded: trustForwarded === true, nonceKey: key, guard };
     return proofCfg;
@@ -189,11 +190,12 @@ function authfi(config) {
       const proof = validateProof(req, token, jkt, pc, now());
       if (checkAgent) getChain().prove(key, header['x5t#S256']);
       // Single use: recorded only after every other check has passed.
-      let first = false;
+      let outcome = false;
       try {
-        first = (await pc.guard.record(`${proof.thumb}:${proof.jti}`, proof.iat * 1000 + (MAX_AGE_S + MAX_FUTURE_S + 60) * 1000)) === true;
-      } catch { first = false; }
-      if (!first) throw refuse('dpop_replayed', 'the proof was already used');
+        outcome = await pc.guard.record(`${proof.thumb}:${proof.jti}`, proof.iat * 1000 + (MAX_AGE_S + MAX_FUTURE_S + 60) * 1000);
+      } catch { outcome = false; }
+      if (outcome === 'full') throw refuse('dpop_replay_guard_full', 'the replay guard is full; retry later');
+      if (outcome !== true) throw refuse('dpop_replayed', 'the proof was already used');
     };
     if (agent && agentTokens === 'watch') {
       try {
@@ -247,7 +249,7 @@ function authfi(config) {
 
   // --- Middleware ---
 
-  const STATUS_BY_CODE = { jwks_unavailable: 503, sdk_not_configured: 500 };
+  const STATUS_BY_CODE = { jwks_unavailable: 503, dpop_replay_guard_full: 503, sdk_not_configured: 500 };
   const PROOF_CHALLENGE = 'algs="EdDSA ES256 PS256"';
 
   // respond answers a refusal with its stable code and nothing from the token or the proof.
@@ -257,6 +259,7 @@ function authfi(config) {
       return res.status(500).json({ error: 'sdk_internal' });
     }
     const status = STATUS_BY_CODE[err.code] || 401;
+    if (err.code === 'dpop_replay_guard_full' && typeof res.setHeader === 'function') res.setHeader('Retry-After', '5');
     if (status === 401 && typeof res.setHeader === 'function') {
       let challenge;
       if (err.code === 'dpop_nonce') {

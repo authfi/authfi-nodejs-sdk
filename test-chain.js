@@ -29,6 +29,15 @@ describe('the chain proves the signing key', () => {
     chainAccepted({ pki: { leaf: { policies: [OTHER_POLICY, PEN_POLICY] } } }));
   it('accepts a chain whose root is not in x5c when the pinned root is supplied as rootCerts', () =>
     chainAccepted({ pki: { omitRoot: true }, configFn: (p) => ({ rootCerts: [new crypto.X509Certificate(p.rootDer).toString()] }) }));
+  const withRootCerts = (pki) => ({ pki: { omitRoot: true, ...pki }, configFn: (p) => ({ rootCerts: [new crypto.X509Certificate(p.rootDer).toString()] }) });
+  it('chain_policy (rootCerts path): the intermediate states no policy', () => chainRefused('chain_policy', withRootCerts({ inter: { policies: undefined } })));
+  it('chain_policy (rootCerts path): the intermediate is not a CA', () => chainRefused('chain_policy', withRootCerts({ inter: { ca: false } })));
+  it('chain_policy (rootCerts path): the root allows no CA below it (pathLen 0)', () => chainRefused('chain_policy', withRootCerts({ root: { pathLen: 0 } })));
+  it('rootCerts path: a root with a large enough pathLen is accepted', () => chainAccepted(withRootCerts({ root: { pathLen: 1 } })));
+  it('chain_not_proven: a certificate larger than 16 KiB', () => {
+    const big = seq(oid('1.2.3.4.5'), octet(Buffer.alloc(17000, 1)));
+    return chainRefused('chain_not_proven', { pki: { leaf: { extra: [big] } } });
+  });
   it('chain_not_proven: a pinned rootCerts root that has expired', () =>
     chainRefused('chain_not_proven', { pki: { omitRoot: true, root: { notBefore: T0 - 30 * DAY, notAfter: T0 - DAY } }, configFn: (p) => ({ rootCerts: [new crypto.X509Certificate(p.rootDer).toString()] }) }));
   it('chain_pin: a rootCerts root that is not pinned does not complete the chain', () =>
@@ -250,6 +259,15 @@ describe('the DER walker', () => {
     const buf = Buffer.from([0x30, 0x03, 0x04, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00]);
     const parent = der.readTLV(buf, 0, buf.length);
     assert.throws(() => der.readTLV(buf, parent.start, parent.end));
+  });
+  it('refuses a length in long form that fits the short form, and one with a leading zero byte', () => {
+    const body = Buffer.alloc(200, 0);
+    const longForShort = Buffer.concat([Buffer.from([0x04, 0x81, 0x05]), body]);
+    assert.throws(() => der.readTLV(longForShort, 0, longForShort.length));
+    const leadingZero = Buffer.concat([Buffer.from([0x04, 0x82, 0x00, 0x80]), body]);
+    assert.throws(() => der.readTLV(leadingZero, 0, leadingZero.length));
+    const fine = Buffer.concat([Buffer.from([0x04, 0x81, 0x80]), body]);
+    assert.equal(der.readTLV(fine, 0, fine.length).end - 3, 128);
   });
   it('decodes object identifiers with multi-byte arcs', () => {
     assert.equal(der.decodeOID(Buffer.from(oid('1.3.6.1.4.1.67322.1.1')).subarray(2)), '1.3.6.1.4.1.67322.1.1');

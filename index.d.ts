@@ -10,7 +10,7 @@ type RefusalCode =
   | 'token_exp_required' | 'token_not_yet_valid' | 'token_sub_required' | 'token_tenant_required'
   | 'token_tenant_not_issuers' | 'token_dpop_proof_required' | 'token_act_chain_unsupported'
   | 'dpop_missing' | 'dpop_multiple' | 'dpop_malformed' | 'dpop_type' | 'dpop_alg' | 'dpop_signature'
-  | 'dpop_method' | 'dpop_url' | 'dpop_iat' | 'dpop_ath' | 'dpop_replayed' | 'dpop_key_mismatch' | 'dpop_nonce'
+  | 'dpop_replay_guard_full' | 'dpop_method' | 'dpop_url' | 'dpop_iat' | 'dpop_ath' | 'dpop_replayed' | 'dpop_key_mismatch' | 'dpop_nonce'
   | 'chain_not_proven' | 'chain_policy' | 'chain_pin';
 
 /**
@@ -19,7 +19,7 @@ type RefusalCode =
  * The default is a bounded in-memory store: with more than one replica, supply a shared store.
  */
 interface ReplayGuard {
-  record(key: string, expiresAtMs: number): boolean | Promise<boolean>;
+  record(key: string, expiresAtMs: number): boolean | 'full' | Promise<boolean | 'full'>;
 }
 
 interface AuthFIConfig {

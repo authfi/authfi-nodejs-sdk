@@ -93,6 +93,8 @@ describe('DPoP refusals', () => {
   it('dpop_malformed: embedded jwk carries a private member', () => refused('dpop_malformed', (s, t) =>
     s.request(t, { proof: { jwk: { ...s.dpop.privateKey.export({ format: 'jwk' }) } } })));
   it('dpop_malformed: no jwk', () => refused('dpop_malformed', (s, t) => s.request(t, { proof: { jwk: null } })));
+  it('dpop_malformed: a jti longer than 256', () => refused('dpop_malformed', (s, t) => s.request(t, { proof: { claims: { jti: 'j'.repeat(257) } } })));
+  it('dpop_malformed: the embedded jwk is an array', () => refused('dpop_malformed', (s, t) => s.request(t, { proof: { jwk: [s.dpopJwk] } })));
   it('dpop_malformed: no jti', () => refused('dpop_malformed', (s, t) => s.request(t, { proof: { claims: { jti: undefined } } })));
   it('dpop_malformed: proof larger than 8 KiB', () => refused('dpop_malformed', (s, t) => s.request(t, { proofs: ['a'.repeat(9000) + '.b.c'] })));
   it('dpop_malformed: a valid proof padded beyond 8 KiB', () => refused('dpop_malformed', (s, t) => s.request(t, { proof: { header: { pad: 'x'.repeat(9000) } } })));
@@ -219,7 +221,39 @@ describe('replay', () => {
     const t = s.agentToken();
     await s.client.verifyRequest(s.request(t));
     await s.client.verifyRequest(s.request(t));
-    await rejectsWith(s.client.verifyRequest(s.request(t)), 'dpop_replayed', assert);
+    await rejectsWith(s.client.verifyRequest(s.request(t)), 'dpop_replay_guard_full', assert);
+  });
+  it('one noisy key is capped per thumbprint while another key still works', async () => {
+    const s = scenario({ config: { replayMax: 100, replayPerKey: 2 } });
+    const noisy = s.agentToken();
+    await s.client.verifyRequest(s.request(noisy));
+    await s.client.verifyRequest(s.request(noisy));
+    await rejectsWith(s.client.verifyRequest(s.request(noisy)), 'dpop_replay_guard_full', assert);
+    const k2 = ed();
+    const victim = s.token(s.agentClaims({ cnf: { jkt: thumbprint(k2.publicKey) } }));
+    await s.client.verifyRequest(s.request(victim, { proof: { pair: k2 } }));
+  });
+  it('expired entries are swept on a timer, not only when the guard is full', async () => {
+    const s = scenario({ config: { replayMax: 100, replayPerKey: 1 } });
+    await s.client.verifyRequest(s.request(s.agentToken()));
+    await rejectsWith(s.client.verifyRequest(s.request(s.agentToken())), 'dpop_replay_guard_full', assert);
+    s.clock.t += 10 * 60 * 1000; // the guard is far from full; only the key's own cap would block
+    const t = s.agentToken({ iat: nowSec(s), exp: nowSec(s) + 600 });
+    await s.client.verifyRequest(s.request(t));
+  });
+  it('the middleware answers a full guard with 503 and Retry-After, never 401', async () => {
+    const s = scenario({ config: { replayMax: 1 } });
+    await s.client.verifyRequest(s.request(s.agentToken()));
+    const res = fakeRes();
+    const next = await run(s.client.authenticate(), s.request(s.agentToken()), res);
+    assert.ok(!next.called);
+    assert.equal(res.statusCode, 503);
+    assert.equal(res.body.error, 'dpop_replay_guard_full');
+    assert.ok(res.headers['retry-after']);
+  });
+  it('a custom guard may answer full', async () => {
+    const s = scenario({ config: { replayGuard: { record: () => 'full' } } });
+    await rejectsWith(s.client.verifyRequest(s.request(s.agentToken())), 'dpop_replay_guard_full', assert);
   });
   it('the default guard forgets a proof once its window has passed', async () => {
     const s = scenario({ config: { replayMax: 1 } });
@@ -237,6 +271,25 @@ describe('forwarded headers and the public URL', () => {
     const headers = { 'x-forwarded-host': 'edge.example.org', 'x-forwarded-proto': 'https' };
     await s.client.verifyRequest(s.request(t, { headers, proof: { claims: { htu: 'https://edge.example.org/orders' } } }));
     await rejectsWith(s.client.verifyRequest(s.request(t, { headers, proof: { claims: { htu: 'https://api.example.com/orders' } } })), 'dpop_url', assert);
+  });
+  it('X-Forwarded-Host: the last entry (the proxy) counts, a client-supplied first entry does not', async () => {
+    const s = scenario({ config: { publicUrl: undefined, trustForwarded: true } });
+    const t = s.agentToken();
+    const headers = { 'x-forwarded-host': 'evil.example, api.example.com', 'x-forwarded-proto': 'https, https' };
+    await rejectsWith(s.client.verifyRequest(s.request(t, { headers, proof: { claims: { htu: 'https://evil.example/orders' } } })), 'dpop_url', assert);
+    await s.client.verifyRequest(s.request(t, { headers, proof: { claims: { htu: 'https://api.example.com/orders' } } }));
+  });
+  it('a configured publicUrl wins over forwarded headers even with trustForwarded', async () => {
+    const s = scenario({ config: { trustForwarded: true } });
+    const t = s.agentToken();
+    const headers = { 'x-forwarded-host': 'evil.example', 'x-forwarded-proto': 'https' };
+    await rejectsWith(s.client.verifyRequest(s.request(t, { headers, proof: { claims: { htu: 'https://evil.example/orders' } } })), 'dpop_url', assert);
+    await s.client.verifyRequest(s.request(t, { headers }));
+  });
+  it('dpop_url: a forwarded protocol outside http and https', async () => {
+    const s = scenario({ config: { publicUrl: undefined, trustForwarded: true } });
+    const headers = { 'x-forwarded-host': 'edge.example.org', 'x-forwarded-proto': 'ftp' };
+    await rejectsWith(s.client.verifyRequest(s.request(s.agentToken(), { headers, proof: { claims: { htu: 'ftp://edge.example.org/orders' } } })), 'dpop_url', assert);
   });
   it('trustForwarded without the headers refuses', async () => {
     const s = scenario({ config: { publicUrl: undefined, trustForwarded: true } });

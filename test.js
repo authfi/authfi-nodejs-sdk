@@ -172,6 +172,8 @@ describe('baseline verification', () => {
     await refuse('token_exp_required', (s) => s.token(s.claims({ exp: undefined })));
     await refuse('token_exp_required', (s) => s.token(s.claims({ exp: '9999999999' })));
     await refuse('token_exp_required', (s) => s.token(s.claims({ exp: -1 })));
+    await refuse('token_exp_required', (s) => s.token(s.claims({ exp: 1e20 })));
+    await refuse('token_exp_required', (s) => s.token(s.claims({ exp: 253402300800 })));
   });
   it('token_not_yet_valid: nbf and iat in the future', async () => {
     await refuse('token_not_yet_valid', (s) => s.token(s.claims({ nbf: nowSec(s) + 120 })));
@@ -180,6 +182,10 @@ describe('baseline verification', () => {
   it('token_malformed: nbf or iat that is not a valid date', async () => {
     await refuse('token_malformed', (s) => s.token(s.claims({ nbf: 'later' })));
     await refuse('token_malformed', (s) => s.token(s.claims({ iat: -5 })));
+  });
+  it('token_malformed: an act claim that is not an object', async () => {
+    await refuse('token_malformed', (s) => s.token(s.claims({ act: 'someone' })));
+    await refuse('token_malformed', (s) => s.token(s.claims({ act: [1] })));
   });
   it('token_sub_required', () => refuse('token_sub_required', (s) => s.token(s.claims({ sub: undefined }))));
   it('token_tenant_required', () => refuse('token_tenant_required', (s) => s.token(s.claims({ tenant_id: undefined }))));
@@ -241,6 +247,30 @@ describe('the key set', () => {
     s.clock.t += 2 * 3600 * 1000;
     const t2 = s.token(s.claims({ iat: nowSec(s), exp: nowSec(s) + 600 }));
     await rejectsWith(c.verifyToken(t2), 'jwks_unavailable', assert);
+  });
+  it('with a duplicated kid the first key wins', async () => {
+    const attacker = crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' });
+    const s = scenario();
+    s.jwks.keys.push({ ...attacker.publicKey.export({ format: 'jwk' }), kid: 'k1', use: 'sig', alg: 'ES256' });
+    assert.equal((await s.client.verifyToken(s.token(s.claims()))).sub, 'usr_1');
+    await rejectsWith(s.client.verifyToken(s.token(s.claims(), {}, attacker.privateKey)), 'token_signature_invalid', assert);
+  });
+  it('reads at most 100 keys of a key set', async () => {
+    const fill = Array.from({ length: 100 }, (_, i) => ({ ...crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' }).publicKey.export({ format: 'jwk' }), kid: `f${i}`, use: 'sig' }));
+    const late = crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' });
+    const lateJwk = { ...late.publicKey.export({ format: 'jwk' }), kid: 'late', use: 'sig' };
+    const s = scenario({ jwks: { keys: [...fill, lateJwk] } });
+    await rejectsWith(s.client.verifyToken(s.token(s.claims(), { kid: 'late' }, late.privateKey)), 'token_unknown_key', assert);
+    const s2 = scenario({ jwks: { keys: [...fill.slice(1), lateJwk] } });
+    assert.equal((await s2.client.verifyToken(s2.token(s2.claims(), { kid: 'late' }, late.privateKey))).sub, 'usr_1');
+  });
+  it('stops reading a key set body at the cap instead of buffering it', async () => {
+    let pulls = 0;
+    const chunk = new Uint8Array(256 * 1024).fill(32);
+    const stream = new ReadableStream({ pull(c) { pulls++; if (pulls > 400) c.close(); else c.enqueue(chunk); } });
+    const s = scenario({ config: { fetch: async () => new Response(stream, { status: 200 }) } });
+    await rejectsWith(s.client.verifyToken(s.token(s.claims())), 'jwks_unavailable', assert);
+    assert.ok(pulls < 20, `read ${pulls} chunks`);
   });
   it('ignores a key with use=enc, a small RSA key and a key that does not parse', async () => {
     const small = crypto.generateKeyPairSync('rsa', { modulusLength: 1024 });

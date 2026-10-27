@@ -53,8 +53,8 @@ Every token, always, with no switch to turn it off:
 
 ### Agent tokens
 
-A token is an agent token when its `sub` or `client_id` starts with `agt_`, or it carries an `act`
-claim. With `agentTokens: 'enforce'` (the default) such a token is accepted only when:
+A token is an agent token when its `sub` or `client_id` starts with the exact, case-sensitive prefix
+`agt_`, or it carries an `act` claim. With `agentTokens: 'enforce'` (the default) such a token is accepted only when:
 
 1. it carries `cnf.jkt`, is presented with the `DPoP` scheme (`Authorization: DPoP <token>`), and
    the request carries exactly one valid DPoP proof (RFC 9449): `typ dpop+jwt`; EdDSA, ES256 or
@@ -80,8 +80,8 @@ A person token that carries `cnf` also needs its proof. A plain person bearer to
 | `leeway` | `60` | Clock leeway in seconds, 0 to 300. |
 | `agentTokens` | `'enforce'` | `'enforce'`, `'watch'` (check, log the refusal code, allow) or `'off'` (explicit; logged once; the proof is still required for a token that carries `cnf`). |
 | `publicUrl` | none | The origin clients call, for the DPoP `htu` check, for example `https://api.example.com` (origin only, no path). Required for agent tokens unless `trustForwarded`. |
-| `trustForwarded` | `false` | Build the origin from `X-Forwarded-Proto` and `X-Forwarded-Host`. Set it only behind a proxy that overwrites them; otherwise a client could choose the URL its proof is for. The `Host` header is never used. |
-| `replayGuard` | in memory | `{ record(key, expiresAtMs) }` returning true when the key was new. The default holds at most 100000 proofs for one process and refuses when full. **With more than one replica, supply a shared store** (for example Redis `SET key 1 NX PX`); otherwise a proof can be replayed against another replica. |
+| `trustForwarded` | `false` | Build the origin from `X-Forwarded-Proto` and `X-Forwarded-Host` (the last entry, which the proxy appended) when no `publicUrl` is set; a configured `publicUrl` always wins. Set it only behind a proxy that appends them; otherwise a client could choose the URL its proof is for. The `Host` header is never used. |
+| `replayGuard` | in memory | `{ record(key, expiresAtMs) }` returning true when the key was new. The default holds at most 100000 proofs for one process (`replayMax`) and at most 1000 per proof key (`replayPerKey`); when a cap is reached it answers `dpop_replay_guard_full` (HTTP 503, `Retry-After`), never `dpop_replayed`. A custom guard returns `'full'` for the same case. **With more than one replica, supply a shared store** (for example Redis `SET key 1 NX PX`); otherwise a proof can be replayed against another replica. |
 | `nonceKey` | none | At least 16 bytes (the project's `DPOP_NONCE_KEY`). Turns on server nonces: a proof without a current nonce is refused with `dpop_nonce`, a `DPoP-Nonce` header and `WWW-Authenticate: DPoP error="use_dpop_nonce"`. |
 | `rootPins` | AuthFI Root CA R1 | Hex SHA-256 values of trusted root public keys. Replaces the built-in pin (for a private region). Never read from the JWKS. |
 | `rootCerts` | none | PEM roots to complete a chain whose JWKS `x5c` omits the root. A root counts only when its key is pinned. |
@@ -97,7 +97,7 @@ token. The middleware answers `401` with `{ "error": "<code>" }` (`503` for `jwk
 
 `dpop_missing`, `dpop_multiple`, `dpop_malformed`, `dpop_type`, `dpop_alg`, `dpop_signature`,
 `dpop_method`, `dpop_url`, `dpop_iat`, `dpop_ath`, `dpop_replayed`, `dpop_key_mismatch`,
-`dpop_nonce`, `chain_not_proven`, `chain_policy`, `chain_pin`, `agent_token_needs_request`, and the
+`dpop_nonce`, `dpop_replay_guard_full`, `chain_not_proven`, `chain_policy`, `chain_pin`, `agent_token_needs_request`, and the
 baseline codes `token_malformed`, `token_too_large`, `token_alg_not_allowed`, `token_kid_required`,
 `token_crit_not_supported`, `token_typ_invalid`, `token_unknown_key`, `token_alg_key_mismatch`,
 `token_signature_invalid`, `token_issuer_mismatch`, `token_audience_mismatch`, `token_expired`,
