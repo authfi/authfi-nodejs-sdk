@@ -131,7 +131,7 @@ async function rig({ store, receiver = {}, client = {} } = {}) {
   const signals = [];
   const logs = [];
   const logger = { info: (m, f) => logs.push(['info', m, f]), warn: (m, f) => logs.push(['warn', m, f]) };
-  const auth = authfi({ tenant: 'acme', apiKey: 'sk_test', issuer: issuer.url, revocations, clock: () => issuer.clock(), logger, ...client });
+  const auth = authfi({ tenant: 'acme', apiKey: 'sk_test', issuer: issuer.url, audience: API_AUD, revocations, clock: () => issuer.clock(), logger, ...client });
   const handler = auth.receiver({ audience: STREAM_AUD, onSignal: (s) => signals.push(s), ...receiver });
   const server = http.createServer(handler);
   await new Promise((r) => server.listen(0, '127.0.0.1', r));

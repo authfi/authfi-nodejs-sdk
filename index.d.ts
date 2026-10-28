@@ -1,5 +1,5 @@
 import { RequestHandler } from 'express';
-import { IncomingMessage } from 'node:http';
+import { IncomingMessage, ServerResponse } from 'node:http';
 
 /** Stable refusal codes. Read them from `AuthFIError.code`. */
 type RefusalCode =
@@ -11,7 +11,8 @@ type RefusalCode =
   | 'token_tenant_not_issuers' | 'token_dpop_proof_required' | 'token_act_chain_unsupported'
   | 'dpop_missing' | 'dpop_multiple' | 'dpop_malformed' | 'dpop_type' | 'dpop_alg' | 'dpop_signature'
   | 'dpop_replay_guard_full' | 'dpop_method' | 'dpop_url' | 'dpop_iat' | 'dpop_ath' | 'dpop_replayed' | 'dpop_key_mismatch' | 'dpop_nonce'
-  | 'chain_not_proven' | 'chain_policy' | 'chain_pin';
+  | 'chain_not_proven' | 'chain_policy' | 'chain_pin'
+  | 'token_revoked' | 'token_iat_exp_required' | 'revocation_store_misconfigured';
 
 /**
  * Single-use store for DPoP proofs. `record` returns true when the key was new and is now
@@ -48,8 +49,10 @@ interface AuthFIConfig {
   rootPins?: string[];
   /** PEM roots to complete a chain whose JWKS x5c omits the root. A root counts only when its key is pinned. */
   rootCerts?: string[];
-  /** `warn` and `debug` receive refusal codes only. */
-  logger?: { warn?: (msg: string, fields?: object) => void; debug?: (msg: string, fields?: object) => void };
+  /** `warn`, `info` and `debug` receive refusal codes and receiver events only, never a token. */
+  logger?: { warn?: (msg: string, fields?: object) => void; info?: (msg: string, fields?: object) => void; debug?: (msg: string, fields?: object) => void };
+  /** Makes verification refuse a token whose subject (or actor) was revoked after it was issued. */
+  revocations?: RevocationStore;
 
   tenant?: string;
   apiKey?: string;
@@ -58,6 +61,60 @@ interface AuthFIConfig {
   clientSecret?: string;
   autoSync?: boolean;
   jwksRefreshInterval?: number;
+}
+
+interface RevocationStoreOptions {
+  /** Most subjects remembered. Default 100000. */
+  maxEntries?: number;
+  /** At least the longest lifetime of any token you accept, in seconds. Default 86400. */
+  tokenLifetimeSeconds?: number;
+}
+
+interface RevocationStore {
+  /** Tokens of `subject` issued at or before `notBefore` (Unix seconds) are dead. Returns how many other subjects were dropped to make room. */
+  revoke(subject: string, notBefore: number, ref?: string): number;
+  /** Like isRevoked, but returns the reference (the jti of the revoking SET) of the revocation that applies, or null. */
+  find(subject: string, issuedAt?: number): { ref: string } | null;
+  /** Whether a token of `subject` issued at `issuedAt` (Unix seconds) is revoked. An unknown issue time counts as older than every revocation. */
+  isRevoked(subject: string, issuedAt?: number): boolean;
+  readonly size: number;
+  readonly maxEntries: number;
+  readonly tokenLifetimeSeconds: number;
+}
+
+interface Signal {
+  event: string;
+  subject: string;
+  jti: string;
+  /** The iat of the SET, in Unix seconds. */
+  issuedAt: number;
+  /** The event withdrew the subject's access; the store now refuses its tokens issued at or before issuedAt. */
+  revoked: boolean;
+  /** A token-claims-change event saying the subject was resumed. Lifts nothing. */
+  resumed: boolean;
+}
+
+interface ReceiverConfig {
+  /** The audience your stream was registered with. */
+  audience: string;
+  /** The bearer the transmitter presents on every push, when you registered one. */
+  authToken?: string;
+  onSignal?(signal: Signal): void | Promise<void>;
+}
+
+interface StreamRequest {
+  audience: string;
+  endpointUrl: string;
+  authToken?: string;
+  events?: string[];
+}
+
+interface Stream {
+  id: string;
+  audience: string;
+  endpointUrl: string;
+  status: string;
+  events: string[];
 }
 
 interface Claims {
@@ -92,6 +149,9 @@ interface AuthFIClient {
   start(): Promise<void>;
   registerPermission(name: string, description?: string): void;
   syncPermissions(): Promise<void>;
+  /** Handler for the Shared Signals push delivery (RFC 8935). Throws now if it cannot work. */
+  receiver(config: ReceiverConfig): (req: IncomingMessage, res: ServerResponse) => Promise<void>;
+  registerStream(bearer: string, request: StreamRequest): Promise<Stream>;
   cloud: {
     credentials(userToken: string, provider: 'aws' | 'gcp' | 'azure', options?: Record<string, unknown>): Promise<Record<string, unknown>>;
     token(userToken: string, audience: string, ttl?: number): Promise<Record<string, unknown>>;
@@ -108,6 +168,7 @@ declare namespace authfi {
   }
   /** SHA-256 of the AuthFI Root CA R1 public key (SPKI), hex. */
   const DEFAULT_ROOT_PINS: string[];
+  function createRevocationStore(options?: RevocationStoreOptions): RevocationStore;
 }
 export = authfi;
 
