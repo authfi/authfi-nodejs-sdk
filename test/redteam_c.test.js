@@ -141,7 +141,7 @@ const scenarios = {
     const issuer = await new Issuer().listen();
     open.push(() => issuer.close());
     const store = authfi.createRevocationStore({ maxEntries: 20, clock: () => issuer.clock() });
-    const auth = authfi({ tenant: 't', apiKey: 'k', issuer: issuer.url, revocations: store, clock: () => issuer.clock() });
+    const auth = authfi({ tenant: 't', apiKey: 'k', audience: API_AUD, issuer: issuer.url, revocations: store, clock: () => issuer.clock() });
     const now = issuer.seconds();
     const tok = issuer.token('agent:agt_first', now - 10);
     store.revoke('agent:agt_first', now, 'jti-first');

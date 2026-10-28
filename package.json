@@ -14,6 +14,6 @@
     "node": ">=18"
   },
   "scripts": {
-    "test": "node --test test.js test/signals.test.js test/redteam_c.test.js"
+    "test": "node --test test.js test-dpop.js test-chain.js test/signals.test.js test/redteam_c.test.js"
   }
 }

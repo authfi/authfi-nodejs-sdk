@@ -43,17 +43,28 @@ describe('an accepted revocation', () => {
   it('refuses a delegated token whose actor is revoked, and leaves the person alone', async () => {
     const r = await rig();
     const tok = r.issuer.token('usr_7', r.issuer.seconds() - 1, { act: { sub: AGENT } });
-    await r.auth.verifyToken(tok);
+    // An agent token's proof needs its request: before the revocation it is refused for that, never as revoked.
+    await refused(r.auth.verifyToken(tok), 'agent_token_needs_request');
     await r.push(r.issuer.set());
     await refused(r.auth.verifyToken(tok), 'token_revoked');
     await r.auth.verifyToken(r.issuer.token('usr_7', r.issuer.seconds() - 1));
+  });
+
+  it('refuses a revoked agent on verifyRequest too, before its proof is read', async () => {
+    const r = await rig();
+    const tok = r.issuer.token(AGENT, r.issuer.seconds() - 1);
+    const req = { method: 'GET', url: '/orders', headers: { authorization: `DPoP ${tok}` } };
+    const before = await r.auth.verifyRequest(req).then(() => null, (e) => e.code);
+    assert.notEqual(before, 'token_revoked');
+    await r.push(r.issuer.set());
+    await refused(r.auth.verifyRequest(req), 'token_revoked');
   });
 
   it('refuses a token with no iat, whatever its subject, when a store is configured', async () => {
     const r = await rig();
     await r.push(r.issuer.set());
     const noIat = (sub) => {
-      const p = { iss: r.issuer.url, sub, aud: API_AUD, exp: r.issuer.seconds() + 3600 };
+      const p = { iss: r.issuer.url, sub, aud: API_AUD, tenant_id: 't1', exp: r.issuer.seconds() + 3600 };
       return r.issuer.sign('ed1', { typ: 'at+jwt' }, p);
     };
     await refused(r.auth.verifyToken(noIat(AGENT)), 'token_iat_exp_required');
@@ -185,7 +196,7 @@ describe('a refused SET changes nothing', () => {
 
   it('bounds a body that a body parser already read', async () => {
     const r = await rig();
-    const auth = authfi({ tenant: 't', apiKey: 'k', issuer: r.issuer.url, revocations: r.store, clock: () => r.issuer.clock() });
+    const auth = authfi({ tenant: 't', apiKey: 'k', audience: API_AUD, issuer: r.issuer.url, revocations: r.store, clock: () => r.issuer.clock() });
     const handler = auth.receiver({ audience: STREAM_AUD });
     const server = http.createServer((req, res) => {
       req.body = 'a'.repeat(20 * 1024);
@@ -226,7 +237,7 @@ describe('retries and late deliveries', () => {
 
   it('answers a pre-parsed object body instead of hanging', async () => {
     const r = await rig();
-    const auth = authfi({ tenant: 't', apiKey: 'k', issuer: r.issuer.url, revocations: r.store, clock: () => r.issuer.clock() });
+    const auth = authfi({ tenant: 't', apiKey: 'k', audience: API_AUD, issuer: r.issuer.url, revocations: r.store, clock: () => r.issuer.clock() });
     const handler = auth.receiver({ audience: STREAM_AUD });
     const server = http.createServer((req, res) => {
       req.on('data', () => {});
@@ -303,6 +314,7 @@ describe('the key set', () => {
     assert.equal(res.headers.get('retry-after'), '5');
     assert.equal(r.store.size, 0);
     r.issuer.jwksStatus = 200;
+    r.issuer.advance(16000); // a failed key-set fetch is retried after 15 seconds, not on every request
     assert.equal((await r.push(set)).status, 202); // its jti was not burned
   });
 
@@ -346,7 +358,7 @@ describe('revocation lifetime and chains', () => {
     const issuer = await new Issuer().listen();
     open.push(() => issuer.close());
     const store = authfi.createRevocationStore({ tokenLifetimeSeconds: 3600, clock: () => issuer.clock() });
-    const auth = authfi({ tenant: 't', apiKey: 'k', issuer: issuer.url, revocations: store, clock: () => issuer.clock() });
+    const auth = authfi({ tenant: 't', apiKey: 'k', audience: API_AUD, issuer: issuer.url, revocations: store, clock: () => issuer.clock() });
     const now = issuer.seconds();
     await assert.rejects(auth.verifyToken(issuer.token(AGENT, now, { exp: now + 7200 })), (e) => e.code === 'revocation_store_misconfigured');
     await auth.verifyToken(issuer.token(AGENT, now, { exp: now + 3600 }));
@@ -355,9 +367,10 @@ describe('revocation lifetime and chains', () => {
   it('refuses a token whose deeper actor in a delegation chain is revoked', async () => {
     const r = await rig();
     const tok = r.issuer.token('usr_7', r.issuer.seconds() - 1, { act: { sub: 'agent:mid', act: { sub: AGENT } } });
-    await r.auth.verifyToken(tok);
+    // A delegation chain is refused outright, before and after the revocation.
+    await refused(r.auth.verifyToken(tok), 'token_act_chain_unsupported');
     await r.push(r.issuer.set());
-    await refused(r.auth.verifyToken(tok), 'token_revoked');
+    await refused(r.auth.verifyToken(tok), 'token_act_chain_unsupported');
   });
 });
 
@@ -400,21 +413,21 @@ describe('configuration fails closed', () => {
   it('checks nothing without a store, and refuses a SET as an access token', async () => {
     const issuer = await new Issuer().listen();
     open.push(() => issuer.close());
-    const auth = authfi({ tenant: 't', apiKey: 'k', issuer: issuer.url, clock: () => issuer.clock() });
-    await auth.verifyToken(issuer.token(AGENT, issuer.seconds()));
-    await assert.rejects(auth.verifyToken(issuer.set()), /Not an access token/);
+    const auth = authfi({ tenant: 't', apiKey: 'k', audience: API_AUD, issuer: issuer.url, clock: () => issuer.clock() });
+    await auth.verifyToken(issuer.token('usr_7', issuer.seconds()));
+    await assert.rejects(auth.verifyToken(issuer.set()), /token_typ_invalid/);
   });
 
   it('verifies agent tokens signed with EdDSA, ES256 and PS256', async () => {
     const issuer = await new Issuer().listen();
     open.push(() => issuer.close());
-    const auth = authfi({ tenant: 't', apiKey: 'k', issuer: issuer.url, clock: () => issuer.clock() });
+    const auth = authfi({ tenant: 't', apiKey: 'k', audience: API_AUD, issuer: issuer.url, clock: () => issuer.clock() });
     for (const kid of ['ed1', 'es1', 'ps1', 'rs1']) {
-      const tok = issuer.sign(kid, { typ: 'at+jwt' }, { iss: issuer.url, sub: AGENT, iat: issuer.seconds(), exp: issuer.seconds() + 60 });
-      assert.equal((await auth.verifyToken(tok)).sub, AGENT, kid);
+      const tok = issuer.sign(kid, { typ: 'at+jwt' }, { iss: issuer.url, sub: 'usr_7', aud: API_AUD, tenant_id: 't1', iat: issuer.seconds(), exp: issuer.seconds() + 60 });
+      assert.equal((await auth.verifyToken(tok)).sub, 'usr_7', kid);
     }
-    await assert.rejects(auth.verifyToken(issuer.sign('ed1', { typ: 'at+jwt', alg: 'HS256' }, { sub: 'x' })), /Unsupported algorithm/);
-    await assert.rejects(auth.verifyToken(issuer.sign('ed1', { typ: 'at+jwt', alg: 'RS256' }, { sub: 'x' })), /Unsupported algorithm|Invalid signature/);
+    await assert.rejects(auth.verifyToken(issuer.sign('ed1', { typ: 'at+jwt', alg: 'HS256' }, { sub: 'x' })), /token_alg_not_allowed/);
+    await assert.rejects(auth.verifyToken(issuer.sign('ed1', { typ: 'at+jwt', alg: 'RS256' }, { sub: 'x' })), /token_alg_key_mismatch|token_signature_invalid/);
   });
 
   it('keeps the revocation when the hook throws or rejects', async () => {
@@ -800,8 +813,8 @@ const signWith = (alg, kid, privateKey, payload, header = {}) => {
   const sig = alg === 'EdDSA' ? crypto.sign(null, data, privateKey) : crypto.sign('sha256', data, { key: privateKey, dsaEncoding: 'ieee-p1363' });
   return `${h}.${p}.${b64(sig)}`;
 };
-const accessPayload = (iss) => ({ iss, sub: 'usr_1', aud: 'api', tenant_id: 't1', iat: NOW_MS / 1000 - 5, exp: NOW_MS / 1000 + 3600 });
-const verifierFor = (issuer) => authfi({ tenant: 'acme', apiKey: 'k', issuer, clock: () => NOW_MS });
+const accessPayload = (iss) => ({ iss, sub: 'usr_1', aud: API_AUD, tenant_id: 't1', iat: NOW_MS / 1000 - 5, exp: NOW_MS / 1000 + 3600 });
+const verifierFor = (issuer) => authfi({ tenant: 'acme', apiKey: 'k', audience: API_AUD, issuer, clock: () => NOW_MS });
 
 describe('kill: key shape binding', () => {
   it('a key whose own alg, use, curve or size does not fit the token alg is refused', async () => {
@@ -893,7 +906,7 @@ describe('kill: JWS structure on the receiver path', () => {
   it('an issuer with a trailing slash still finds its key set', async () => {
     const issuer = await new Issuer().listen();
     open.push(() => issuer.close());
-    const auth = authfi({ tenant: 'acme', apiKey: 'k', issuer: `${issuer.url}/`, clock: () => issuer.clock() });
+    const auth = authfi({ tenant: 'acme', apiKey: 'k', audience: API_AUD, issuer: `${issuer.url}/`, clock: () => issuer.clock() });
     await auth.verifyToken(issuer.token('usr_1', issuer.seconds() - 1));
   });
 });
@@ -999,9 +1012,9 @@ describe('round 2', () => {
     const now = r.issuer.seconds();
     const noExp = r.issuer.sign('ed1', { typ: 'at+jwt' }, { iss: r.issuer.url, sub: AGENT, aud: API_AUD, tenant_id: 't1', iat: now - 5 });
     await r.push(r.issuer.set());
-    await refused(r.auth.verifyToken(noExp), 'token_iat_exp_required');
+    await refused(r.auth.verifyToken(noExp), 'token_exp_required');
     r.issuer.advance(86400 * 1000 + 5000);
-    await refused(r.auth.verifyToken(noExp), 'token_iat_exp_required');
+    await refused(r.auth.verifyToken(noExp), 'token_exp_required');
   });
 });
 
@@ -1017,7 +1030,7 @@ describe('r2 kill', () => {
     const r = await rig();
     const tok = r.issuer.token('usr_7', r.issuer.seconds() - 1, { act: { sub: 'agent:a', act: { sub: 'agent:b', act: { sub: AGENT } } } });
     await r.push(r.issuer.set());
-    await refused(r.auth.verifyToken(tok), 'token_revoked');
+    await refused(r.auth.verifyToken(tok), 'token_act_chain_unsupported');
   });
   it('store shape: each missing part is refused', () => {
     const good = authfi.createRevocationStore();

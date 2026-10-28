@@ -2,84 +2,50 @@
  * AuthFI Node.js SDK
  *
  * Usage:
- *   const authfi = require('@authfi/node');
+ *   const authfi = require('@authfi/sdk');
  *
  *   const auth = authfi({
+ *     issuer: 'https://acme.authfi.io',          // the project issuer
+ *     audience: 'client-id-of-your-api',         // required: the API this server is
+ *     publicUrl: 'https://api.example.com',      // origin clients call, for DPoP htu
  *     tenant: 'acme',
  *     apiKey: 'sk_live_...',
  *     apiUrl: 'https://api.authfi.io',
- *     applicationId: 'client-id-of-your-app',   // optional: scope permissions to this app
  *     autoSync: true,                            // auto-register permissions on startup
  *   });
  *
- *   // Express middleware — validates JWT + checks permissions
+ *   // Express middleware: verifies the token (and, for agents, the DPoP proof and the key chain)
  *   app.get('/api/users', auth.require('read:users'), (req, res) => {
- *     console.log(req.user); // decoded JWT claims
+ *     console.log(req.user); // verified claims
  *   });
  *
- *   // Check multiple permissions (ALL required)
- *   app.delete('/api/users/:id', auth.require('read:users', 'delete:users'), handler);
+ *   // Outside Express, verify a request directly
+ *   const claims = await auth.verifyRequest(req);
  *
- *   // Check role instead
- *   app.get('/admin', auth.requireRole('admin'), handler);
- *
- *   // Start server — triggers permission sync
+ *   // Start server: triggers permission sync
  *   auth.start().then(() => app.listen(3000));
  */
 
-const crypto = require('crypto');
+const { AuthFIError, refuse } = require('./lib/errors');
+const { checkConfig, createVerifier } = require('./lib/verify');
+const { createKeySet } = require('./lib/jwks');
+const { createChain, DEFAULT_ROOT_PINS } = require('./lib/chain');
+const { validateProof, memoryReplayGuard, currentNonce, MAX_AGE_S, MAX_FUTURE_S } = require('./lib/dpop');
+const { parseObject, b64uDecode, verifySignature } = require('./lib/jws');
 const { JwsError, createRevocationStore, createReceiver, registerStream } = require('./signals');
 
-const JWKS_MIN_REFETCH_MS = 15000;
-const MAX_TOKEN_BYTES = 16 * 1024;
-const ALLOWED_ALGS = new Set(['RS256', 'PS256', 'ES256', 'EdDSA']);
-const B64URL = /^[A-Za-z0-9_-]+$/;
-const noopLogger = { info() {}, warn() {} };
+const crypto = require('crypto');
 
-/** Whether this JWK may verify `alg`: the key type, curve and its own alg all have to agree. */
-function keyAllows(jwk, alg) {
-  if (!jwk || (jwk.use && jwk.use !== 'sig')) return false;
-  if (jwk.alg && jwk.alg !== alg) return false;
-  switch (jwk.kty) {
-    case 'RSA':
-      return (alg === 'RS256' || alg === 'PS256') && typeof jwk.n === 'string' && Buffer.from(jwk.n, 'base64url').length * 8 >= 2048;
-    case 'EC':
-      return alg === 'ES256' && jwk.crv === 'P-256';
-    case 'OKP':
-      return alg === 'EdDSA' && jwk.crv === 'Ed25519';
-    default:
-      return false;
-  }
-}
+const MODES = ['enforce', 'watch', 'off'];
+const REPLAY_DEFAULT_MAX = 100000;
+const REPLAY_PER_KEY_DEFAULT = 1000;
+const PIN_FORMAT = /^[0-9a-f]{64}$/;
 
-function checkSignature(alg, jwk, signedData, signature) {
-  let key;
-  try {
-    key = crypto.createPublicKey({ key: jwk, format: 'jwk' });
-  } catch (e) {
-    return false;
-  }
-  const data = Buffer.from(signedData);
-  switch (alg) {
-    case 'RS256':
-      return crypto.verify('sha256', data, key, signature);
-    case 'PS256':
-      return crypto.verify('sha256', data, { key, padding: crypto.constants.RSA_PKCS1_PSS_PADDING, saltLength: crypto.constants.RSA_PSS_SALTLEN_DIGEST }, signature);
-    case 'ES256':
-      return signature.length === 64 && crypto.verify('sha256', data, { key, dsaEncoding: 'ieee-p1363' }, signature);
-    case 'EdDSA':
-      return crypto.verify(null, data, key, signature);
-    default:
-      return false;
-  }
-}
+const isAgentClaims = (c) => (typeof c.sub === 'string' && c.sub.startsWith('agt_'))
+  || (typeof c.client_id === 'string' && c.client_id.startsWith('agt_'))
+  || (c.act !== undefined && c.act !== null);
 
-function decodeJsonSegment(segment) {
-  if (!B64URL.test(segment)) throw new Error('not base64url');
-  return JSON.parse(Buffer.from(segment, 'base64url').toString('utf8'));
-}
-
-module.exports = function authfi(config) {
+function authfi(config) {
   const {
     tenant,
     apiKey,
@@ -88,167 +54,203 @@ module.exports = function authfi(config) {
     clientSecret,       // required for cloud identity
     autoSync = true,
     jwksRefreshInterval = 300000, // 5 min
-    issuer: issuerOption,   // the project issuer, e.g. https://acme.authfi.io; needed by receiver()
-    revocations,            // a store from authfi.createRevocationStore(); makes verifyToken refuse revoked tokens
-    logger = noopLogger,    // { info, warn }: receives receiver events, never a token
-    clock = Date.now,       // milliseconds; tests only
+    agentTokens = 'enforce',
+    publicUrl,
+    trustForwarded = false,
+    replayGuard,
+    nonceKey,
+    rootPins,
+    rootCerts,
+    logger,
+    fetch: fetchOverride,
+    now: nowOverride,
+    clock,              // milliseconds, the same as now
+    jwksUrl,
+    revocations,        // a store from authfi.createRevocationStore(); makes verification refuse revoked tokens
   } = config;
-  const issuer = typeof issuerOption === 'string' ? issuerOption.trim().replace(/\/+$/, '') : '';
 
-  // The edge dispatch is api.authfi.io/<slug>/<path> — the SLUG COMES FIRST. Every path here had
-  // the slug and the version transposed, so every URL 404'd against a real deployment, the JWKS
-  // fetch among them.
-  //
-  // Two shapes, deliberately named apart: root-level protocol paths (JWKS, OIDC discovery,
-  // /oauth/*) hang off tenantBase; API routes add /v1. Conflating them is how a straight
-  // transposition still leaves JWKS broken.
+  const now = typeof nowOverride === 'function' ? nowOverride : typeof clock === 'function' ? clock : Date.now;
+  const log = (level, msg, fields) => {
+    try { if (logger && typeof logger[level] === 'function') logger[level](msg, fields); } catch { /* a logger must never break a request */ }
+  };
+
+  // The edge dispatch is api.authfi.io/<slug>/<path> — the SLUG COMES FIRST. Two shapes,
+  // deliberately named apart: root-level protocol paths hang off tenantBase; API routes add /v1.
   const tenantBase = `${apiUrl}/${tenant}`;
-  // No /manage/ prefix exists on the platform; those routes are /v1/* like the rest.
   const managePath = `${tenantBase}/v1`;
   const authPath = `${tenantBase}/v1`;
   const registeredPermissions = new Set();
-  const jwksUrl = `${issuer || tenantBase}/.well-known/jwks.json`;
-  let jwksCache = null;
-  let jwksCacheTime = 0;
-  let jwksFlight = null;
-  let jwksAttempted = 0;
 
-  // --- JWKS ---
+  // --- Verification set-up. Anything wrong here fails every verification closed. ---
 
-  async function fetchJWKS(force = false) {
-    const now = clock();
-    if (jwksCache && !force && now - jwksCacheTime < jwksRefreshInterval) return jwksCache;
-    // One fetch at a time: a burst of requests waits for the same answer.
-    if (jwksFlight) return jwksFlight;
-    jwksAttempted = now;
-    jwksFlight = (async () => {
-      try {
-        const res = await fetch(jwksUrl);
-        if (!res.ok) throw new Error('Failed to fetch JWKS');
-        const doc = await res.json();
-        if (!doc || !Array.isArray(doc.keys)) throw new Error('Failed to fetch JWKS');
-        jwksCache = doc;
-        jwksCacheTime = clock();
-        return jwksCache;
-      } finally {
-        jwksFlight = null;
+  const checked = checkConfig({ ...config, apiUrl });
+  const baseErr = checked.error
+    || (MODES.includes(agentTokens) ? null : refuse('sdk_not_configured', 'agentTokens is enforce, watch or off'));
+  // The project issuer as given, without a trailing slash. The revocation receiver needs it and the key set,
+  // not the audience, so its key set is built whenever an issuer is named.
+  const issuer = typeof config.issuer === 'string' ? config.issuer.trim().replace(/\/+$/, '') : '';
+  const keySet = issuer === '' ? null : createKeySet({
+    url: jwksUrl || `${issuer}/.well-known/jwks.json`,
+    ttlMs: jwksRefreshInterval,
+    fetchFn: fetchOverride,
+    now,
+  });
+  const verifier = baseErr ? null : createVerifier({ conf: checked.value, keySet, now });
+
+  // Proof set-up (publicUrl, nonceKey), checked when a proof is first needed.
+  let proofCfg;
+  function getProofCfg() {
+    if (proofCfg) return proofCfg;
+    let publicOrigin;
+    if (publicUrl !== undefined) {
+      let u;
+      try { u = new URL(publicUrl); } catch { throw refuse('sdk_not_configured', 'publicUrl is not a URL'); }
+      if (!['https:', 'http:'].includes(u.protocol) || (u.pathname !== '/' && u.pathname !== '') || u.search || u.hash) {
+        throw refuse('sdk_not_configured', 'publicUrl is the origin only, for example https://api.example.com');
       }
-    })();
-    return jwksFlight;
+      publicOrigin = u.origin;
+    }
+    if (!publicOrigin && !trustForwarded) {
+      throw refuse('sdk_not_configured', 'publicUrl is required to check DPoP proofs (or set trustForwarded behind a trusted proxy)');
+    }
+    let key;
+    if (nonceKey !== undefined) {
+      key = Buffer.isBuffer(nonceKey) ? nonceKey : typeof nonceKey === 'string' ? Buffer.from(nonceKey) : null;
+      if (!key || key.length < 16) throw refuse('sdk_not_configured', 'nonceKey must be at least 16 bytes');
+    }
+    const guard = replayGuard || memoryReplayGuard(config.replayMax || REPLAY_DEFAULT_MAX, now, config.replayPerKey || REPLAY_PER_KEY_DEFAULT);
+    if (typeof guard.record !== 'function') throw refuse('sdk_not_configured', 'replayGuard needs a record(key, expiresAtMs) method');
+    proofCfg = { publicOrigin, trustForwarded: trustForwarded === true, nonceKey: key, guard };
+    return proofCfg;
   }
 
-  /** The issuer's key named by kid. An unknown kid costs at most one refetch per 15 seconds. */
-  async function getKey(kid) {
-    let jwks;
-    try {
-      jwks = await fetchJWKS();
-    } catch (e) {
-      throw new JwsError('key_set_unavailable', 'Failed to fetch JWKS');
+  // Chain set-up (pins, extra roots), checked when a chain is first needed.
+  let chain;
+  function getChain() {
+    if (chain) return chain;
+    const pins = rootPins === undefined ? DEFAULT_ROOT_PINS : rootPins;
+    if (!Array.isArray(pins) || pins.length === 0 || !pins.every((p) => typeof p === 'string' && PIN_FORMAT.test(p))) {
+      throw refuse('sdk_not_configured', 'rootPins is a list of lower-case hex SHA-256 values of root public keys');
     }
-    let key = jwks.keys.find((k) => k && k.kid === kid);
-    if (!key && clock() - jwksAttempted >= JWKS_MIN_REFETCH_MS) {
-      try {
-        jwks = await fetchJWKS(true);
-        key = jwks.keys.find((k) => k && k.kid === kid);
-      } catch (e) {
-        throw new JwsError('key_set_unavailable', 'Failed to fetch JWKS');
-      }
+    const roots = [];
+    for (const pem of rootCerts || []) {
+      try { roots.push(new crypto.X509Certificate(pem)); } catch { throw refuse('sdk_not_configured', 'rootCerts holds a certificate that is not valid PEM'); }
     }
-    if (!key) throw new JwsError('unknown_key', 'Unknown signing key');
-    return key;
+    chain = createChain({ pins, roots, now });
+    return chain;
   }
 
-  /**
-   * Checks the structure and signature of a compact JWS against the issuer's key set and returns
-   * the decoded payload: size, three parts, an allowed alg, no critical extensions, the media type
-   * wantTyp, a kid, and a signature by that key under an alg it may use. Reads nothing from the
-   * payload. Throws JwsError with a stable code.
-   */
-  async function verifyJws(token, wantTyp) {
-    if (typeof token !== 'string' || token.length > MAX_TOKEN_BYTES) throw new JwsError('malformed', 'the token is not a bounded string');
-    const parts = token.split('.');
-    if (parts.length !== 3 || parts.some((p) => p === '')) throw new JwsError('malformed', 'a token is three dot-separated parts');
-    let header;
-    try {
-      header = decodeJsonSegment(parts[0]);
-    } catch (e) {
-      throw new JwsError('malformed', 'the token header is not valid');
+  // --- Revocation ---
+
+  // checkRevoked refuses a token whose subject, or any actor in its delegation chain, was revoked after
+  // it was issued. It runs before a proof is checked, so a withdrawn agent is answered token_revoked
+  // wherever its token is presented, and it reads nothing but the claims.
+  function checkRevoked(claims) {
+    if (!revocations) return;
+    // The store forgets a revocation once the longest token it was told about has expired; a longer-lived
+    // token would outlive its revocation, so it is refused rather than trusted.
+    if (!Number.isFinite(claims.iat) || !Number.isFinite(claims.exp)) {
+      throw refuse('token_iat_exp_required', 'the token has no issue or expiry time, which revocation needs');
     }
-    if (!header || typeof header !== 'object' || Array.isArray(header)) throw new JwsError('malformed', 'the token header is not valid');
-    if (!ALLOWED_ALGS.has(header.alg)) throw new JwsError('alg_not_allowed', 'the algorithm of the token is not accepted');
-    if (header.crit !== undefined && header.crit !== null) throw new JwsError('crit_not_supported', 'critical header extensions are not supported');
-    const typ = String(header.typ || '').toLowerCase().replace(/^application\//, '');
-    if (typ !== wantTyp) throw new JwsError('typ_invalid', `the token is not of the expected type (typ must be ${wantTyp})`);
-    if (typeof header.kid !== 'string' || header.kid === '') throw new JwsError('kid_required', 'the token names no signing key');
-    if (!B64URL.test(parts[2])) throw new JwsError('malformed', 'the token signature is not valid');
-    const key = await getKey(header.kid);
-    if (!keyAllows(key, header.alg)) throw new JwsError('alg_key_mismatch', 'the algorithm of the token does not match its signing key');
-    const signature = Buffer.from(parts[2], 'base64url');
-    if (!checkSignature(header.alg, key, `${parts[0]}.${parts[1]}`, signature)) throw new JwsError('bad_signature', 'Invalid signature');
-    try {
-      return decodeJsonSegment(parts[1]);
-    } catch (e) {
-      throw new JwsError('malformed', 'the token payload is not valid');
+    if (claims.exp - claims.iat > revocations.tokenLifetimeSeconds) {
+      throw refuse('revocation_store_misconfigured', 'the revocation store tokenLifetimeSeconds is shorter than this token lifetime; raise it');
     }
-  }
-
-  async function verifyToken(token) {
-    // Decode header to get kid
-    const [headerB64, payloadB64, signatureB64] = token.split('.');
-    const header = JSON.parse(Buffer.from(headerB64, 'base64url').toString());
-    const payload = JSON.parse(Buffer.from(payloadB64, 'base64url').toString());
-
-    // Check expiry
-    if (payload.exp && payload.exp < clock() / 1000) {
-      throw new Error('Token expired');
-    }
-
-    // Only the algorithms the issuer signs with; a Security Event Token is never an access token.
-    if (!ALLOWED_ALGS.has(header.alg)) {
-      throw new Error('Unsupported algorithm: ' + header.alg);
-    }
-    if (String(header.typ || '').toLowerCase().includes('secevent')) {
-      throw new Error('Not an access token');
-    }
-
-    // Fetch JWKS and find matching key
-    const key = await getKey(header.kid);
-    if (!keyAllows(key, header.alg)) throw new Error('Unsupported algorithm: ' + header.alg);
-
-    // Verify signature using Node.js crypto
-    const signature = Buffer.from(signatureB64, 'base64url');
-    if (!checkSignature(header.alg, key, `${headerB64}.${payloadB64}`, signature)) throw new Error('Invalid signature');
-
-    // A subject, or any actor in the delegation chain, revoked after this token was issued.
-    if (revocations) {
-      // The store forgets a revocation once the longest token it was told about has expired; a
-      // longer-lived token would outlive its revocation, so it is refused rather than trusted.
-      if (!Number.isFinite(payload.iat) || !Number.isFinite(payload.exp)) {
-        const err = new Error('Token has no issue or expiry time, which revocation needs');
-        err.code = 'token_iat_exp_required';
-        throw err;
-      }
-      if (payload.exp - payload.iat > revocations.tokenLifetimeSeconds) {
-        const err = new Error('The revocation store tokenLifetimeSeconds is shorter than this token\'s lifetime; raise it');
-        err.code = 'revocation_store_misconfigured';
-        throw err;
-      }
-      const subjects = [payload.sub];
-      for (let act = payload.act, depth = 0; act && typeof act === 'object' && depth < 16; act = act.act, depth += 1) subjects.push(act.sub);
-      let hit = null;
-      for (const subject of subjects) {
-        hit = revocations.find(subject, payload.iat);
-        if (hit) break;
-      }
+    const subjects = [claims.sub];
+    for (let act = claims.act, depth = 0; act && typeof act === 'object' && depth < 16; act = act.act, depth += 1) subjects.push(act.sub);
+    for (const subject of subjects) {
+      const hit = revocations.find(subject, claims.iat);
       if (hit) {
-        const err = new Error(hit.ref ? `Token revoked (ref ${hit.ref})` : 'Token revoked');
-        err.code = 'token_revoked';
+        const err = refuse('token_revoked', hit.ref ? `the token was revoked (ref ${hit.ref})` : 'the token was revoked');
         err.ref = hit.ref;
         throw err;
       }
     }
+  }
 
-    return payload;
+  // --- Verification ---
+
+  let offWarned = false;
+  function warnOff() {
+    if (offWarned) return;
+    offWarned = true;
+    log('warn', 'authfi: agentTokens is off, so agent tokens are accepted without proof of possession or key chain', {});
+  }
+
+  // verifyToken checks a person's access token. An agent token carries a key binding that only a
+  // request can prove, so it is refused here with agent_token_needs_request.
+  async function verifyToken(token) {
+    if (baseErr) throw baseErr;
+    const { claims } = await verifier.verifyJWT(token);
+    checkRevoked(claims);
+    if (isAgentClaims(claims)) {
+      if (agentTokens === 'enforce') throw refuse('agent_token_needs_request', 'an agent token is verified with verifyRequest, which checks its proof and key chain');
+      if (agentTokens === 'off') warnOff();
+      else log('warn', 'authfi: agent token would be refused by verifyToken', { code: 'agent_token_needs_request' });
+    }
+    if (claims.cnf !== undefined && claims.cnf !== null) throw refuse('token_dpop_proof_required', 'the token is bound to a key and needs a DPoP proof; use verifyRequest');
+    return claims;
+  }
+
+  function readAuthorization(req) {
+    const headers = (req && req.headers) || {};
+    if (Array.isArray(req.rawHeaders)) {
+      let n = 0;
+      for (let i = 0; i < req.rawHeaders.length; i += 2) if (String(req.rawHeaders[i]).toLowerCase() === 'authorization') n++;
+      if (n > 1) throw refuse('missing_authorization', 'exactly one Authorization header is allowed');
+    }
+    const m = typeof headers.authorization === 'string' ? /^(Bearer|DPoP) +(\S+)$/i.exec(headers.authorization) : null;
+    if (!m) throw refuse('missing_authorization', 'an Authorization header with a Bearer or DPoP token is required');
+    return { scheme: m[1].toLowerCase(), token: m[2] };
+  }
+
+  // verifyRequest verifies the token of an HTTP request and, where the token is bound to a key,
+  // the DPoP proof of that request. Agent tokens also have to prove the chain of their signing key.
+  async function verifyRequest(req) {
+    if (baseErr) throw baseErr;
+    const { scheme, token } = readAuthorization(req || {});
+    const { claims, header, key } = await verifier.verifyJWT(token);
+    checkRevoked(claims);
+    const agent = isAgentClaims(claims);
+    const bound = claims.cnf !== undefined && claims.cnf !== null;
+    const checkAgent = agent && agentTokens !== 'off';
+    if (!bound && !checkAgent) {
+      if (scheme === 'dpop') throw refuse('dpop_key_mismatch', 'the token is not bound to a key; present it as Bearer');
+      if (agent) warnOff();
+      return claims;
+    }
+    const run = async () => {
+      const jkt = bound && claims.cnf && typeof claims.cnf === 'object' ? claims.cnf.jkt : undefined;
+      if (typeof jkt !== 'string' || jkt === '') throw refuse('dpop_key_mismatch', 'the token carries no key binding (cnf.jkt)');
+      if (scheme !== 'dpop') throw refuse('dpop_missing', 'a bound token must be presented with the DPoP scheme');
+      const pc = getProofCfg();
+      const proof = validateProof(req, token, jkt, pc, now());
+      if (checkAgent) getChain().prove(key, header['x5t#S256']);
+      // Single use: recorded only after every other check has passed.
+      let outcome = false;
+      try {
+        outcome = await pc.guard.record(`${proof.thumb}:${proof.jti}`, proof.iat * 1000 + (MAX_AGE_S + MAX_FUTURE_S + 60) * 1000);
+      } catch { outcome = false; }
+      if (outcome === 'full') throw refuse('dpop_replay_guard_full', 'the replay guard is full; retry later');
+      if (outcome !== true) throw refuse('dpop_replayed', 'the proof was already used');
+    };
+    if (agent && agentTokens === 'watch') {
+      try {
+        await run();
+      } catch (err) {
+        if (!(err instanceof AuthFIError)) throw err;
+        log('warn', 'authfi: agent token would be refused', { code: err.code });
+      }
+      return claims;
+    }
+    await run();
+    return claims;
+  }
+
+  // --- JWKS prefetch ---
+
+  async function fetchJWKS() {
+    if (baseErr) throw baseErr;
+    await keySet.refresh();
   }
 
   // --- Permission registration ---
@@ -280,11 +282,45 @@ module.exports = function authfi(config) {
     console.log(`[authfi] Synced ${data.synced} permissions (${data.total} total)`);
   }
 
+
   // --- Middleware ---
 
+  const STATUS_BY_CODE = { jwks_unavailable: 503, dpop_replay_guard_full: 503, sdk_not_configured: 500, revocation_store_misconfigured: 500 };
+  const PROOF_CHALLENGE = 'algs="EdDSA ES256 PS256"';
+
+  // respond answers a refusal with its stable code and nothing from the token or the proof.
+  function respond(res, err) {
+    if (!(err instanceof AuthFIError)) {
+      log('warn', 'authfi: unexpected verification failure', {});
+      return res.status(500).json({ error: 'sdk_internal' });
+    }
+    const status = STATUS_BY_CODE[err.code] || 401;
+    if (err.code === 'dpop_replay_guard_full' && typeof res.setHeader === 'function') res.setHeader('Retry-After', '5');
+    if (status === 401 && typeof res.setHeader === 'function') {
+      let challenge;
+      if (err.code === 'dpop_nonce') {
+        res.setHeader('DPoP-Nonce', err.dpopNonce);
+        challenge = `DPoP error="use_dpop_nonce", ${PROOF_CHALLENGE}`;
+      } else if (err.code === 'missing_authorization') challenge = `Bearer realm="authfi", DPoP ${PROOF_CHALLENGE}`;
+      else if (err.code.startsWith('dpop_')) challenge = `DPoP error="invalid_dpop_proof", ${PROOF_CHALLENGE}`;
+      else challenge = `DPoP error="invalid_token", ${PROOF_CHALLENGE}`;
+      res.setHeader('WWW-Authenticate', challenge);
+    }
+    return res.status(status).json({ error: err.code });
+  }
+
+  // announceNonce offers the current server nonce on every response when nonces are on.
+  function announceNonce(res) {
+    if (nonceKey === undefined || baseErr || typeof res.setHeader !== 'function') return;
+    try {
+      const pc = getProofCfg();
+      if (pc.nonceKey) res.setHeader('DPoP-Nonce', currentNonce(pc.nonceKey, now()));
+    } catch { /* a configuration problem is reported when a proof is checked */ }
+  }
+
   /**
-   * Express middleware that validates JWT and checks required permissions.
-   * All specified permissions must be present in the token.
+   * Express middleware that verifies the request (token, and DPoP proof and key chain for agents)
+   * and checks required permissions. All specified permissions must be present in the token.
    */
   function require(...permissions) {
     // Register permissions for auto-sync
@@ -294,14 +330,12 @@ module.exports = function authfi(config) {
 
     return async (req, res, next) => {
       try {
-        const token = extractBearer(req);
-        if (!token) return res.status(401).json({ error: 'Missing authorization' });
-
-        const claims = await verifyToken(token);
+        announceNonce(res);
+        const claims = await verifyRequest(req);
         req.user = claims;
 
         // Check permissions
-        const userPerms = claims.permissions || [];
+        const userPerms = Array.isArray(claims.permissions) ? claims.permissions : [];
         for (const required of permissions) {
           if (!userPerms.includes(required)) {
             return res.status(403).json({
@@ -314,7 +348,7 @@ module.exports = function authfi(config) {
 
         next();
       } catch (err) {
-        return res.status(401).json({ error: err.message });
+        return respond(res, err);
       }
     };
   }
@@ -325,13 +359,11 @@ module.exports = function authfi(config) {
   function requireRole(...roles) {
     return async (req, res, next) => {
       try {
-        const token = extractBearer(req);
-        if (!token) return res.status(401).json({ error: 'Missing authorization' });
-
-        const claims = await verifyToken(token);
+        announceNonce(res);
+        const claims = await verifyRequest(req);
         req.user = claims;
 
-        const userRoles = claims.roles || [];
+        const userRoles = Array.isArray(claims.roles) ? claims.roles : [];
         if (!roles.some(r => userRoles.includes(r))) {
           return res.status(403).json({
             error: 'Insufficient role',
@@ -341,38 +373,31 @@ module.exports = function authfi(config) {
 
         next();
       } catch (err) {
-        return res.status(401).json({ error: err.message });
+        return respond(res, err);
       }
     };
   }
 
   /**
-   * Express middleware that only validates the JWT (no permission check).
+   * Express middleware that only verifies the request (no permission check).
    */
   function authenticate() {
     return async (req, res, next) => {
       try {
-        const token = extractBearer(req);
-        if (!token) return res.status(401).json({ error: 'Missing authorization' });
-        req.user = await verifyToken(token);
+        announceNonce(res);
+        req.user = await verifyRequest(req);
         next();
       } catch (err) {
-        return res.status(401).json({ error: err.message });
+        return respond(res, err);
       }
     };
-  }
-
-  function extractBearer(req) {
-    const auth = req.headers.authorization || '';
-    if (auth.startsWith('Bearer ')) return auth.slice(7);
-    return null;
   }
 
   // --- Startup ---
 
   async function start() {
     // Pre-fetch JWKS
-    await fetchJWKS().catch(err => console.warn('[authfi] JWKS fetch failed:', err.message));
+    if (!baseErr) await fetchJWKS().catch(err => console.warn('[authfi] JWKS fetch failed:', err.code || 'error'));
 
     // Sync permissions
     if (autoSync) {
@@ -457,18 +482,50 @@ module.exports = function authfi(config) {
 
   // --- Revocation signals ---
 
+  // verifyJws checks a Security Event Token's structure and signature against the issuer's key set, with
+  // the same rules as an access token, and returns its payload. It throws JwsError with the codes the
+  // receiver maps to RFC 8935 answers.
+  async function verifyJws(token, wantTyp) {
+    if (!keySet) throw new JwsError('key_set_unavailable', 'no issuer is configured');
+    if (typeof token !== 'string' || token.length > 16 * 1024) throw new JwsError('malformed', 'the token is not a bounded string');
+    const parts = token.split('.');
+    if (parts.length !== 3) throw new JwsError('malformed', 'a token is three dot-separated parts');
+    let header;
+    try { header = parseObject(parts[0]); } catch { throw new JwsError('malformed', 'the token header is not valid'); }
+    if (!['RS256', 'PS256', 'ES256', 'EdDSA'].includes(header.alg)) throw new JwsError('alg_not_allowed', 'the algorithm of the token is not accepted');
+    if (header.crit !== undefined && header.crit !== null) throw new JwsError('crit_not_supported', 'critical header extensions are not supported');
+    const typ = typeof header.typ === 'string' ? header.typ.toLowerCase().replace(/^application\//, '') : '';
+    if (typ !== wantTyp) throw new JwsError('typ_invalid', `the token is not of the expected type (typ must be ${wantTyp})`);
+    if (typeof header.kid !== 'string' || header.kid === '') throw new JwsError('kid_required', 'the token names no signing key');
+    let sig;
+    try { sig = b64uDecode(parts[2]); } catch { throw new JwsError('malformed', 'the token signature is not valid'); }
+    let key;
+    try {
+      key = await keySet.get(header.kid);
+    } catch (err) {
+      if (err && err.code === 'token_unknown_key') throw new JwsError('unknown_key', 'Unknown signing key');
+      throw new JwsError('key_set_unavailable', 'Failed to fetch JWKS');
+    }
+    if (!key.algs.includes(header.alg)) throw new JwsError('alg_key_mismatch', 'the algorithm of the token does not match its signing key');
+    if (!verifySignature(header.alg, key.pub, Buffer.from(`${parts[0]}.${parts[1]}`), sig)) throw new JwsError('bad_signature', 'Invalid signature');
+    try { return parseObject(parts[1]); } catch { throw new JwsError('malformed', 'the token payload is not valid'); }
+  }
+
+  const receiverLogger = { info: (m, f) => log('info', m, f), warn: (m, f) => log('warn', m, f) };
+
   /**
-   * Express-compatible handler for the Shared Signals push delivery (RFC 8935). Mount it at the
-   * https endpoint registered with the stream: app.post('/ssf/push', auth.receiver({ audience })).
-   * Needs the issuer and revocations options. Throws now, not at the first request, if it cannot work.
+   * Express-compatible handler for the Shared Signals push delivery (RFC 8935). Mount it at the https
+   * endpoint registered with the stream: app.post('/ssf/push', auth.receiver({ audience })). Needs the
+   * issuer and revocations options. Throws now, not at the first request, if it cannot work.
    */
   function receiver(receiverConfig) {
-    return createReceiver({ issuer, store: revocations, verifyJws, clock, logger }, receiverConfig);
+    return createReceiver({ issuer, store: revocations, verifyJws, clock: now, logger: receiverLogger }, receiverConfig);
   }
 
   /** Registers a push stream with the project's transmitter. See registerStream in signals.js. */
   function registerStreamFor(bearer, request) {
-    return registerStream(issuer, bearer, request, (...args) => fetch(...args));
+    const doFetch = fetchOverride || ((...args) => fetch(...args));
+    return registerStream(issuer, bearer, request, doFetch);
   }
 
   return {
@@ -476,6 +533,7 @@ module.exports = function authfi(config) {
     requireRole,
     authenticate,
     verifyToken,
+    verifyRequest,
     receiver,
     registerStream: registerStreamFor,
     start,
@@ -483,6 +541,9 @@ module.exports = function authfi(config) {
     syncPermissions,
     cloud,
   };
-};
+}
 
+module.exports = authfi;
+module.exports.AuthFIError = AuthFIError;
+module.exports.DEFAULT_ROOT_PINS = DEFAULT_ROOT_PINS;
 module.exports.createRevocationStore = createRevocationStore;
