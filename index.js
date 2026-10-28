@@ -28,6 +28,56 @@
  */
 
 const crypto = require('crypto');
+const { JwsError, createRevocationStore, createReceiver, registerStream } = require('./signals');
+
+const JWKS_MIN_REFETCH_MS = 15000;
+const MAX_TOKEN_BYTES = 16 * 1024;
+const ALLOWED_ALGS = new Set(['RS256', 'PS256', 'ES256', 'EdDSA']);
+const B64URL = /^[A-Za-z0-9_-]+$/;
+const noopLogger = { info() {}, warn() {} };
+
+/** Whether this JWK may verify `alg`: the key type, curve and its own alg all have to agree. */
+function keyAllows(jwk, alg) {
+  if (!jwk || (jwk.use && jwk.use !== 'sig')) return false;
+  if (jwk.alg && jwk.alg !== alg) return false;
+  switch (jwk.kty) {
+    case 'RSA':
+      return (alg === 'RS256' || alg === 'PS256') && typeof jwk.n === 'string' && Buffer.from(jwk.n, 'base64url').length * 8 >= 2048;
+    case 'EC':
+      return alg === 'ES256' && jwk.crv === 'P-256';
+    case 'OKP':
+      return alg === 'EdDSA' && jwk.crv === 'Ed25519';
+    default:
+      return false;
+  }
+}
+
+function checkSignature(alg, jwk, signedData, signature) {
+  let key;
+  try {
+    key = crypto.createPublicKey({ key: jwk, format: 'jwk' });
+  } catch (e) {
+    return false;
+  }
+  const data = Buffer.from(signedData);
+  switch (alg) {
+    case 'RS256':
+      return crypto.verify('sha256', data, key, signature);
+    case 'PS256':
+      return crypto.verify('sha256', data, { key, padding: crypto.constants.RSA_PKCS1_PSS_PADDING, saltLength: crypto.constants.RSA_PSS_SALTLEN_DIGEST }, signature);
+    case 'ES256':
+      return signature.length === 64 && crypto.verify('sha256', data, { key, dsaEncoding: 'ieee-p1363' }, signature);
+    case 'EdDSA':
+      return crypto.verify(null, data, key, signature);
+    default:
+      return false;
+  }
+}
+
+function decodeJsonSegment(segment) {
+  if (!B64URL.test(segment)) throw new Error('not base64url');
+  return JSON.parse(Buffer.from(segment, 'base64url').toString('utf8'));
+}
 
 module.exports = function authfi(config) {
   const {
@@ -38,7 +88,12 @@ module.exports = function authfi(config) {
     clientSecret,       // required for cloud identity
     autoSync = true,
     jwksRefreshInterval = 300000, // 5 min
+    issuer: issuerOption,   // the project issuer, e.g. https://acme.authfi.io; needed by receiver()
+    revocations,            // a store from authfi.createRevocationStore(); makes verifyToken refuse revoked tokens
+    logger = noopLogger,    // { info, warn }: receives receiver events, never a token
+    clock = Date.now,       // milliseconds; tests only
   } = config;
+  const issuer = typeof issuerOption === 'string' ? issuerOption.trim().replace(/\/+$/, '') : '';
 
   // The edge dispatch is api.authfi.io/<slug>/<path> — the SLUG COMES FIRST. Every path here had
   // the slug and the version transposed, so every URL 404'd against a real deployment, the JWKS
@@ -52,20 +107,89 @@ module.exports = function authfi(config) {
   const managePath = `${tenantBase}/v1`;
   const authPath = `${tenantBase}/v1`;
   const registeredPermissions = new Set();
+  const jwksUrl = `${issuer || tenantBase}/.well-known/jwks.json`;
   let jwksCache = null;
   let jwksCacheTime = 0;
+  let jwksFlight = null;
+  let jwksAttempted = 0;
 
   // --- JWKS ---
 
-  async function fetchJWKS() {
-    const now = Date.now();
-    if (jwksCache && now - jwksCacheTime < jwksRefreshInterval) return jwksCache;
+  async function fetchJWKS(force = false) {
+    const now = clock();
+    if (jwksCache && !force && now - jwksCacheTime < jwksRefreshInterval) return jwksCache;
+    // One fetch at a time: a burst of requests waits for the same answer.
+    if (jwksFlight) return jwksFlight;
+    jwksAttempted = now;
+    jwksFlight = (async () => {
+      try {
+        const res = await fetch(jwksUrl);
+        if (!res.ok) throw new Error('Failed to fetch JWKS');
+        const doc = await res.json();
+        if (!doc || !Array.isArray(doc.keys)) throw new Error('Failed to fetch JWKS');
+        jwksCache = doc;
+        jwksCacheTime = clock();
+        return jwksCache;
+      } finally {
+        jwksFlight = null;
+      }
+    })();
+    return jwksFlight;
+  }
 
-    const res = await fetch(`${tenantBase}/.well-known/jwks.json`);
-    if (!res.ok) throw new Error('Failed to fetch JWKS');
-    jwksCache = await res.json();
-    jwksCacheTime = now;
-    return jwksCache;
+  /** The issuer's key named by kid. An unknown kid costs at most one refetch per 15 seconds. */
+  async function getKey(kid) {
+    let jwks;
+    try {
+      jwks = await fetchJWKS();
+    } catch (e) {
+      throw new JwsError('key_set_unavailable', 'Failed to fetch JWKS');
+    }
+    let key = jwks.keys.find((k) => k && k.kid === kid);
+    if (!key && clock() - jwksAttempted >= JWKS_MIN_REFETCH_MS) {
+      try {
+        jwks = await fetchJWKS(true);
+        key = jwks.keys.find((k) => k && k.kid === kid);
+      } catch (e) {
+        throw new JwsError('key_set_unavailable', 'Failed to fetch JWKS');
+      }
+    }
+    if (!key) throw new JwsError('unknown_key', 'Unknown signing key');
+    return key;
+  }
+
+  /**
+   * Checks the structure and signature of a compact JWS against the issuer's key set and returns
+   * the decoded payload: size, three parts, an allowed alg, no critical extensions, the media type
+   * wantTyp, a kid, and a signature by that key under an alg it may use. Reads nothing from the
+   * payload. Throws JwsError with a stable code.
+   */
+  async function verifyJws(token, wantTyp) {
+    if (typeof token !== 'string' || token.length > MAX_TOKEN_BYTES) throw new JwsError('malformed', 'the token is not a bounded string');
+    const parts = token.split('.');
+    if (parts.length !== 3 || parts.some((p) => p === '')) throw new JwsError('malformed', 'a token is three dot-separated parts');
+    let header;
+    try {
+      header = decodeJsonSegment(parts[0]);
+    } catch (e) {
+      throw new JwsError('malformed', 'the token header is not valid');
+    }
+    if (!header || typeof header !== 'object' || Array.isArray(header)) throw new JwsError('malformed', 'the token header is not valid');
+    if (!ALLOWED_ALGS.has(header.alg)) throw new JwsError('alg_not_allowed', 'the algorithm of the token is not accepted');
+    if (header.crit !== undefined && header.crit !== null) throw new JwsError('crit_not_supported', 'critical header extensions are not supported');
+    const typ = String(header.typ || '').toLowerCase().replace(/^application\//, '');
+    if (typ !== wantTyp) throw new JwsError('typ_invalid', `the token is not of the expected type (typ must be ${wantTyp})`);
+    if (typeof header.kid !== 'string' || header.kid === '') throw new JwsError('kid_required', 'the token names no signing key');
+    if (!B64URL.test(parts[2])) throw new JwsError('malformed', 'the token signature is not valid');
+    const key = await getKey(header.kid);
+    if (!keyAllows(key, header.alg)) throw new JwsError('alg_key_mismatch', 'the algorithm of the token does not match its signing key');
+    const signature = Buffer.from(parts[2], 'base64url');
+    if (!checkSignature(header.alg, key, `${parts[0]}.${parts[1]}`, signature)) throw new JwsError('bad_signature', 'Invalid signature');
+    try {
+      return decodeJsonSegment(parts[1]);
+    } catch (e) {
+      throw new JwsError('malformed', 'the token payload is not valid');
+    }
   }
 
   async function verifyToken(token) {
@@ -75,26 +199,54 @@ module.exports = function authfi(config) {
     const payload = JSON.parse(Buffer.from(payloadB64, 'base64url').toString());
 
     // Check expiry
-    if (payload.exp && payload.exp < Date.now() / 1000) {
+    if (payload.exp && payload.exp < clock() / 1000) {
       throw new Error('Token expired');
     }
 
-    // Enforce RS256 algorithm
-    if (header.alg !== 'RS256') {
+    // Only the algorithms the issuer signs with; a Security Event Token is never an access token.
+    if (!ALLOWED_ALGS.has(header.alg)) {
       throw new Error('Unsupported algorithm: ' + header.alg);
+    }
+    if (String(header.typ || '').toLowerCase().includes('secevent')) {
+      throw new Error('Not an access token');
     }
 
     // Fetch JWKS and find matching key
-    const jwks = await fetchJWKS();
-    const key = jwks.keys.find(k => k.kid === header.kid);
-    if (!key) throw new Error('Unknown signing key');
+    const key = await getKey(header.kid);
+    if (!keyAllows(key, header.alg)) throw new Error('Unsupported algorithm: ' + header.alg);
 
     // Verify signature using Node.js crypto
-    const publicKey = crypto.createPublicKey({ key, format: 'jwk' });
-    const signedData = `${headerB64}.${payloadB64}`;
     const signature = Buffer.from(signatureB64, 'base64url');
-    const valid = crypto.verify('sha256', Buffer.from(signedData), publicKey, signature);
-    if (!valid) throw new Error('Invalid signature');
+    if (!checkSignature(header.alg, key, `${headerB64}.${payloadB64}`, signature)) throw new Error('Invalid signature');
+
+    // A subject, or any actor in the delegation chain, revoked after this token was issued.
+    if (revocations) {
+      // The store forgets a revocation once the longest token it was told about has expired; a
+      // longer-lived token would outlive its revocation, so it is refused rather than trusted.
+      if (!Number.isFinite(payload.iat) || !Number.isFinite(payload.exp)) {
+        const err = new Error('Token has no issue or expiry time, which revocation needs');
+        err.code = 'token_iat_exp_required';
+        throw err;
+      }
+      if (payload.exp - payload.iat > revocations.tokenLifetimeSeconds) {
+        const err = new Error('The revocation store tokenLifetimeSeconds is shorter than this token\'s lifetime; raise it');
+        err.code = 'revocation_store_misconfigured';
+        throw err;
+      }
+      const subjects = [payload.sub];
+      for (let act = payload.act, depth = 0; act && typeof act === 'object' && depth < 16; act = act.act, depth += 1) subjects.push(act.sub);
+      let hit = null;
+      for (const subject of subjects) {
+        hit = revocations.find(subject, payload.iat);
+        if (hit) break;
+      }
+      if (hit) {
+        const err = new Error(hit.ref ? `Token revoked (ref ${hit.ref})` : 'Token revoked');
+        err.code = 'token_revoked';
+        err.ref = hit.ref;
+        throw err;
+      }
+    }
 
     return payload;
   }
@@ -303,14 +455,34 @@ module.exports = function authfi(config) {
     },
   };
 
+  // --- Revocation signals ---
+
+  /**
+   * Express-compatible handler for the Shared Signals push delivery (RFC 8935). Mount it at the
+   * https endpoint registered with the stream: app.post('/ssf/push', auth.receiver({ audience })).
+   * Needs the issuer and revocations options. Throws now, not at the first request, if it cannot work.
+   */
+  function receiver(receiverConfig) {
+    return createReceiver({ issuer, store: revocations, verifyJws, clock, logger }, receiverConfig);
+  }
+
+  /** Registers a push stream with the project's transmitter. See registerStream in signals.js. */
+  function registerStreamFor(bearer, request) {
+    return registerStream(issuer, bearer, request, (...args) => fetch(...args));
+  }
+
   return {
     require,
     requireRole,
     authenticate,
     verifyToken,
+    receiver,
+    registerStream: registerStreamFor,
     start,
     registerPermission,
     syncPermissions,
     cloud,
   };
 };
+
+module.exports.createRevocationStore = createRevocationStore;
