@@ -18,8 +18,9 @@
  */
 
 import type { ToolApprovalRequestOutput, ToolApprovalStatus, ToolSet } from 'ai';
-import { base64url, constantTimeEqual, randomBytes, utf8 } from '../core/bytes.js';
+import { base64url, constantTimeEqual, utf8 } from '../core/bytes.js';
 import { ConfigurationError } from '../core/errors.js';
+import { isValidRunId, newRunId } from '../core/ids.js';
 import { consoleLogger, type Logger } from '../core/logger.js';
 import { isSecret, type Secret } from '../core/secret.js';
 import type { OpenTelemetryApi } from '../core/transport.js';
@@ -74,7 +75,6 @@ interface Entry {
   result: ToolResult | undefined;
 }
 
-const RUN_ID = /^[A-Za-z0-9._:-]{1,96}$/;
 const REASON_PREFIX = 'AuthFI approval ';
 /**
  * The approval request's reason: `AuthFI approval <id>.<mac>`. The AI SDK signs an approval request
@@ -122,10 +122,6 @@ function withoutApprovalArgument(input: unknown, logger: Logger, key: string): u
   return copy;
 }
 
-function hex(n: number): string {
-  return Array.from(randomBytes(n), (b) => b.toString(16).padStart(2, '0')).join('');
-}
-
 /**
  * The adapter for one agent run on the Vercel AI SDK. Build one per run with
  * {@link createVercelAI}.
@@ -134,6 +130,8 @@ export class VercelAIAdapter {
   readonly runId: string;
   readonly captureContent: boolean;
   readonly #gateway: Gateway;
+  readonly #source: GatewaySource;
+  #steps: Promise<import('../otel/index.js').AuthFITelemetry> | undefined;
   readonly #secret: Uint8Array;
   readonly #pollMs: number;
   readonly #timeoutMs: number;
@@ -161,13 +159,14 @@ export class VercelAIAdapter {
         'approvalSecret is required, at least 32 bytes, and the same in every process that may resume a run: it signs approval requests',
       );
     }
-    const runId = options.runId ?? `run-${hex(12)}`;
-    if (!RUN_ID.test(runId))
+    const runId = options.runId ?? newRunId();
+    if (!isValidRunId(runId))
       throw new ConfigurationError('runId must be 1-96 of A-Z a-z 0-9 . _ : - (it prefixes X-Request-Id)');
     const pollMs = options.pollIntervalMs ?? 3000;
     const timeoutMs = options.approvalTimeoutMs ?? 15 * 60_000;
     if (!(pollMs >= 100) || !(timeoutMs > 0))
       throw new ConfigurationError('pollIntervalMs must be at least 100 and approvalTimeoutMs positive');
+    this.#source = options.source;
     this.#gateway = options.source.gateway();
     this.#secret = secret;
     this.runId = runId;
@@ -478,6 +477,61 @@ export class VercelAIAdapter {
       }),
     );
     return { role: 'tool', content };
+  }
+
+  /**
+   * Sends this run's steps (model calls, tool calls) to AuthFI, in one line: registers the AI SDK's
+   * own OpenTelemetry integration (`@ai-sdk/otel`) over a tracer provider that exports to
+   * `<issuer>/otlp/v1/traces` under this credential, stamps `authfi.agent_id` and this run's
+   * `authfi.run_id` on every span, and records no content unless `captureContent` is on. Needs
+   * `@ai-sdk/otel`, `@opentelemetry/api`, `@opentelemetry/sdk-trace-base` and
+   * `@opentelemetry/otlp-transformer`.
+   *
+   * The AI SDK's `registerTelemetry` only adds integrations, so this adds one, once per adapter, and
+   * `shutdown()` takes it out again and sends what is buffered: call it before the process exits.
+   *
+   * @example
+   * const steps = await authfi.exportSteps();
+   * // ... generateText(...) ...
+   * await steps.shutdown();
+   */
+  async exportSteps(
+    options: { scheduleDelayMs?: number | undefined } = {},
+  ): Promise<import('../otel/index.js').AuthFITelemetry> {
+    this.#steps ??= this.#startSteps(options);
+    return this.#steps;
+  }
+
+  async #startSteps(options: {
+    scheduleDelayMs?: number | undefined;
+  }): Promise<import('../otel/index.js').AuthFITelemetry> {
+    const [{ registerAuthFITelemetry }, { OpenTelemetry }, { registerTelemetry }] = await Promise.all([
+      import('../otel/index.js'),
+      import('@ai-sdk/otel'),
+      import('ai'),
+    ]);
+    const telemetry = registerAuthFITelemetry({
+      source: this.#source,
+      runId: this.runId,
+      captureContent: this.captureContent,
+      global: false,
+      logger: this.#logger,
+      scheduleDelayMs: options.scheduleDelayMs,
+    });
+    const integration = this.telemetry(new OpenTelemetry({ tracer: telemetry.tracer }));
+    registerTelemetry(integration);
+    return {
+      ...telemetry,
+      shutdown: async () => {
+        // The AI SDK has no way to unregister; take our integration out of its list by identity.
+        const list = (globalThis as { AI_SDK_TELEMETRY_INTEGRATIONS?: unknown[] })
+          .AI_SDK_TELEMETRY_INTEGRATIONS;
+        const at = list?.indexOf(integration) ?? -1;
+        if (at >= 0) list?.splice(at, 1);
+        this.#steps = undefined;
+        await telemetry.shutdown();
+      },
+    };
   }
 
   /**

@@ -324,7 +324,8 @@ describe('telemetry', () => {
         },
       } as never);
     } finally {
-      registerTelemetry(undefined as never);
+      // registerTelemetry only adds; the AI SDK keeps its list on globalThis.
+      (globalThis as { AI_SDK_TELEMETRY_INTEGRATIONS?: unknown[] }).AI_SDK_TELEMETRY_INTEGRATIONS = [];
     }
     const dump = JSON.stringify(
       exporter.getFinishedSpans().map((s) => ({ name: s.name, attributes: s.attributes })),
@@ -333,6 +334,36 @@ describe('telemetry', () => {
     expect(dump).not.toContain('ada@example.com');
     expect(dump).not.toContain('eyJ');
     expect(dump).not.toContain('1 Overview');
+  });
+
+  it("exports the run's steps to AuthFI in one line: the agent's token, the run id, no content", async () => {
+    const t = await setup({ runId: 'run-steps' });
+    const url = `${t.as.issuer}/otlp/v1/traces`;
+    t.as.t.fake.on('POST', url, () => new Response(new Uint8Array(), { status: 200 }));
+    const steps = await t.authfi.exportSteps({ scheduleDelayMs: 60_000 });
+    try {
+      await generateText({
+        model: t.model,
+        tools: { [STRUCTURE]: t.tools[STRUCTURE]! } as ToolSet,
+        messages: [{ role: 'user', content: 'my email is ada@example.com' }],
+        stopWhen: stepCountIs(3),
+        maxRetries: 0,
+        telemetry: { isEnabled: true, recordInputs: true, recordOutputs: true },
+      } as never);
+      await steps.forceFlush();
+    } finally {
+      await steps.shutdown();
+    }
+    const posts = t.as.t.fake.to(url);
+    expect(posts.length).toBeGreaterThan(0);
+    const body = posts.map((r) => r.body).join('');
+    expect(posts[0]!.headers.get('authorization')).toMatch(/^Bearer eyJ/);
+    expect(steps.runId).toBe('run-steps');
+    expect(await t.authfi.exportSteps()).toBe(await t.authfi.exportSteps());
+    expect(body).toContain('run-steps');
+    expect(body).toContain(AGENT_ID);
+    expect(body).not.toContain('ada@example.com');
+    expect(body).not.toContain('1 Overview');
   });
 
   it("passes the call's own choice through when content capture is allowed", () => {

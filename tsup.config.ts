@@ -9,6 +9,7 @@ export default defineConfig({
     express: 'src/express/index.ts',
     node: 'src/node/index.ts',
     'vercel-ai': 'src/vercel-ai/index.ts',
+    otel: 'src/otel/index.ts',
   },
   format: ['esm', 'cjs'],
   target: 'es2022',

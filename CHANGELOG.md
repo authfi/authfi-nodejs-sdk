@@ -65,6 +65,15 @@ All notable changes to this package. It follows [Semantic Versioning](https://se
   (`allowed`, `refused`, `approval_required`), `scopeOf`, `cloudCredentials` (a credential is issued on 201; 202 asks for approval; `expiresInSeconds` is 1 to 900), and `APPROVAL_ARGUMENT`.
   The gateway's hold is read by `HOLD_PATTERN`, the same pattern as the Python SDK's, and a model
   is told `HOLD_MESSAGE`.
+- **`connect()`** (`@authfi/sdk/node`): the credential from the environment in one call, an agent
+  key by default or `AUTHFI_CLIENT_ID` with `AUTHFI_CLIENT_SECRET`. A client-credentials token is now a
+  gateway source (`clientCredentials.gateway()`), minted for the gateway and labelled `client-credentials`.
+- **Run id:** `gateway.forRun(runId?)` sends `<runId>.<n>` as `X-Request-Id` on every call;
+  `gateway.serverRunId` is the run the gateway derived from the token (`AuthFI-Run-Id`).
+- **`@authfi/sdk/otel`**: `registerAuthFITelemetry` exports framework steps to `/otlp/v1/traces` under the
+  credential's current token, with content off by default and `authfi.agent_id` / `authfi.run_id` on every
+  span. `createVercelAI().exportSteps()` wires it into the AI SDK. `@opentelemetry/*` and `@ai-sdk/otel`
+  are optional peers.
 - **`@authfi/sdk/vercel-ai`**: `createVercelAI({ source, approvalSecret })` for the Vercel AI SDK 7:
   the credential per request, refusals as tool results, approvals that resume only on AuthFI's
   decision (memo per tool call, bounded), the AuthFI approval id in each approval request bound to
