@@ -3,6 +3,7 @@ import { ConfigurationError } from '../core/errors.js';
 import { GRANT, requestToken, type ClientAuth, type TokenResponse } from '../core/oauth.js';
 import { coreOf, type AuthFI, type Core } from '../core/project.js';
 import { isSecret, type Secret } from '../core/secret.js';
+import { Gateway } from '../gateway/gateway.js';
 import { BaseTokenSource, checkSendTo, type TokenOptions } from '../core/token-source.js';
 
 /** How `af.clientCredentials()` is configured. */
@@ -42,10 +43,18 @@ export class ClientCredentials extends BaseTokenSource {
   readonly #auth: ClientAuth;
   readonly #sendTo: readonly string[];
   readonly #flight = new SingleFlight<0, TokenResponse>();
+  readonly #options: ClientCredentialsOptions;
+  readonly #toGateway: boolean;
+  #gateway: Gateway | undefined;
+  #forGateway: ClientCredentials | undefined;
   #cached: { token: Secret; renewAt: number; expiresAt: number } | undefined;
 
   /** Use `af.clientCredentials()`. */
-  constructor(af: AuthFI, options: ClientCredentialsOptions, internal: { quiet?: boolean } = {}) {
+  constructor(
+    af: AuthFI,
+    options: ClientCredentialsOptions,
+    internal: { quiet?: boolean; gateway?: boolean } = {},
+  ) {
     const core = coreOf(af);
     super(core.fetch);
     this.#af = af;
@@ -64,16 +73,19 @@ export class ClientCredentials extends BaseTokenSource {
           'client authenticates with its secret (an agent authenticates with its key, af.agent())',
       );
     }
+    this.#options = options;
+    this.#toGateway = internal.gateway === true;
     this.clientId = options.clientId;
-    this.resource = options.resource;
+    this.resource = this.#toGateway ? `${af.issuer}/mcp` : options.resource;
     this.scope = Object.freeze([...(options.scope ?? [])]);
     this.#auth = {
       method,
       clientId: options.clientId,
       clientSecret: options.clientSecret,
     };
-    const sendTo = checkSendTo(options.sendTo ?? []);
-    if (options.resource !== undefined && sendTo.length === 0) {
+    // The gateway token goes to AuthFI only, whatever API the credential is also used for.
+    const sendTo = checkSendTo(this.#toGateway ? [] : (options.sendTo ?? []));
+    if (options.resource !== undefined && sendTo.length === 0 && !this.#toGateway) {
       throw new ConfigurationError(
         `sendTo is required with resource ${options.resource}: the exact https origin(s) of that API, where the token may go`,
       );
@@ -84,7 +96,7 @@ export class ClientCredentials extends BaseTokenSource {
       );
     }
     this.#sendTo = sendTo;
-    if (options.resource === undefined && internal.quiet !== true) {
+    if (options.resource === undefined && internal.quiet !== true && !this.#toGateway) {
       core.warnOnce(
         `cc-no-resource:${options.clientId}`,
         "a client-credentials token without resource names this client as its audience, which no API should accept; set resource to the API's client id",
@@ -105,6 +117,18 @@ export class ClientCredentials extends BaseTokenSource {
   /** Learns the project's API origin before the first origin check of a token with no resource. */
   protected override async ready(signal?: AbortSignal): Promise<void> {
     if (this.#sendTo.length === 0) await this.#core.metadata({ signal });
+  }
+
+  /**
+   * The project's MCP and AI gateways with this client's token. The gateway token is its own: for
+   * the gateway as the resource (`<issuer>/mcp`), sent to AuthFI's origins only, whatever
+   * `resource` this credential was made with. The gateway sees a client, not an agent: it records
+   * the caller as `client-credentials`, and the calls carry no agent id.
+   */
+  gateway(): Gateway {
+    this.#forGateway ??= new ClientCredentials(this.#af, this.#options, { gateway: true });
+    this.#gateway ??= new Gateway(this.#core, this.#forGateway, undefined, { kind: 'client_credentials' });
+    return this.#gateway;
   }
 
   /** A current token: cached, renewed at two thirds of its lifetime, minted once for concurrent callers. */

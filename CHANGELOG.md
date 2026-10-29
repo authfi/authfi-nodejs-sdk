@@ -7,6 +7,21 @@ All notable changes to this package. It follows [Semantic Versioning](https://se
 
 ### Added
 
+- **Agent tokens are proven, and withdrawn agents are refused** (ported from 0.1 #30 and #31): DPoP
+  proofs (RFC 9449), the AuthFI certificate chain of the signing key, `agentTokens` modes,
+  `publicUrl`, `trustForwarded`, `replayGuard`, `nonceKey`, `rootPins`/`rootCerts`, and
+  `@authfi/sdk/signals` (receiver, revocation store, `registerStream`). `verify()` refuses an agent's
+  token (`agent_token_needs_request`). `protect()` no longer takes `publicUrl`: set it on the verifier.
+- **Webhook verification**: `verifyWebhook({ body, headers, secret })` checks
+  `X-AuthFI-Signature-256` (HMAC-SHA256 over `<timestamp>.<body>`) in constant time with Web Crypto,
+  enforces a timestamp window (300 seconds by default), and returns a typed event. Refusals are
+  `InvalidWebhook` with a code (`webhook_signature_invalid`, `webhook_timestamp_outside_tolerance`,
+  and others). `WEBHOOK_EVENTS` lists the platform's event names. Shared vectors:
+  `conformance/webhooks.json`.
+- **`@authfi/sdk/admin`**: `new AdminClient(af, credential)` for organizations (members,
+  invitations, accepting an invitation, join requests), users, roles, permissions and role bindings,
+  on `<origin>/apis/regional/v1`, with typed models, cursor pagination (`list`, `all`) and the
+  platform's refusals as `APIError`.
 - **One core for every area.** `new AuthFI({ issuer })` (or `AuthFI.fromEnv()`) is the project: its
   discovery, key set and one HTTP transport. The issuer is the only required setting; every endpoint
   comes from the issuer's discovery document.
@@ -65,6 +80,15 @@ All notable changes to this package. It follows [Semantic Versioning](https://se
   (`allowed`, `refused`, `approval_required`), `scopeOf`, `cloudCredentials` (a credential is issued on 201; 202 asks for approval; `expiresInSeconds` is 1 to 900), and `APPROVAL_ARGUMENT`.
   The gateway's hold is read by `HOLD_PATTERN`, the same pattern as the Python SDK's, and a model
   is told `HOLD_MESSAGE`.
+- **`connect()`** (`@authfi/sdk/node`): the credential from the environment in one call, an agent
+  key by default or `AUTHFI_CLIENT_ID` with `AUTHFI_CLIENT_SECRET`. A client-credentials token is now a
+  gateway source (`clientCredentials.gateway()`), minted for the gateway and labelled `client-credentials`.
+- **Run id:** `gateway.forRun(runId?)` sends `<runId>.<n>` as `X-Request-Id` on every call;
+  `gateway.serverRunId` is the run the gateway derived from the token (`AuthFI-Run-Id`).
+- **`@authfi/sdk/otel`**: `registerAuthFITelemetry` exports framework steps to `/otlp/v1/traces` under the
+  credential's current token, with content off by default and `authfi.agent_id` / `authfi.run_id` on every
+  span. `createVercelAI().exportSteps()` wires it into the AI SDK. `@opentelemetry/*` and `@ai-sdk/otel`
+  are optional peers.
 - **`@authfi/sdk/vercel-ai`**: `createVercelAI({ source, approvalSecret })` for the Vercel AI SDK 7:
   the credential per request, refusals as tool results, approvals that resume only on AuthFI's
   decision (memo per tool call, bounded), the AuthFI approval id in each approval request bound to

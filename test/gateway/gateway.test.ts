@@ -243,3 +243,49 @@ describe('cloud credentials', () => {
     expect(bare.kind === 'issued' && bare.credential.expiresAt).toBeUndefined();
   });
 });
+
+describe('a run on the gateway', () => {
+  it('prefixes each call with the run id and exposes the run the gateway derived', async () => {
+    const { as, agent, fake } = await setup();
+    as.t.fake.on('POST', `${as.issuer}/mcp`, () =>
+      json({ jsonrpc: '2.0', id: 1, result: {} }, 200, { 'AuthFI-Run-Id': 'run_derived' }),
+    );
+    const run = agent.gateway().forRun('run-abc');
+    expect(run.runId).toBe('run-abc');
+    expect(run.agentId).toBe(agent.agentId);
+    expect(run.serverRunId).toBeUndefined();
+    await run.fetch(run.mcpUrl, { method: 'POST', body: '{}' });
+    await run.fetch(run.mcpUrl, { method: 'POST', body: '{}' });
+    const ids = fake.to(`${as.issuer}/mcp`).map((r) => r.headers.get('x-request-id'));
+    expect(ids).toEqual(['run-abc.1', 'run-abc.2']);
+    expect(run.serverRunId).toBe('run_derived');
+    expect(run.otlpTracesUrl).toBe(`${as.issuer}/otlp/v1/traces`);
+    // A caller's valid request id is kept; the agent gateway itself is not bound to a run.
+    await run.fetch(run.mcpUrl, { method: 'POST', body: '{}', headers: { 'x-request-id': 'mine-1' } });
+    expect(fake.to(`${as.issuer}/mcp`).at(-1)!.headers.get('x-request-id')).toBe('mine-1');
+    expect(agent.gateway().runId).toBeUndefined();
+  });
+
+  it('makes a run id when none is given, refuses one the platform would drop, and labels an agent', async () => {
+    const { agent, fake, as } = await setup();
+    as.t.fake.on('POST', `${as.issuer}/mcp`, () =>
+      json({ error: 'invalid_token' }, 401, { 'AuthFI-Run-Id': 'run_x' }),
+    );
+    const run = agent.gateway().forRun();
+    expect(run.runId).toMatch(/^run-[0-9a-f]{24}$/);
+    expect(() => agent.gateway().forRun('bad id')).toThrow('runId');
+    expect(() => agent.gateway().forRun('x'.repeat(97))).toThrow('runId');
+    await expect(run.fetch(run.mcpUrl, { method: 'POST', body: '{}' })).rejects.toBeInstanceOf(Error);
+    // A refusal carries the run too.
+    expect(run.serverRunId).toBe('run_x');
+    expect(fake.to(`${as.issuer}/mcp`)[0]!.headers.get('user-agent')).toMatch(/\(agent\)$/);
+  });
+
+  it("keeps a caller's own User-Agent", async () => {
+    const { as, agent, fake } = await setup();
+    as.t.fake.on('POST', `${as.issuer}/mcp`, () => json({ jsonrpc: '2.0', id: 1, result: {} }));
+    const g = agent.gateway();
+    await g.fetch(g.mcpUrl, { method: 'POST', body: '{}', headers: { 'user-agent': 'my-agent/1' } });
+    expect(fake.to(`${as.issuer}/mcp`)[0]!.headers.get('user-agent')).toBe('my-agent/1');
+  });
+});

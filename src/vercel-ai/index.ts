@@ -18,63 +18,39 @@
  */
 
 import type { ToolApprovalRequestOutput, ToolApprovalStatus, ToolSet } from 'ai';
-import { base64url, constantTimeEqual, randomBytes, utf8 } from '../core/bytes.js';
+import { base64url, constantTimeEqual, utf8 } from '../core/bytes.js';
 import { ConfigurationError } from '../core/errors.js';
 import { consoleLogger, type Logger } from '../core/logger.js';
 import { isSecret, type Secret } from '../core/secret.js';
-import type { OpenTelemetryApi } from '../core/transport.js';
-import { APPROVAL_ARGUMENT, HOLD_MESSAGE, type Gateway, type ToolResult } from '../gateway/gateway.js';
+import {
+  HoldGuard,
+  RunGateway,
+  type AdapterOptions,
+  type GatewaySource,
+  type HoldEntry,
+  type SpanApi,
+} from '../adapters/shared.js';
+import { APPROVAL_ARGUMENT, HOLD_MESSAGE, type ToolResult } from '../gateway/gateway.js';
 
-/** A credential with gateways: an `AgentAuth`, a `DelegatedToken`, and in release 1 a mandate. */
-export interface GatewaySource {
-  gateway(): Gateway;
-}
+export type { GatewaySource };
 
 /** The OpenTelemetry API, for spans and the request id on them. */
-export interface VercelOtelApi extends OpenTelemetryApi {
-  readonly trace: {
-    getActiveSpan(): { setAttribute(key: string, value: string): unknown } | undefined;
-  };
-}
+export type VercelOtelApi = SpanApi;
 
 /** How the adapter is configured. */
-export interface VercelAIOptions {
-  /** The credential the run uses: the agent, or a token it holds for a person. */
-  readonly source: GatewaySource;
+export interface VercelAIOptions extends AdapterOptions {
   /**
    * The secret the AI SDK signs approval requests with (32 bytes or more), the same in every
    * process that may resume a run, so a forged approval request is refused. Required.
    */
   readonly approvalSecret: Secret | Uint8Array;
-  /** The run's id: on spans as `authfi.run_id`, and the prefix of each call's `X-Request-Id`. */
-  readonly runId?: string | undefined;
   /** Record prompts, outputs and tool payloads in telemetry. Off by default; a tenant policy decision. */
   readonly captureContent?: boolean | undefined;
-  /** How often to ask the gateway about a pending approval (default 3 000 ms). */
-  readonly pollIntervalMs?: number | undefined;
-  /** How long `awaitApprovals` waits (default 15 minutes). */
-  readonly approvalTimeoutMs?: number | undefined;
-  /** How many tool calls the adapter remembers, oldest dropped first (default 10 000). */
-  readonly memoSize?: number | undefined;
-  /** The `@opentelemetry/api` module, to stamp request ids on the active span. */
-  readonly otel?: VercelOtelApi | undefined;
-  readonly logger?: Logger | undefined;
 }
 
 /** The object forms of the AI SDK's own `ToolApprovalStatus`, which are the ones this adapter answers with. */
 export type ApprovalDecision = Extract<ToolApprovalStatus, { type: string }>;
 
-type Status = 'new' | 'allowed' | 'refused' | 'pending' | 'approved' | 'denied';
-
-interface Entry {
-  readonly key: string;
-  readonly input: unknown;
-  status: Status;
-  approvalId: string | undefined;
-  result: ToolResult | undefined;
-}
-
-const RUN_ID = /^[A-Za-z0-9._:-]{1,96}$/;
 const REASON_PREFIX = 'AuthFI approval ';
 /**
  * The approval request's reason: `AuthFI approval <id>.<mac>`. The AI SDK signs an approval request
@@ -82,77 +58,42 @@ const REASON_PREFIX = 'AuthFI approval ';
  * id in the reason is bound to the tool call by an HMAC under the approval secret.
  */
 const REASON = /^AuthFI approval ([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)$/;
-const WAITING: ToolResult = { content: [{ type: 'text', text: HOLD_MESSAGE }], isError: true };
 const DENIED_REASON = 'A person did not approve this action in AuthFI.';
 const PENDING_REASON = 'This action has not been approved in AuthFI yet.';
 
-/** A map that forgets its oldest entries past a size. */
-class Memo {
-  readonly #map = new Map<string, Entry>();
-  constructor(readonly size: number) {}
-  get(id: string): Entry | undefined {
-    const e = this.#map.get(id);
-    if (e !== undefined) {
-      this.#map.delete(id);
-      this.#map.set(id, e);
-    }
-    return e;
-  }
-  set(id: string, e: Entry): void {
-    this.#map.delete(id);
-    this.#map.set(id, e);
-    while (this.#map.size > this.size) {
-      const oldest = this.#map.keys().next().value;
-      if (oldest === undefined) break;
-      this.#map.delete(oldest);
-    }
-  }
-  delete(id: string): void {
-    this.#map.delete(id);
-  }
-  get length(): number {
-    return this.#map.size;
-  }
-}
-
-function withoutApprovalArgument(input: unknown, logger: Logger, key: string): unknown {
-  if (typeof input !== 'object' || input === null || !(APPROVAL_ARGUMENT in input)) return input;
-  const { [APPROVAL_ARGUMENT]: _dropped, ...copy } = input as Record<string, unknown>;
-  logger.warn('removed an approval id the model put in a tool call; only AuthFI adds it', { tool: key });
-  return copy;
-}
-
-function hex(n: number): string {
-  return Array.from(randomBytes(n), (b) => b.toString(16).padStart(2, '0')).join('');
-}
+type ToolExecute = (input: unknown, options: Record<string, unknown>) => Promise<unknown>;
 
 /**
  * The adapter for one agent run on the Vercel AI SDK. Build one per run with
- * {@link createVercelAI}.
+ * {@link createVercelAI}. The run's gateway `fetch` and the hold logic are the shared
+ * {@link RunGateway} and {@link HoldGuard}; this class is the AI SDK's own seam over them
+ * (`execute`, `toolApproval`, the signed approval request).
  */
 export class VercelAIAdapter {
   readonly runId: string;
   readonly captureContent: boolean;
-  readonly #gateway: Gateway;
+  readonly #run: RunGateway;
+  readonly #guard: HoldGuard;
+  readonly #source: GatewaySource;
+  #steps: Promise<import('../otel/index.js').AuthFITelemetry> | undefined;
   readonly #secret: Uint8Array;
-  readonly #pollMs: number;
-  readonly #timeoutMs: number;
-  readonly #otel: VercelOtelApi | undefined;
   readonly #logger: Logger;
-  readonly #tools = new Map<
-    string,
-    { execute: (input: unknown, options: Record<string, unknown>) => Promise<unknown> }
-  >();
-  readonly #memo: Memo;
-  #calls = 0;
+  readonly #tools = new Map<string, { execute: ToolExecute }>();
+  #anonymous = 0;
   #macKey: Promise<CryptoKey> | undefined;
 
+  /** Attributes to stamp on the AI SDK's spans: `authfi.agent_id` and `authfi.run_id`. */
+  readonly enrichSpan: () => Record<string, string>;
+
+  /**
+   * A `fetch` for the gateways: the current token on each request (never in a header a tracer
+   * reads), `X-Request-Id` `<runId>.<n>`, `traceparent`, no redirects, AuthFI's origins only. The
+   * request id the gateway answers is set on the active span.
+   */
+  readonly fetch: typeof fetch;
+
   constructor(options: VercelAIOptions) {
-    if (typeof (options.source as Partial<GatewaySource> | undefined)?.gateway !== 'function') {
-      throw new ConfigurationError(
-        'source must be an AgentAuth or a DelegatedToken: the adapter sends its token to the gateways',
-      );
-    }
+    this.#run = new RunGateway(options);
     const secret = isSecret(options.approvalSecret)
       ? new TextEncoder().encode(options.approvalSecret.reveal())
       : options.approvalSecret;
@@ -161,44 +102,17 @@ export class VercelAIAdapter {
         'approvalSecret is required, at least 32 bytes, and the same in every process that may resume a run: it signs approval requests',
       );
     }
-    const runId = options.runId ?? `run-${hex(12)}`;
-    if (!RUN_ID.test(runId))
-      throw new ConfigurationError('runId must be 1-96 of A-Z a-z 0-9 . _ : - (it prefixes X-Request-Id)');
-    const pollMs = options.pollIntervalMs ?? 3000;
-    const timeoutMs = options.approvalTimeoutMs ?? 15 * 60_000;
-    if (!(pollMs >= 100) || !(timeoutMs > 0))
-      throw new ConfigurationError('pollIntervalMs must be at least 100 and approvalTimeoutMs positive');
-    this.#gateway = options.source.gateway();
+    this.#source = options.source;
     this.#secret = secret;
-    this.runId = runId;
+    this.runId = this.#run.runId;
     this.captureContent = options.captureContent === true;
-    this.#pollMs = pollMs;
-    this.#timeoutMs = timeoutMs;
-    this.#otel = options.otel;
     this.#logger = options.logger ?? consoleLogger;
-    this.#memo = new Memo(options.memoSize ?? 10_000);
+    this.#guard = new HoldGuard(this.#run, (key, input, signal, context) =>
+      this.#call(key, input, signal, context),
+    );
+    this.enrichSpan = this.#run.enrichSpan;
+    this.fetch = this.#run.fetch;
   }
-
-  /** Attributes to stamp on the AI SDK's spans: `authfi.agent_id` and `authfi.run_id`. */
-  readonly enrichSpan = (): Record<string, string> => ({
-    ...(this.#gateway.agentId === undefined ? {} : { 'authfi.agent_id': this.#gateway.agentId }),
-    'authfi.run_id': this.runId,
-  });
-
-  /**
-   * A `fetch` for the gateways: the current token on each request (never in a header a tracer
-   * reads), `X-Request-Id` `<runId>.<n>`, `traceparent`, no redirects, AuthFI's origins only. The
-   * request id the gateway answers is set on the active span.
-   */
-  readonly fetch: typeof fetch = async (input, init) => {
-    const headers = new Headers(new Request(input, init).headers);
-    if (!headers.has('x-request-id')) headers.set('x-request-id', `${this.runId}.${String(++this.#calls)}`);
-    const res = await this.#gateway.fetch(input, { ...init, headers });
-    const span = this.#otel?.trace.getActiveSpan();
-    const answered = res.headers.get('x-request-id');
-    if (span !== undefined && answered !== null) span.setAttribute('authfi.request_id', answered);
-    return res;
-  };
 
   /**
    * Settings for `createAnthropic` from `@ai-sdk/anthropic`: the AI gateway's model route.
@@ -206,7 +120,7 @@ export class VercelAIAdapter {
    */
   anthropic(): { baseURL: string; authToken: string; fetch: typeof fetch } {
     return {
-      baseURL: `${this.#gateway.modelBaseUrl('anthropic')}/v1`,
+      baseURL: `${this.#run.gateway.modelBaseUrl('anthropic')}/v1`,
       authToken: 'authfi',
       fetch: this.fetch,
     };
@@ -214,7 +128,7 @@ export class VercelAIAdapter {
 
   /** A transport for `createMCPClient` from `@ai-sdk/mcp`: the project's MCP gateway. */
   mcpTransport(): { type: 'http'; url: string; fetch: typeof fetch; redirect: 'error' } {
-    return { type: 'http', url: this.#gateway.mcpUrl, fetch: this.fetch, redirect: 'error' };
+    return { type: 'http', url: this.#run.gateway.mcpUrl, fetch: this.fetch, redirect: 'error' };
   }
 
   /**
@@ -230,9 +144,7 @@ export class VercelAIAdapter {
       const execute = (tool as { execute?: unknown }).execute;
       if (typeof execute !== 'function')
         throw new ConfigurationError(`MCP tool ${key} has no execute function`);
-      this.#tools.set(key, {
-        execute: execute as (input: unknown, options: Record<string, unknown>) => Promise<unknown>,
-      });
+      this.#tools.set(key, { execute: execute as ToolExecute });
       out[key] = {
         ...tool,
         execute: (input: unknown, opts: Record<string, unknown>) => this.#execute(key, input, opts),
@@ -243,58 +155,34 @@ export class VercelAIAdapter {
 
   /** The grant object of a tool (`mcp:<server>.<tool>`), for a CIBA request or a token exchange. */
   scope(tool: { readonly _meta?: Readonly<Record<string, unknown>> | undefined }): string | undefined {
-    return this.#gateway.scopeOf(tool);
+    return this.#run.gateway.scopeOf(tool);
   }
 
-  async #call(key: string, input: unknown, opts: Record<string, unknown> = {}): Promise<ToolResult> {
+  /** Sends one call to the gateway through the AI SDK's own tool, with the options it was given. */
+  async #call(
+    key: string,
+    input: unknown,
+    signal: AbortSignal | undefined,
+    context: unknown,
+  ): Promise<ToolResult> {
     const tool = this.#tools.get(key);
     if (tool === undefined)
       throw new ConfigurationError(`no AuthFI tool ${key}: pass the tools through authfi.tools() first`);
-    return (await tool.execute(input, opts)) as ToolResult;
-  }
-
-  #record(entry: Entry, result: ToolResult, approving: boolean): void {
-    const outcome = this.#gateway.readResult(result);
-    if (outcome.kind === 'approval_required') {
-      entry.status = 'pending';
-      entry.approvalId = outcome.approvalId;
-      entry.result = undefined;
-      return;
-    }
-    entry.result = result;
-    if (outcome.kind === 'refused') entry.status = approving ? 'denied' : 'refused';
-    else entry.status = approving ? 'approved' : 'allowed';
-  }
-
-  /** Asks the gateway again with the approval id: still pending, approved (the call ran), or refused. */
-  async #check(entry: Entry, opts: Record<string, unknown> = {}): Promise<void> {
-    const input = { ...(entry.input as Record<string, unknown>), [APPROVAL_ARGUMENT]: entry.approvalId };
-    this.#record(entry, await this.#call(entry.key, input, opts), true);
+    const { abortSignal: _stale, ...opts } = (context ?? {}) as Record<string, unknown>;
+    return (await tool.execute(
+      input,
+      signal === undefined ? opts : { ...opts, abortSignal: signal },
+    )) as ToolResult;
   }
 
   async #execute(key: string, raw: unknown, opts: Record<string, unknown>): Promise<unknown> {
-    const input = withoutApprovalArgument(raw, this.#logger, key);
-    const id = typeof opts.toolCallId === 'string' ? opts.toolCallId : undefined;
-    const known = id === undefined ? undefined : this.#memo.get(id);
-    if (
-      known?.result !== undefined &&
-      (known.status === 'allowed' || known.status === 'approved' || known.status === 'refused')
-    ) {
-      if (id !== undefined) this.#memo.delete(id);
-      return known.result;
-    }
-    if (known?.status === 'pending') {
-      await this.#check(known, opts);
-      return known.result ?? WAITING;
-    }
-    const entry: Entry = { key, input, status: 'new', approvalId: undefined, result: undefined };
-    this.#record(entry, await this.#call(key, input, opts), false);
-    // A hold's text tells the model how to retry with the approval id; the model never sees it.
-    if (entry.status === 'pending') {
-      if (id !== undefined) this.#memo.set(id, entry);
-      return WAITING;
-    }
-    return entry.result;
+    const given = typeof opts.toolCallId === 'string' ? opts.toolCallId : undefined;
+    const id = given ?? `anonymous-${String(++this.#anonymous)}`;
+    const signal = opts.abortSignal instanceof AbortSignal ? opts.abortSignal : undefined;
+    const result = await this.#guard.answer(id, key, raw, signal, opts);
+    // A held call stays remembered, under the AI SDK's id for it, until AuthFI decides.
+    if (given === undefined || this.#guard.entry(id)?.status !== 'pending') this.#guard.forget(id);
+    return result;
   }
 
   #approve(key: string) {
@@ -304,27 +192,19 @@ export class VercelAIAdapter {
     ): Promise<ApprovalDecision> => {
       const id = options.toolCallId;
       if (id === undefined) return { type: 'not-applicable' };
-      const input = withoutApprovalArgument(raw, this.#logger, key);
-      const entry = this.#memo.get(id) ?? (await this.#restore(key, input, id, options.messages));
-      if (entry === undefined) {
+      const known = this.#guard.entry(id) ?? (await this.#restore(key, raw, id, options.messages));
+      if (known === undefined) {
         // First evaluation: AuthFI decides when the call reaches the gateway, so it is made now, once.
-        const fresh: Entry = { key, input, status: 'new', approvalId: undefined, result: undefined };
-        this.#memo.set(id, fresh);
-        try {
-          this.#record(fresh, await this.#call(key, input), false);
-        } catch (e) {
-          this.#memo.delete(id);
-          throw e;
-        }
+        const fresh = await this.#guard.begin(id, key, raw);
         if (fresh.status === 'pending' && fresh.approvalId !== undefined)
           return { type: 'user-approval', reason: await this.#reasonFor(id, key, fresh.approvalId) };
         return { type: 'not-applicable' }; // allowed or refused: execute returns the answer AuthFI gave
       }
       // Evaluated again on resume: only AuthFI's decision counts.
-      if (entry.status === 'pending') await this.#check(entry);
-      if (entry.status === 'approved' || entry.status === 'allowed') return { type: 'approved' };
-      if (entry.status === 'pending') return { type: 'denied', reason: PENDING_REASON };
-      this.#memo.delete(id);
+      const decision = await this.#guard.decision(id);
+      if (decision === 'approved') return { type: 'approved' };
+      if (decision === 'pending') return { type: 'denied', reason: PENDING_REASON };
+      this.#guard.forget(id);
       return { type: 'denied', reason: DENIED_REASON };
     };
   }
@@ -346,15 +226,15 @@ export class VercelAIAdapter {
   }
 
   /**
-   * The memo entry of a call from another process, read back from the approval request's reason,
-   * only when its HMAC shows this adapter's secret bound that approval id to that tool call.
+   * The guard's entry for a call from another process, read back from the approval request's
+   * reason, only when its HMAC shows this adapter's secret bound that approval id to that tool call.
    */
   async #restore(
     key: string,
     input: unknown,
     toolCallId: string,
     messages: readonly unknown[] | undefined,
-  ): Promise<Entry | undefined> {
+  ): Promise<HoldEntry | undefined> {
     for (const m of messages ?? []) {
       const content = (m as { role?: string; content?: unknown }).content;
       if (!Array.isArray(content)) continue;
@@ -374,9 +254,7 @@ export class VercelAIAdapter {
           );
           return undefined;
         }
-        const entry: Entry = { key, input, status: 'pending', approvalId, result: undefined };
-        this.#memo.set(toolCallId, entry);
-        return entry;
+        return this.#guard.adopt(toolCallId, key, input, approvalId);
       }
     }
     return undefined;
@@ -434,50 +312,89 @@ export class VercelAIAdapter {
     role: 'tool';
     content: { type: 'tool-approval-response'; approvalId: string; approved: boolean; reason?: string }[];
   }> {
-    const timeout = options.timeoutMs ?? this.#timeoutMs;
-    const deadline = performance.now() + timeout;
-    const sleep =
-      options.sleep ??
-      ((ms: number, signal?: AbortSignal) =>
-        new Promise<void>((resolve, reject) => {
-          const t = setTimeout(resolve, ms);
-          signal?.addEventListener('abort', () => {
-            clearTimeout(t);
-            reject(signal.reason as Error);
-          });
-        }));
-    const content = await Promise.all(
-      this.pendingApprovals(result).map(async (part) => {
-        const { toolCallId, toolName } = part.toolCall;
-        const input: unknown = part.toolCall.input;
-        const entry =
-          this.#memo.get(toolCallId) ??
-          (await this.#restore(toolName, input, toolCallId, [{ content: [{ ...part, toolCallId }] }]));
-        if (entry === undefined)
-          throw new ConfigurationError(`no AuthFI approval is known for tool call ${toolCallId}`);
-        while (entry.status === 'pending') {
-          if (performance.now() + this.#pollMs > deadline) {
-            return {
-              type: 'tool-approval-response' as const,
-              approvalId: part.approvalId,
-              approved: false,
-              reason: PENDING_REASON,
-            };
-          }
-          await sleep(this.#pollMs, options.signal);
-          await this.#check(entry, options.signal === undefined ? {} : { abortSignal: options.signal });
-        }
-        const approved = entry.status === 'approved' || entry.status === 'allowed';
-        if (!approved) this.#memo.delete(toolCallId);
-        return {
-          type: 'tool-approval-response' as const,
-          approvalId: part.approvalId,
-          approved,
-          ...(approved ? {} : { reason: DENIED_REASON }),
-        };
-      }),
+    const parts = this.pendingApprovals(result);
+    for (const part of parts) {
+      const { toolCallId, toolName } = part.toolCall;
+      const input: unknown = part.toolCall.input;
+      const known =
+        this.#guard.entry(toolCallId) ??
+        (await this.#restore(toolName, input, toolCallId, [{ content: [{ ...part, toolCallId }] }]));
+      if (known === undefined)
+        throw new ConfigurationError(`no AuthFI approval is known for tool call ${toolCallId}`);
+    }
+    const decisions = await this.#guard.wait(
+      parts.map((p) => p.toolCall.toolCallId),
+      options,
     );
+    const content = parts.map((part) => {
+      const { toolCallId } = part.toolCall;
+      const decision = decisions.get(toolCallId) ?? 'denied';
+      if (decision === 'denied') this.#guard.forget(toolCallId);
+      return {
+        type: 'tool-approval-response' as const,
+        approvalId: part.approvalId,
+        approved: decision === 'approved',
+        ...(decision === 'approved'
+          ? {}
+          : { reason: decision === 'pending' ? PENDING_REASON : DENIED_REASON }),
+      };
+    });
     return { role: 'tool', content };
+  }
+
+  /**
+   * Sends this run's steps (model calls, tool calls) to AuthFI, in one line: registers the AI SDK's
+   * own OpenTelemetry integration (`@ai-sdk/otel`) over a tracer provider that exports to
+   * `<issuer>/otlp/v1/traces` under this credential, stamps `authfi.agent_id` and this run's
+   * `authfi.run_id` on every span, and records no content unless `captureContent` is on. Needs
+   * `@ai-sdk/otel`, `@opentelemetry/api`, `@opentelemetry/sdk-trace-base` and
+   * `@opentelemetry/otlp-transformer`.
+   *
+   * The AI SDK's `registerTelemetry` only adds integrations, so this adds one, once per adapter, and
+   * `shutdown()` takes it out again and sends what is buffered: call it before the process exits.
+   *
+   * @example
+   * const steps = await authfi.exportSteps();
+   * // ... generateText(...) ...
+   * await steps.shutdown();
+   */
+  async exportSteps(
+    options: { scheduleDelayMs?: number | undefined } = {},
+  ): Promise<import('../otel/index.js').AuthFITelemetry> {
+    this.#steps ??= this.#startSteps(options);
+    return this.#steps;
+  }
+
+  async #startSteps(options: {
+    scheduleDelayMs?: number | undefined;
+  }): Promise<import('../otel/index.js').AuthFITelemetry> {
+    const [{ registerAuthFITelemetry }, { OpenTelemetry }, { registerTelemetry }] = await Promise.all([
+      import('../otel/index.js'),
+      import('@ai-sdk/otel'),
+      import('ai'),
+    ]);
+    const telemetry = registerAuthFITelemetry({
+      source: this.#source,
+      runId: this.runId,
+      captureContent: this.captureContent,
+      global: false,
+      logger: this.#logger,
+      scheduleDelayMs: options.scheduleDelayMs,
+    });
+    const integration = this.telemetry(new OpenTelemetry({ tracer: telemetry.tracer }));
+    registerTelemetry(integration);
+    return {
+      ...telemetry,
+      shutdown: async () => {
+        // The AI SDK has no way to unregister; take our integration out of its list by identity.
+        const list = (globalThis as { AI_SDK_TELEMETRY_INTEGRATIONS?: unknown[] })
+          .AI_SDK_TELEMETRY_INTEGRATIONS;
+        const at = list?.indexOf(integration) ?? -1;
+        if (at >= 0) list?.splice(at, 1);
+        this.#steps = undefined;
+        await telemetry.shutdown();
+      },
+    };
   }
 
   /**
@@ -510,7 +427,7 @@ export class VercelAIAdapter {
 
   /** How many tool calls the adapter remembers right now. */
   get remembered(): number {
-    return this.#memo.length;
+    return this.#guard.remembered;
   }
 }
 

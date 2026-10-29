@@ -59,3 +59,15 @@ export function traceIdOf(traceparent: string | null | undefined): string | unde
   const m = /^[0-9a-f]{2}-([0-9a-f]{32})-[0-9a-f]{16}-[0-9a-f]{2}$/.exec(traceparent?.trim() ?? '');
   return m?.[1];
 }
+
+const RUN_ID = /^[A-Za-z0-9._:-]{1,96}$/;
+
+/** Whether `id` can be a run id: it prefixes `X-Request-Id`, so it stays inside that alphabet, in 96 characters. */
+export function isValidRunId(id: string): boolean {
+  return RUN_ID.test(id);
+}
+
+/** A fresh run id, `run-` and 24 hex characters: one per agent run, on every gateway call and span of it. */
+export function newRunId(): string {
+  return `run-${Array.from(randomBytes(12), (b) => b.toString(16).padStart(2, '0')).join('')}`;
+}

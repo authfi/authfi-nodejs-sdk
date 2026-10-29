@@ -1,0 +1,185 @@
+{
+  "description": "AuthFI webhook conformance vectors: verify each delivery with `secret` at `now` (seconds) and `tolerance_seconds`. The signature is hex(HMAC-SHA256(secret, timestamp + \".\" + body)) as `sha256=<hex>` in X-AuthFI-Signature-256, as the platform's webhook dispatcher signs it. `expect` is `ok` or the refusal code. Headers are case-insensitive.",
+  "secret": "whsec_conformance_secret_1",
+  "now": 1792497600,
+  "tolerance_seconds": 300,
+  "events": [
+    "user.created",
+    "user.updated",
+    "user.deleted",
+    "user.blocked",
+    "user.mfa_enrolled",
+    "group.member_added",
+    "group.member_removed",
+    "organization.created",
+    "role.assigned",
+    "session.revoked",
+    "login.success",
+    "login.failed"
+  ],
+  "cases": [
+    {
+      "name": "fresh delivery",
+      "body": "{\"id\":\"req_01\",\"event\":\"user.created\",\"timestamp\":\"2026-10-20T11:59:58Z\",\"data\":{\"actor\":\"user:u1\",\"subject\":\"user:u2\",\"resource_type\":\"user\",\"resource_id\":\"u2\"}}",
+      "headers": {
+        "X-AuthFI-Timestamp": "1792497598",
+        "X-AuthFI-Signature-256": "sha256=6c08241e6038b9da648d98f7e2e4212804877ea23ca21e75069fd14509b92ca3",
+        "X-AuthFI-Delivery": "del_1",
+        "X-AuthFI-Event": "user.created"
+      },
+      "expect": "ok",
+      "type": "user.created",
+      "resource_id": "u2"
+    },
+    {
+      "name": "non-ASCII body",
+      "body": "{\"id\":\"req_02\",\"event\":\"role.assigned\",\"timestamp\":\"2026-10-20T11:59:58Z\",\"data\":{\"subject\":\"user:ü-é\",\"resource_type\":\"role\",\"resource_id\":\"r1\"}}",
+      "headers": {
+        "X-AuthFI-Timestamp": "1792497600",
+        "X-AuthFI-Signature-256": "sha256=bd05767a457ed5e2e616b7f783ba8977d3da71f714f0fc58b4623349743ea723",
+        "X-AuthFI-Delivery": "del_1",
+        "X-AuthFI-Event": "user.created"
+      },
+      "expect": "ok",
+      "type": "role.assigned",
+      "resource_id": "r1"
+    },
+    {
+      "name": "edge of the window",
+      "body": "{\"id\":\"req_01\",\"event\":\"user.created\",\"timestamp\":\"2026-10-20T11:59:58Z\",\"data\":{\"actor\":\"user:u1\",\"subject\":\"user:u2\",\"resource_type\":\"user\",\"resource_id\":\"u2\"}}",
+      "headers": {
+        "X-AuthFI-Timestamp": "1792497300",
+        "X-AuthFI-Signature-256": "sha256=9891316ac64fe49962cd6fe6c26d0d1d5a8f2b97f0da95a0ba8eb71406b02ee4",
+        "X-AuthFI-Delivery": "del_1",
+        "X-AuthFI-Event": "user.created"
+      },
+      "expect": "ok",
+      "type": "user.created",
+      "resource_id": "u2"
+    },
+    {
+      "name": "one second past the window",
+      "body": "{\"id\":\"req_01\",\"event\":\"user.created\",\"timestamp\":\"2026-10-20T11:59:58Z\",\"data\":{\"actor\":\"user:u1\",\"subject\":\"user:u2\",\"resource_type\":\"user\",\"resource_id\":\"u2\"}}",
+      "headers": {
+        "X-AuthFI-Timestamp": "1792497299",
+        "X-AuthFI-Signature-256": "sha256=f81ee7235a4dbe2908a676a03c46148c9a1ab2bfdf5b74d5a59fc8415ff21592",
+        "X-AuthFI-Delivery": "del_1",
+        "X-AuthFI-Event": "user.created"
+      },
+      "expect": "webhook_timestamp_outside_tolerance"
+    },
+    {
+      "name": "a timestamp from the future",
+      "body": "{\"id\":\"req_01\",\"event\":\"user.created\",\"timestamp\":\"2026-10-20T11:59:58Z\",\"data\":{\"actor\":\"user:u1\",\"subject\":\"user:u2\",\"resource_type\":\"user\",\"resource_id\":\"u2\"}}",
+      "headers": {
+        "X-AuthFI-Timestamp": "1792497901",
+        "X-AuthFI-Signature-256": "sha256=100bed9e180321f069ff79b99377f0190b35a0c85c59ff17e5a9409900aaff45",
+        "X-AuthFI-Delivery": "del_1",
+        "X-AuthFI-Event": "user.created"
+      },
+      "expect": "webhook_timestamp_outside_tolerance"
+    },
+    {
+      "name": "body altered after signing",
+      "body": "{\"id\":\"req_01\",\"event\":\"user.created\",\"timestamp\":\"2026-10-20T11:59:58Z\",\"data\":{\"actor\":\"user:u1\",\"subject\":\"user:u3\",\"resource_type\":\"user\",\"resource_id\":\"u3\"}}",
+      "headers": {
+        "X-AuthFI-Timestamp": "1792497600",
+        "X-AuthFI-Signature-256": "sha256=5d716fe6a1aa70f17a46ab31ac4b5f63e0913900c7feb602f507cc744610c6da",
+        "X-AuthFI-Delivery": "del_1",
+        "X-AuthFI-Event": "user.created"
+      },
+      "expect": "webhook_signature_invalid"
+    },
+    {
+      "name": "signed with another secret",
+      "body": "{\"id\":\"req_01\",\"event\":\"user.created\",\"timestamp\":\"2026-10-20T11:59:58Z\",\"data\":{\"actor\":\"user:u1\",\"subject\":\"user:u2\",\"resource_type\":\"user\",\"resource_id\":\"u2\"}}",
+      "headers": {
+        "X-AuthFI-Timestamp": "1792497600",
+        "X-AuthFI-Signature-256": "sha256=dfed0adc0babf9d668e8f9af54b22742612a3e3291158a5cd7ee5de7677e6fee",
+        "X-AuthFI-Delivery": "del_1",
+        "X-AuthFI-Event": "user.created"
+      },
+      "expect": "webhook_signature_invalid"
+    },
+    {
+      "name": "timestamp altered after signing",
+      "body": "{\"id\":\"req_01\",\"event\":\"user.created\",\"timestamp\":\"2026-10-20T11:59:58Z\",\"data\":{\"actor\":\"user:u1\",\"subject\":\"user:u2\",\"resource_type\":\"user\",\"resource_id\":\"u2\"}}",
+      "headers": {
+        "X-AuthFI-Timestamp": "1792497600",
+        "X-AuthFI-Signature-256": "sha256=e24f2fb5e124485f17e604eb5b90b0a96ad356116842970c28d2f0bcd135c089",
+        "X-AuthFI-Delivery": "del_1",
+        "X-AuthFI-Event": "user.created"
+      },
+      "expect": "webhook_signature_invalid"
+    },
+    {
+      "name": "signature header missing",
+      "body": "{\"id\":\"req_01\",\"event\":\"user.created\",\"timestamp\":\"2026-10-20T11:59:58Z\",\"data\":{\"actor\":\"user:u1\",\"subject\":\"user:u2\",\"resource_type\":\"user\",\"resource_id\":\"u2\"}}",
+      "headers": {
+        "X-AuthFI-Timestamp": "1792497600"
+      },
+      "expect": "webhook_signature_missing"
+    },
+    {
+      "name": "signature without the sha256= prefix",
+      "body": "{\"id\":\"req_01\",\"event\":\"user.created\",\"timestamp\":\"2026-10-20T11:59:58Z\",\"data\":{\"actor\":\"user:u1\",\"subject\":\"user:u2\",\"resource_type\":\"user\",\"resource_id\":\"u2\"}}",
+      "headers": {
+        "X-AuthFI-Timestamp": "1792497600",
+        "X-AuthFI-Signature-256": "5d716fe6a1aa70f17a46ab31ac4b5f63e0913900c7feb602f507cc744610c6da",
+        "X-AuthFI-Delivery": "del_1",
+        "X-AuthFI-Event": "user.created"
+      },
+      "expect": "webhook_signature_malformed"
+    },
+    {
+      "name": "signature of the wrong length",
+      "body": "{\"id\":\"req_01\",\"event\":\"user.created\",\"timestamp\":\"2026-10-20T11:59:58Z\",\"data\":{\"actor\":\"user:u1\",\"subject\":\"user:u2\",\"resource_type\":\"user\",\"resource_id\":\"u2\"}}",
+      "headers": {
+        "X-AuthFI-Timestamp": "1792497600",
+        "X-AuthFI-Signature-256": "sha256=abcd",
+        "X-AuthFI-Delivery": "del_1",
+        "X-AuthFI-Event": "user.created"
+      },
+      "expect": "webhook_signature_malformed"
+    },
+    {
+      "name": "timestamp header missing",
+      "body": "{\"id\":\"req_01\",\"event\":\"user.created\",\"timestamp\":\"2026-10-20T11:59:58Z\",\"data\":{\"actor\":\"user:u1\",\"subject\":\"user:u2\",\"resource_type\":\"user\",\"resource_id\":\"u2\"}}",
+      "headers": {
+        "X-AuthFI-Signature-256": "sha256=5d716fe6a1aa70f17a46ab31ac4b5f63e0913900c7feb602f507cc744610c6da"
+      },
+      "expect": "webhook_timestamp_invalid"
+    },
+    {
+      "name": "timestamp not a whole number",
+      "body": "{\"id\":\"req_01\",\"event\":\"user.created\",\"timestamp\":\"2026-10-20T11:59:58Z\",\"data\":{\"actor\":\"user:u1\",\"subject\":\"user:u2\",\"resource_type\":\"user\",\"resource_id\":\"u2\"}}",
+      "headers": {
+        "X-AuthFI-Timestamp": "12.5",
+        "X-AuthFI-Signature-256": "sha256=02cc62dda946cbf235c801ab1f72d9c8932a2400ca0da86e93624222e42b5665"
+      },
+      "expect": "webhook_timestamp_invalid"
+    },
+    {
+      "name": "signed body is not JSON",
+      "body": "not json",
+      "headers": {
+        "X-AuthFI-Timestamp": "1792497600",
+        "X-AuthFI-Signature-256": "sha256=7759f1f83c91a933407e1f119c663d2256e3bcef9254458a4213cb2d393e34a5",
+        "X-AuthFI-Delivery": "del_1",
+        "X-AuthFI-Event": "user.created"
+      },
+      "expect": "webhook_body_invalid"
+    },
+    {
+      "name": "signed body is not an event",
+      "body": "{\"hello\":\"world\"}",
+      "headers": {
+        "X-AuthFI-Timestamp": "1792497600",
+        "X-AuthFI-Signature-256": "sha256=c0209057b2d289b5bfd98584ab966f4acc414da132fc371c4d65c49219268606",
+        "X-AuthFI-Delivery": "del_1",
+        "X-AuthFI-Event": "user.created"
+      },
+      "expect": "webhook_body_invalid"
+    }
+  ]
+}
