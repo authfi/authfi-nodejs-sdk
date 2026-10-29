@@ -265,6 +265,23 @@ export class HoldGuard {
     return entry;
   }
 
+  /**
+   * Remembers a call that waits on a person and that this process did not send, from the approval
+   * id read back by the caller (who has proven it is AuthFI's, not a model's or a browser's).
+   */
+  adopt(id: string, key: string, raw: unknown, approvalId: string, context?: unknown): HoldEntry {
+    const entry: HoldEntry = {
+      key,
+      input: withoutApprovalArgument(raw, this.#run.logger, key),
+      status: 'pending',
+      approvalId,
+      result: undefined,
+      context,
+    };
+    this.#remember(id, entry);
+    return entry;
+  }
+
   /** The remembered call, if any. */
   entry(id: string): HoldEntry | undefined {
     return this.#memo.get(id);
@@ -330,12 +347,18 @@ export class HoldGuard {
     const out = new Map<string, Decision>();
     await Promise.all(
       (ids ?? this.pending().map((p) => p.id)).map(async (id) => {
-        let d = await this.decision(id, options.signal);
-        while (d === 'pending' && performance.now() + this.#run.pollMs <= deadline) {
-          await sleep(this.#run.pollMs, options.signal);
-          d = await this.decision(id, options.signal);
+        try {
+          let d = await this.decision(id, options.signal);
+          while (d === 'pending' && performance.now() + this.#run.pollMs <= deadline) {
+            await sleep(this.#run.pollMs, options.signal);
+            d = await this.decision(id, options.signal);
+          }
+          out.set(id, d === 'unknown' ? 'denied' : d);
+        } catch (e) {
+          // A stop the caller asked for is reported as the caller's own reason, wherever it landed.
+          if (options.signal?.aborted === true) throw options.signal.reason as Error;
+          throw e;
         }
-        out.set(id, d === 'unknown' ? 'denied' : d);
       }),
     );
     return out;

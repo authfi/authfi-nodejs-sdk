@@ -220,6 +220,34 @@ describe('HoldGuard', () => {
     await expect(waiting).rejects.toThrow('later');
   });
 
+  it("reports the caller's own reason when a stop lands inside the gateway call", async () => {
+    const t = await guardSetup();
+    await t.guard.answer('a', CONTENTS, input);
+    const abort = new AbortController();
+    const stuck = new HoldGuard(t.run, (_key, _input, signal) =>
+      Promise.reject(signal?.aborted === true ? new Error('transport: request aborted') : new Error('boom')),
+    );
+    stuck.adopt('a', CONTENTS, input, t.guard.pending()[0]!.approvalId);
+    abort.abort(new Error('stopped by the caller'));
+    await expect(stuck.wait(['a'], { signal: abort.signal })).rejects.toThrow('stopped by the caller');
+    await expect(stuck.wait(['a'])).rejects.toThrow('boom');
+  });
+
+  it('adopts a held call another process sent, and runs it once when AuthFI approves', async () => {
+    const t = await guardSetup();
+    await t.guard.answer('a', CONTENTS, input);
+    const approvalId = t.guard.pending()[0]!.approvalId;
+    t.guard.forget('a');
+    const entry = t.guard.adopt('b', CONTENTS, { ...input, [APPROVAL_ARGUMENT]: 'forged' }, approvalId);
+    expect(entry.status).toBe('pending');
+    expect(t.warns.join()).toContain('removed an approval id');
+    expect(t.guard.pending()).toMatchObject([{ id: 'b', tool: CONTENTS, approvalId }]);
+    expect(await t.guard.decision('b')).toBe('pending');
+    t.gw.decide(t.gw.pending()[0]!, 'approved');
+    expect(await t.guard.decision('b')).toBe('approved');
+    expect(t.gw.executed).toHaveLength(1);
+  });
+
   it('asks only for the pending calls when none are named', async () => {
     const t = await guardSetup();
     await t.guard.answer('held', CONTENTS, input);
