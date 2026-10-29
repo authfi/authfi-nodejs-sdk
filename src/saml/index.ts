@@ -512,7 +512,7 @@ export class SamlServiceProvider {
     if (!/^[A-Za-z0-9+/]+={0,2}$/.test(given) || given.length % 4 !== 0) {
       throw new SamlAssertionRefused('saml_xml_invalid', 'the SAMLResponse is not base64');
     }
-    const text = Buffer.from(given, 'base64').toString('utf8');
+    const text = atob(given);
     if (/<!DOCTYPE|<!ENTITY/i.test(text)) {
       throw new SamlAssertionRefused('saml_xml_invalid', 'the SAMLResponse declares a DTD');
     }
