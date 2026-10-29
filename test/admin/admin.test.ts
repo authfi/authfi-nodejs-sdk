@@ -324,6 +324,29 @@ describe('refusals', () => {
     expect(t.fake.requests.some((r) => r.url.includes('/apis/regional/'))).toBe(false);
   });
 
+  it('works with the documented setup: the token is for authfi-console and goes to the project origin', async () => {
+    const t = await TestIssuer.create();
+    const af = new AuthFI({
+      issuer: t.issuer,
+      fetch: t.fake.fetch,
+      logger: { debug() {}, info() {}, warn() {}, error() {} },
+    });
+    t.fake.on('POST', `${ISSUER}/oauth/token`, () =>
+      json({ access_token: 'at-console', token_type: 'Bearer', expires_in: 900 }),
+    );
+    t.fake.on('GET', `${V1}/organizations`, () => page([orgWire()]));
+    const m2m = af.clientCredentials({
+      clientId: 'app_admin',
+      clientSecret: new Secret('s'),
+      resource: 'authfi-console',
+      sendTo: [af.apiOrigin],
+    });
+    await new AdminClient(af, m2m).organizations.list();
+    const tokenRequest = t.fake.to(`${ISSUER}/oauth/token`)[0]!;
+    expect(new URLSearchParams(tokenRequest.body).get('resource')).toBe('authfi-console');
+    expect(t.fake.to(`${V1}/organizations`)[0]!.headers.get('authorization')).toBe('Bearer at-console');
+  });
+
   it('refuses a credential that is not one', async () => {
     const { af } = await setup();
     expect(() => new AdminClient(af, 'token' as unknown as Secret)).toThrow(ConfigurationError);
