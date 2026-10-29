@@ -426,8 +426,8 @@ export class VercelAIAdapter {
   async awaitApprovals(
     result: { readonly content?: readonly unknown[] },
     options: {
-      signal?: AbortSignal;
-      timeoutMs?: number;
+      signal?: AbortSignal | undefined;
+      timeoutMs?: number | undefined;
       sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
     } = {},
   ): Promise<{

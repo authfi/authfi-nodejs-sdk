@@ -26,6 +26,9 @@ export {
   InsufficientAuthentication,
   InsufficientPermission,
   InsufficientScope,
+  InvalidCallback,
+  InvalidIdToken,
+  InvalidPendingSignIn,
   InvalidToken,
   isAuthFIError,
   NotSupportedError,
@@ -86,3 +89,13 @@ export {
   type ToolOutcome,
   type ToolResult,
 } from './gateway/gateway.js';
+export {
+  WebApp,
+  type SignedIn,
+  type SignInCallback,
+  type SignInRequest,
+  type UserInfo,
+  type WebAppOptions,
+} from './signin/web-app.js';
+export { PendingSignIn } from './signin/pending.js';
+export type { IdTokenClaims } from './signin/id-token.js';

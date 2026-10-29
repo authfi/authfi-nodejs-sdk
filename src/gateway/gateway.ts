@@ -190,10 +190,10 @@ export class Gateway {
   async cloudCredentials(request: {
     account: string;
     role: string;
-    expiresInSeconds?: number;
-    sessionPolicy?: Readonly<Record<string, unknown>>;
-    approvalId?: string;
-    signal?: AbortSignal;
+    expiresInSeconds?: number | undefined;
+    sessionPolicy?: Readonly<Record<string, unknown>> | undefined;
+    approvalId?: string | undefined;
+    signal?: AbortSignal | undefined;
   }): Promise<CloudCredentialOutcome> {
     if (!request.account || !request.role) throw new ConfigurationError('account and role are required');
     const seconds = request.expiresInSeconds;

@@ -162,7 +162,10 @@ export class AgentKey implements Signer {
    * `generateAgentKeyFile` in `@authfi/sdk/node`. The kid defaults to the RFC 7638 thumbprint of the
    * public key.
    */
-  static async generate(alg: AgentAlgorithm = 'EdDSA', options: { kid?: string } = {}): Promise<AgentKey> {
+  static async generate(
+    alg: AgentAlgorithm = 'EdDSA',
+    options: { kid?: string | undefined } = {},
+  ): Promise<AgentKey> {
     const pair = await generatePair(alg);
     const pub = await exportJWK(pair.publicKey);
     const kid = options.kid ?? (await calculateJwkThumbprint(pub, 'sha256'));
@@ -190,16 +193,16 @@ export class AgentKey implements Signer {
 
   /** Loads a private JWK. Its own `kid` is used unless one is given. */
   static async fromJwk(
-    jwk: JsonWebKey & { kid?: string },
-    options: { kid?: string } = {},
+    jwk: JsonWebKey & { kid?: string | undefined },
+    options: { kid?: string | undefined } = {},
   ): Promise<AgentKey> {
     if (typeof jwk !== 'object' || typeof jwk.d !== 'string') {
       throw new ConfigurationError(
         'this JWK has no private member: signing needs the private key the agent holds',
       );
     }
-    const alg = algorithmOf(jwk);
-    return AgentKey.#fromFullJwk(jwk, alg, options.kid ?? jwk.kid ?? '');
+    const alg = algorithmOf(jwk as JWK);
+    return AgentKey.#fromFullJwk(jwk as JWK, alg, options.kid ?? jwk.kid ?? '');
   }
 
   static async #fromFullJwk(full: JWK, alg: AgentAlgorithm, kid: string): Promise<AgentKey> {

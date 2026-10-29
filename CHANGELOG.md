@@ -26,6 +26,14 @@ All notable changes to this package. It follows [Semantic Versioning](https://se
 - **`TokenSource`**, the one credential interface, with an origin guard on `headers()` and `fetch`.
 - **`TokenSet`, `TokenStore` and `MemoryTokenStore`** for people's tokens.
 - TypeScript source, built to ESM and CommonJS with generated types.
+- **People signing in to a server-rendered app**: `af.webApp({ clientId, clientSecret?, redirectUri,
+  stateKey })` with `startSignIn` (PKCE S256, `state`, `nonce`), an encrypted `PendingSignIn`
+  (`dump`, `loadPending`), `finishSignIn` (`iss` required, constant-time `state`, the code redeemed
+  once, the ID token verified), `refresh` (single-flight), `userinfo`, `signOut` (revokes the refresh
+  token, or the access token when there is none, then the end-session URL), `session(tokens, { key,
+  store })`, and `StepUpRequired` for a weaker
+  sign-in. `InvalidCallback` (`callback_*`), `InvalidIdToken` (`id_token_*`) and `InvalidPendingSignIn`
+  (`pending_sign_in_malformed`, `_tampered`, `_expired`), the same classes and codes as the Python SDK.
 - **A strict verifier**, `af.verifier({ audience, expectedTenantId })`: `typ at+jwt`, the algorithm
   pinned to the issuer's key (`RS256`, `ES256`, `EdDSA`), `iss`, a required audience that is never
   AuthFI's own, `exp`/`nbf`/`iat` with leeway, `sub`, the tenant pin, bound tokens and actor chains.
