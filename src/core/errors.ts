@@ -63,7 +63,13 @@ export type SdkErrorCode =
   | 'callback_parameter_repeated'
   | 'id_token_subject_changed'
   | 'userinfo_subject_mismatch'
-  | 'wait_timeout';
+  | 'wait_timeout'
+  | 'webhook_signature_missing'
+  | 'webhook_signature_malformed'
+  | 'webhook_signature_invalid'
+  | 'webhook_timestamp_invalid'
+  | 'webhook_timestamp_outside_tolerance'
+  | 'webhook_body_invalid';
 
 /** Every code this SDK knows by name. */
 export type KnownCode = KernelTokenCode | OAuthErrorCode | SdkErrorCode;
@@ -356,6 +362,29 @@ export class InvalidPendingSignIn extends AuthFIError {
   }
 }
 
+/**
+ * A webhook delivery that could not be trusted: its signature header is missing or malformed
+ * (`webhook_signature_missing`, `webhook_signature_malformed`), the signature does not match
+ * (`webhook_signature_invalid`), the timestamp is unreadable or outside the tolerance window
+ * (`webhook_timestamp_invalid`, `webhook_timestamp_outside_tolerance`), or the signed body is not an
+ * event (`webhook_body_invalid`). Answer 400 and do not act on the delivery.
+ */
+export class InvalidWebhook extends AuthFIError {
+  override readonly name: string = 'InvalidWebhook';
+  constructor(
+    code:
+      | 'webhook_signature_missing'
+      | 'webhook_signature_malformed'
+      | 'webhook_signature_invalid'
+      | 'webhook_timestamp_invalid'
+      | 'webhook_timestamp_outside_tolerance'
+      | 'webhook_body_invalid',
+    message: string,
+  ) {
+    super(code, message, { status: 400 });
+  }
+}
+
 /** The error classes by name, for {@link isAuthFIError}'s second argument. */
 export interface AuthFIErrorKinds {
   AuthFIError: AuthFIError;
@@ -380,6 +409,7 @@ export interface AuthFIErrorKinds {
   InvalidCallback: InvalidCallback;
   InvalidIdToken: InvalidIdToken;
   InvalidPendingSignIn: InvalidPendingSignIn;
+  InvalidWebhook: InvalidWebhook;
 }
 
 const PARENTS: Readonly<Record<string, string>> = {
@@ -404,6 +434,7 @@ const PARENTS: Readonly<Record<string, string>> = {
   InvalidCallback: 'AuthFIError',
   InvalidIdToken: 'AuthFIError',
   InvalidPendingSignIn: 'AuthFIError',
+  InvalidWebhook: 'AuthFIError',
 };
 
 /**

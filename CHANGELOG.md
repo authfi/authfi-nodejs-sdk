@@ -12,6 +12,16 @@ All notable changes to this package. It follows [Semantic Versioning](https://se
   `publicUrl`, `trustForwarded`, `replayGuard`, `nonceKey`, `rootPins`/`rootCerts`, and
   `@authfi/sdk/signals` (receiver, revocation store, `registerStream`). `verify()` refuses an agent's
   token (`agent_token_needs_request`). `protect()` no longer takes `publicUrl`: set it on the verifier.
+- **Webhook verification**: `verifyWebhook({ body, headers, secret })` checks
+  `X-AuthFI-Signature-256` (HMAC-SHA256 over `<timestamp>.<body>`) in constant time with Web Crypto,
+  enforces a timestamp window (300 seconds by default), and returns a typed event. Refusals are
+  `InvalidWebhook` with a code (`webhook_signature_invalid`, `webhook_timestamp_outside_tolerance`,
+  and others). `WEBHOOK_EVENTS` lists the platform's event names. Shared vectors:
+  `conformance/webhooks.json`.
+- **`@authfi/sdk/admin`**: `new AdminClient(af, credential)` for organizations (members,
+  invitations, accepting an invitation, join requests), users, roles, permissions and role bindings,
+  on `<origin>/apis/regional/v1`, with typed models, cursor pagination (`list`, `all`) and the
+  platform's refusals as `APIError`.
 - **One core for every area.** `new AuthFI({ issuer })` (or `AuthFI.fromEnv()`) is the project: its
   discovery, key set and one HTTP transport. The issuer is the only required setting; every endpoint
   comes from the issuer's discovery document.
