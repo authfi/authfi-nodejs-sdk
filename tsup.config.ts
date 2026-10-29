@@ -6,6 +6,7 @@ import { defineConfig } from 'tsup';
 export default defineConfig({
   entry: {
     index: 'src/index.ts',
+    admin: 'src/admin/index.ts',
     express: 'src/express/index.ts',
     node: 'src/node/index.ts',
     'vercel-ai': 'src/vercel-ai/index.ts',

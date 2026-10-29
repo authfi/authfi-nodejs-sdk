@@ -48,6 +48,8 @@ export default defineConfig({
         'src/gateway/**': { lines: 95, branches: 90 },
         'src/vercel-ai/**': { lines: 85 },
         'src/signin/**': { lines: 95, branches: 90 },
+        'src/webhooks/**': { lines: 95, branches: 95 },
+        'src/admin/**': { lines: 95, branches: 90 },
       },
     },
   },

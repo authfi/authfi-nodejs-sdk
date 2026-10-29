@@ -252,6 +252,75 @@ answer. Never give a hold's text to a model: it names the approval. An adapter s
 
 Framework packages are optional peer dependencies; install the ones you use.
 
+## Webhooks
+
+AuthFI signs every delivery: `X-AuthFI-Signature-256: sha256=<hex>`, the HMAC-SHA256 of
+`<X-AuthFI-Timestamp>.<raw body>` under the subscription's secret (returned once, when the
+subscription is created). `verifyWebhook` checks it in constant time and the timestamp against a
+5-minute window, and returns the typed event. Hand it the **raw** body: a parsed and re-serialised
+body no longer matches.
+
+```ts
+import express from 'express';
+import { isAuthFIError, Secret, verifyWebhook } from '@authfi/sdk';
+
+const secret = new Secret(process.env.AUTHFI_WEBHOOK_SECRET!);
+
+app.post('/hooks/authfi', express.raw({ type: 'application/json' }), async (req, res) => {
+  try {
+    const event = await verifyWebhook({ body: req.body, headers: req.headers, secret });
+    switch (event.type) {
+      case 'user.deleted':
+        await removeAccount(event.data.resourceId);
+        break;
+      default: // the platform can add events without an SDK release
+    }
+    res.sendStatus(204);
+  } catch (e) {
+    if (isAuthFIError(e, 'InvalidWebhook')) return res.sendStatus(400); // e.code says why
+    throw e;
+  }
+});
+```
+
+`WEBHOOK_EVENTS` lists the event names. The delivery id (`event.deliveryId`) is not signed: use it to
+drop repeats, never to decide what to trust. `toleranceSeconds` narrows or widens the window.
+
+## Administer the project
+
+`@authfi/sdk/admin` is the project's administration API: organizations (members, invitations, join
+requests), users, roles, permissions and role bindings. The credential decides what is allowed: the
+platform gates each call on a permission (`manage:organizations`, `manage:users`, `manage:roles`,
+`read:policy`) and on the project's plan, and a refusal is an `APIError` with `status` (401, 402,
+403) and `code`.
+
+```ts
+import { AdminClient } from '@authfi/sdk/admin';
+
+// No `resource`: this token is for AuthFI's own API, whose origin it may go to. The "no resource"
+// warning is for tokens meant for your own API.
+const m2m = af.clientCredentials({ clientId, clientSecret: new Secret(process.env.AUTHFI_CLIENT_SECRET!) });
+const admin = new AdminClient(af, m2m);
+
+const org = await admin.organizations.create({ slug: 'initech', displayName: 'Initech' });
+const invite = await admin.organizations.invitations.create(org.id, { email: 'ada@initech.example', role: 'admin' });
+// The platform does not email it: send invite.token.reveal() to the invitee.
+
+for await (const user of admin.users.all({ query: 'ada' })) console.log(user.id, user.status);
+
+const role = await admin.roles.create({ name: 'billing' });
+await admin.bindings.assign({ subject: 'user:usr_1', roleId: role.id });
+```
+
+Lists return a `Page` (`items`, `nextCursor`, `hasMore`) and have an `all()` that walks the pages.
+Two things to know:
+
+- **Organization roles are not PDP roles.** `members.add(orgId, { userId, role })` sets the person's
+  role inside that organization; `admin.bindings` grants tenant-wide roles.
+- **Some calls need a person.** Accepting an invitation (`invitations.accept`, with the invitee's own
+  token in a `Secret`) and the join-request calls are refused for a machine client. Asking to join
+  happens at sign-up and is not in the public API.
+
 ## Examples
 
 | Example | |

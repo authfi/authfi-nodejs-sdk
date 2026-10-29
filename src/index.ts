@@ -30,6 +30,7 @@ export {
   InvalidIdToken,
   InvalidPendingSignIn,
   InvalidToken,
+  InvalidWebhook,
   isAuthFIError,
   NotSupportedError,
   OAuthError,
@@ -99,3 +100,15 @@ export {
 } from './signin/web-app.js';
 export { PendingSignIn } from './signin/pending.js';
 export type { IdTokenClaims } from './signin/id-token.js';
+export {
+  DEFAULT_TOLERANCE_SECONDS,
+  DELIVERY_HEADER,
+  SIGNATURE_HEADER,
+  TIMESTAMP_HEADER,
+  verifyWebhook,
+  type VerifyWebhookOptions,
+  type WebhookEvent,
+  type WebhookEventData,
+  type WebhookHeaders,
+} from './webhooks/verify.js';
+export { WEBHOOK_EVENTS, type WebhookEventName } from './webhooks/events.js';
