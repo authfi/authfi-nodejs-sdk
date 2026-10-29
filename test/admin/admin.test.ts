@@ -33,7 +33,8 @@ const invWire = (over: Record<string, unknown> = {}) => ({
   ...over,
 });
 
-const page = (items: unknown[], next = '') => json({ data: { data: items, next_cursor: next, has_more: next !== '' } });
+const page = (items: unknown[], next = '') =>
+  json({ data: { data: items, next_cursor: next, has_more: next !== '' } });
 
 async function setup() {
   const t = await TestIssuer.create();
@@ -76,7 +77,9 @@ describe('organizations', () => {
   it('gets, updates with only the fields given, and deletes', async () => {
     const { t, admin } = await setup();
     t.fake.on('GET', `${V1}/organizations/${ORG}`, () => json({ data: orgWire() }));
-    t.fake.on('PATCH', `${V1}/organizations/${ORG}`, () => json({ data: orgWire({ display_name: 'Initech 2' }) }));
+    t.fake.on('PATCH', `${V1}/organizations/${ORG}`, () =>
+      json({ data: orgWire({ display_name: 'Initech 2' }) }),
+    );
     t.fake.on('DELETE', `${V1}/organizations/${ORG}`, () => new Response(null, { status: 204 }));
     expect((await admin.organizations.get(ORG)).slug).toBe('initech');
     const updated = await admin.organizations.update(ORG, { displayName: 'Initech 2' });
@@ -91,9 +94,7 @@ describe('organizations', () => {
     const { t, admin } = await setup();
     t.fake.on('GET', `${V1}/organizations`, (r) => {
       const cursor = new URL(r.url).searchParams.get('cursor');
-      return cursor === null
-        ? page([orgWire({ id: 'a' })], 'c2')
-        : page([orgWire({ id: 'b' })]);
+      return cursor === null ? page([orgWire({ id: 'a' })], 'c2') : page([orgWire({ id: 'b' })]);
     });
     const first = await admin.organizations.list({ limit: 1 });
     expect(first).toMatchObject({ hasMore: true, nextCursor: 'c2' });
@@ -125,7 +126,9 @@ describe('organizations', () => {
     const members = await admin.organizations.members.list(ORG);
     expect(members.items).toEqual([{ userId: USER, role: 'owner', createdAt: '2026-10-20T10:00:00Z' }]);
     await admin.organizations.members.add(ORG, { userId: USER, role: 'admin' });
-    expect(JSON.parse(t.fake.requests.find((r) => r.method === 'POST' && r.url.endsWith('/members'))!.body)).toEqual({
+    expect(
+      JSON.parse(t.fake.requests.find((r) => r.method === 'POST' && r.url.endsWith('/members'))!.body),
+    ).toEqual({
       user_id: USER,
       role: 'admin',
     });
@@ -134,15 +137,23 @@ describe('organizations', () => {
 
   it('creates, lists and revokes invitations, keeping the accept token out of logs', async () => {
     const { t, admin } = await setup();
-    t.fake.on('POST', `${V1}/organizations/${ORG}/invitations`, () => json({ data: invWire({ user_id: USER }) }, 201));
+    t.fake.on('POST', `${V1}/organizations/${ORG}/invitations`, () =>
+      json({ data: invWire({ user_id: USER }) }, 201),
+    );
     t.fake.on('GET', `${V1}/organizations/${ORG}/invitations`, () => page([invWire()]));
-    t.fake.on('DELETE', `${V1}/organizations/${ORG}/invitations/inv-1`, () => new Response(null, { status: 204 }));
+    t.fake.on(
+      'DELETE',
+      `${V1}/organizations/${ORG}/invitations/inv-1`,
+      () => new Response(null, { status: 204 }),
+    );
     const inv = await admin.organizations.invitations.create(ORG, {
       email: 'ada@initech.example',
       role: 'admin',
       invitedBy: USER,
     });
-    expect(JSON.parse(t.fake.requests.find((r) => r.url.endsWith('/invitations') && r.method === 'POST')!.body)).toEqual({
+    expect(
+      JSON.parse(t.fake.requests.find((r) => r.url.endsWith('/invitations') && r.method === 'POST')!.body),
+    ).toEqual({
       email: 'ada@initech.example',
       role: 'admin',
       invited_by: USER,
@@ -168,7 +179,9 @@ describe('organizations', () => {
 
   it("accepts an invitation with the invitee's own token and a Secret invite token", async () => {
     const { t, af } = await setup();
-    t.fake.on('POST', `${V1}/organizations/invitations/accept`, () => json({ data: invWire({ status: 'accepted' }) }));
+    t.fake.on('POST', `${V1}/organizations/invitations/accept`, () =>
+      json({ data: invWire({ status: 'accepted' }) }),
+    );
     const asInvitee = new AdminClient(af, new Secret('invitee-access-token'));
     const accepted = await asInvitee.organizations.invitations.accept({
       token: new Secret('invite-token-secret'),
@@ -198,29 +211,45 @@ describe('organizations', () => {
       decided_by: status === 'pending' ? '' : 'user:u1',
     });
     t.fake.on('GET', `${V1}/organizations/${ORG}/join-requests`, () => json({ data: [jr('pending')] }));
-    t.fake.on('POST', `${V1}/organizations/${ORG}/join-requests/jr-1/approve`, () => json({ data: jr('approved') }));
-    t.fake.on('POST', `${V1}/organizations/${ORG}/join-requests/jr-1/decline`, () => json({ data: jr('declined') }));
+    t.fake.on('POST', `${V1}/organizations/${ORG}/join-requests/jr-1/approve`, () =>
+      json({ data: jr('approved') }),
+    );
+    t.fake.on('POST', `${V1}/organizations/${ORG}/join-requests/jr-1/decline`, () =>
+      json({ data: jr('declined') }),
+    );
     t.fake.on('GET', `${V1}/organizations/join-requests/mine`, () => json({ data: [jr('pending')] }));
-    t.fake.on('POST', `${V1}/organizations/join-requests/jr-1/withdraw`, () => new Response(null, { status: 204 }));
+    t.fake.on(
+      'POST',
+      `${V1}/organizations/join-requests/jr-1/withdraw`,
+      () => new Response(null, { status: 204 }),
+    );
     t.fake.on('GET', `${V1}/organizations/${ORG}/domains`, () =>
-      json({ data: [{ domain: 'initech.example', claimed_via: 'signup', claimed_by: 'user:u1', created_at: 'x' }] }),
+      json({
+        data: [{ domain: 'initech.example', claimed_via: 'signup', claimed_by: 'user:u1', created_at: 'x' }],
+      }),
     );
     const pending = await admin.organizations.joinRequests.list(ORG, { status: 'pending' });
-    expect(new URL(t.fake.requests.find((r) => r.url.includes('join-requests?'))!.url).searchParams.get('status')).toBe(
-      'pending',
-    );
+    expect(
+      new URL(t.fake.requests.find((r) => r.url.includes('join-requests?'))!.url).searchParams.get('status'),
+    ).toBe('pending');
     expect(pending[0]).toMatchObject({ orgName: 'Initech', decidedAt: null });
     expect((await admin.organizations.joinRequests.approve(ORG, 'jr-1')).status).toBe('approved');
     expect((await admin.organizations.joinRequests.decline(ORG, 'jr-1')).status).toBe('declined');
     expect(await admin.organizations.joinRequests.mine()).toHaveLength(1);
     await admin.organizations.joinRequests.withdraw('jr-1');
-    expect((await admin.organizations.domains(ORG))[0]).toMatchObject({ domain: 'initech.example', claimedVia: 'signup' });
+    expect((await admin.organizations.domains(ORG))[0]).toMatchObject({
+      domain: 'initech.example',
+      claimedVia: 'signup',
+    });
   });
 
   it('shows a machine client the platform refusing the person-only join-request calls', async () => {
     const { t, admin } = await setup();
     t.fake.on('GET', `${V1}/organizations/${ORG}/join-requests`, () =>
-      json({ error: 'forbidden', error_description: 'only an owner or admin of this organization can do this' }, 403),
+      json(
+        { error: 'forbidden', error_description: 'only an owner or admin of this organization can do this' },
+        403,
+      ),
     );
     const e = await refusal(admin.organizations.joinRequests.list(ORG));
     expect(e).toMatchObject({ name: 'APIError', status: 403, code: 'forbidden' });
@@ -235,7 +264,9 @@ describe('refusals', () => {
       [402, 'feature_not_in_plan'],
       [401, 'invalid_token'],
     ] as const) {
-      t.fake.on('GET', `${V1}/organizations/${ORG}`, () => json({ error: code, error_description: 'no' }, status));
+      t.fake.on('GET', `${V1}/organizations/${ORG}`, () =>
+        json({ error: code, error_description: 'no' }, status),
+      );
       const e = await refusal(admin.organizations.get(ORG));
       expect(isAuthFIError(e, 'APIError')).toBe(true);
       expect(e).toMatchObject({ status, code });
@@ -263,7 +294,9 @@ describe('refusals', () => {
   it('raises a success status the contract does not name, and data of the wrong shape', async () => {
     const { t, admin } = await setup();
     t.fake.on('POST', `${V1}/organizations`, () => json({ data: orgWire() }, 200));
-    expect((await refusal(admin.organizations.create({ slug: 's', displayName: 'd' }))).code).toBe('response_invalid');
+    expect((await refusal(admin.organizations.create({ slug: 's', displayName: 'd' }))).code).toBe(
+      'response_invalid',
+    );
     t.fake.on('GET', `${V1}/organizations/${ORG}`, () => json({ data: [1] }));
     expect((await refusal(admin.organizations.get(ORG))).code).toBe('response_invalid');
     t.fake.on('GET', `${V1}/organizations`, () => json({ data: { data: 'nope' } }));
@@ -272,8 +305,14 @@ describe('refusals', () => {
 
   it('never sends a machine client token outside its origins', async () => {
     const t = await TestIssuer.create();
-    const af = new AuthFI({ issuer: t.issuer, fetch: t.fake.fetch, logger: { debug() {}, info() {}, warn() {}, error() {} } });
-    t.fake.on('POST', `${ISSUER}/oauth/token`, () => json({ access_token: 'at', token_type: 'Bearer', expires_in: 900 }));
+    const af = new AuthFI({
+      issuer: t.issuer,
+      fetch: t.fake.fetch,
+      logger: { debug() {}, info() {}, warn() {}, error() {} },
+    });
+    t.fake.on('POST', `${ISSUER}/oauth/token`, () =>
+      json({ access_token: 'at', token_type: 'Bearer', expires_in: 900 }),
+    );
     const orders = af.clientCredentials({
       clientId: 'app_o',
       clientSecret: new Secret('s'),
@@ -292,7 +331,11 @@ describe('refusals', () => {
 
   it('encodes an id so it cannot add a path segment or a query', async () => {
     const { t, admin } = await setup();
-    t.fake.on('GET', () => true, () => json({ data: orgWire() }));
+    t.fake.on(
+      'GET',
+      (u) => u.includes('/apis/regional/'),
+      () => json({ data: orgWire() }),
+    );
     await admin.organizations.get('../users?x=1');
     const url = t.fake.requests.at(-1)!.url;
     expect(url).toBe(`${V1}/organizations/..%2Fusers%3Fx%3D1`);
@@ -336,7 +379,9 @@ describe('users', () => {
       hireDate: '2026-01-05',
       attributes: { cost_center: 'c-1' },
     });
-    expect(JSON.parse(t.fake.requests.find((r) => r.method === 'POST' && r.url.endsWith('/users'))!.body)).toEqual({
+    expect(
+      JSON.parse(t.fake.requests.find((r) => r.method === 'POST' && r.url.endsWith('/users'))!.body),
+    ).toEqual({
       email: 'ada@initech.example',
       display_name: 'Ada',
       given_name: 'Ada',
@@ -353,14 +398,22 @@ describe('users', () => {
     await expect(
       admin.users.create({ email: 'a@b.example', displayName: 'A', emailVerified: true } as never),
     ).rejects.toThrow(/only the sign-in service/);
-    await expect(admin.users.update(USER, { phoneVerified: true } as never)).rejects.toThrow(ConfigurationError);
+    await expect(admin.users.update(USER, { phoneVerified: true } as never)).rejects.toThrow(
+      ConfigurationError,
+    );
     expect(t.fake.requests.some((r) => r.url.includes('/users'))).toBe(false);
   });
 
   it('shows the platform refusing a verification claim anyway', async () => {
     const { t, admin } = await setup();
     t.fake.on('POST', `${V1}/users`, () =>
-      json({ error: 'forbidden', error_description: 'email_verified and phone_verified are set only by the identity service' }, 403),
+      json(
+        {
+          error: 'forbidden',
+          error_description: 'email_verified and phone_verified are set only by the identity service',
+        },
+        403,
+      ),
     );
     expect(await refusal(admin.users.create({ email: 'a@b.example', displayName: 'A' }))).toMatchObject({
       status: 403,
@@ -383,7 +436,9 @@ describe('users', () => {
     expect(ids).toEqual(['u1', 'u2']);
     const search = new URL(t.fake.requests.find((r) => r.url.includes('/users?'))!.url).searchParams;
     expect(search.get('q')).toBe('ada');
-    expect((await admin.users.update(USER, { status: 'suspended', clearManager: true })).status).toBe('suspended');
+    expect((await admin.users.update(USER, { status: 'suspended', clearManager: true })).status).toBe(
+      'suspended',
+    );
     expect(JSON.parse(t.fake.requests.find((r) => r.method === 'PATCH')!.body)).toEqual({
       status: 'suspended',
       clear_manager: true,
@@ -416,15 +471,21 @@ describe('roles, permissions and bindings', () => {
     for await (const r of admin.roles.all()) all.push(r.id);
     expect(all).toEqual([ROLE]);
     await admin.roles.create({ name: 'billing', description: 'invoices' });
-    expect(JSON.parse(t.fake.requests.find((r) => r.method === 'POST' && r.url.endsWith('/roles'))!.body)).toEqual({
+    expect(
+      JSON.parse(t.fake.requests.find((r) => r.method === 'POST' && r.url.endsWith('/roles'))!.body),
+    ).toEqual({
       name: 'billing',
       description: 'invoices',
     });
     expect((await admin.roles.permissions(ROLE))[0]).toMatchObject({ action: 'read', resource: 'invoice' });
     await admin.roles.setPermissions(ROLE, ['p1']);
-    expect(JSON.parse(t.fake.requests.find((r) => r.method === 'PUT')!.body)).toEqual({ permission_ids: ['p1'] });
+    expect(JSON.parse(t.fake.requests.find((r) => r.method === 'PUT')!.body)).toEqual({
+      permission_ids: ['p1'],
+    });
     await admin.roles.setPermissions(ROLE, []);
-    expect(JSON.parse(t.fake.requests.filter((r) => r.method === 'PUT').at(-1)!.body)).toEqual({ permission_ids: [] });
+    expect(JSON.parse(t.fake.requests.filter((r) => r.method === 'PUT').at(-1)!.body)).toEqual({
+      permission_ids: [],
+    });
   });
 
   it('lists and creates permissions', async () => {
@@ -443,8 +504,14 @@ describe('roles, permissions and bindings', () => {
     t.fake.on('POST', `${V1}/bindings`, () => json({ data: bindWire }, 201));
     t.fake.on('GET', `${V1}/bindings`, () => page([bindWire]));
     t.fake.on('DELETE', `${V1}/bindings/user:u1/${ROLE}`, () => new Response(null, { status: 204 }));
-    const b = await admin.bindings.assign({ subject: 'user:u1', roleId: ROLE, expiresAt: '2027-01-01T00:00:00Z' });
-    expect(JSON.parse(t.fake.requests.find((r) => r.method === 'POST' && r.url.endsWith('/bindings'))!.body)).toEqual({
+    const b = await admin.bindings.assign({
+      subject: 'user:u1',
+      roleId: ROLE,
+      expiresAt: '2027-01-01T00:00:00Z',
+    });
+    expect(
+      JSON.parse(t.fake.requests.find((r) => r.method === 'POST' && r.url.endsWith('/bindings'))!.body),
+    ).toEqual({
       subject: 'user:u1',
       role_id: ROLE,
       expires_at: '2027-01-01T00:00:00Z',
@@ -452,7 +519,9 @@ describe('roles, permissions and bindings', () => {
     expect(b).toMatchObject({ roleId: ROLE, roleName: 'billing' });
     await admin.bindings.list({ subject: 'user:u1' });
     await admin.bindings.list({ role: ROLE }, { limit: 5 });
-    const listed = t.fake.requests.filter((r) => r.method === 'GET').map((r) => new URL(r.url).searchParams);
+    const listed = t.fake.requests
+      .filter((r) => r.method === 'GET' && r.url.includes('/bindings?'))
+      .map((r) => new URL(r.url).searchParams);
     expect(listed[0]!.get('subject')).toBe('user:u1');
     expect(listed[1]!.get('role')).toBe(ROLE);
     expect(listed[1]!.get('limit')).toBe('5');
@@ -468,7 +537,9 @@ describe('roles, permissions and bindings', () => {
     await expect(admin.bindings.list({ subject: 'user:u1', role: ROLE } as never)).rejects.toThrow(
       ConfigurationError,
     );
-    t.fake.on('POST', `${V1}/bindings`, () => json({ error: 'forbidden', error_description: 'manage:roles' }, 403));
+    t.fake.on('POST', `${V1}/bindings`, () =>
+      json({ error: 'forbidden', error_description: 'manage:roles' }, 403),
+    );
     expect(await refusal(admin.bindings.assign({ subject: 'user:u1', roleId: ROLE }))).toMatchObject({
       status: 403,
       code: 'forbidden',

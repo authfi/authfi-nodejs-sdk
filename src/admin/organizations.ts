@@ -23,12 +23,14 @@ export interface Organization {
   readonly updatedAt: string;
 }
 
+/** What creating an organization takes. */
 export interface CreateOrganization {
   /** The URL-safe handle, unique in the project. */
   readonly slug: string;
   readonly displayName: string;
 }
 
+/** What updating an organization takes: only the fields given change. */
 export interface UpdateOrganization {
   readonly displayName?: string | undefined;
   /** Replaces the whole business-details object. */
@@ -42,6 +44,7 @@ export interface OrganizationMember {
   readonly createdAt: string;
 }
 
+/** What adding a member takes. */
 export interface AddMember {
   readonly userId: string;
   /** Defaults to `member`. */
@@ -63,6 +66,7 @@ export interface Invitation {
   readonly createdAt: string;
 }
 
+/** What inviting a person takes. */
 export interface CreateInvitation {
   readonly email: string;
   /** Defaults to `member`. */

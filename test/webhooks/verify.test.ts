@@ -18,7 +18,10 @@ const BODY = JSON.stringify({
 
 // An independent oracle: Node's createHmac, not the SubtleCrypto path the verifier uses.
 function signed(body: string | Uint8Array, ts = NOW, secret = SECRET): Record<string, string> {
-  const mac = createHmac('sha256', secret).update(`${String(ts)}.`).update(body).digest('hex');
+  const mac = createHmac('sha256', secret)
+    .update(`${String(ts)}.`)
+    .update(body)
+    .digest('hex');
   return { 'x-authfi-timestamp': String(ts), 'x-authfi-signature-256': `sha256=${mac}` };
 }
 
@@ -70,7 +73,10 @@ describe('verifyWebhook', () => {
         verifyWebhook({
           ...base,
           body: BODY,
-          headers: { ...h, 'x-authfi-signature-256': [h['x-authfi-signature-256']!, h['x-authfi-signature-256']!] },
+          headers: {
+            ...h,
+            'x-authfi-signature-256': [h['x-authfi-signature-256']!, h['x-authfi-signature-256']!],
+          },
         }),
       ),
     ).toBe('webhook_signature_malformed');
@@ -94,7 +100,9 @@ describe('verifyWebhook', () => {
 
   it('checks the signature before freshness, so a stranger learns nothing about the window', async () => {
     const stale = signed(BODY, NOW - 10_000, 'someone-else');
-    expect(await refusal(verifyWebhook({ ...base, body: BODY, headers: stale }))).toBe('webhook_signature_invalid');
+    expect(await refusal(verifyWebhook({ ...base, body: BODY, headers: stale }))).toBe(
+      'webhook_signature_invalid',
+    );
   });
 
   it('honours a tighter tolerance', async () => {
@@ -102,12 +110,16 @@ describe('verifyWebhook', () => {
     expect(await refusal(verifyWebhook({ ...base, body: BODY, headers, toleranceSeconds: 30 }))).toBe(
       'webhook_timestamp_outside_tolerance',
     );
-    expect((await verifyWebhook({ ...base, body: BODY, headers, toleranceSeconds: 60 })).type).toBe('login.failed');
+    expect((await verifyWebhook({ ...base, body: BODY, headers, toleranceSeconds: 60 })).type).toBe(
+      'login.failed',
+    );
   });
 
   it('refuses an empty signature header', async () => {
     const h = { ...signed(BODY), 'x-authfi-signature-256': '' };
-    expect(await refusal(verifyWebhook({ ...base, body: BODY, headers: h }))).toBe('webhook_signature_missing');
+    expect(await refusal(verifyWebhook({ ...base, body: BODY, headers: h }))).toBe(
+      'webhook_signature_missing',
+    );
   });
 
   it('refuses a signed body that is not UTF-8', async () => {
@@ -124,28 +136,38 @@ describe('verifyWebhook', () => {
       { event: 'user.created', timestamp: 't', data: {} },
     ]) {
       const body = JSON.stringify(bad);
-      expect(await refusal(verifyWebhook({ ...base, body, headers: signed(body) }))).toBe('webhook_body_invalid');
+      expect(await refusal(verifyWebhook({ ...base, body, headers: signed(body) }))).toBe(
+        'webhook_body_invalid',
+      );
     }
   });
 
   it('keeps an event name it does not know, and ignores data members of the wrong type', async () => {
-    const body = JSON.stringify({ id: '', event: 'thing.happened', timestamp: 't', data: { actor: 5, subject: 's' } });
+    const body = JSON.stringify({
+      id: '',
+      event: 'thing.happened',
+      timestamp: 't',
+      data: { actor: 5, subject: 's' },
+    });
     const event = await verifyWebhook({ ...base, body, headers: signed(body) });
     expect(event.type).toBe('thing.happened');
-    expect(event.data).toEqual({ actor: undefined, subject: 's', resourceType: undefined, resourceId: undefined });
+    expect(event.data).toEqual({
+      actor: undefined,
+      subject: 's',
+      resourceType: undefined,
+      resourceId: undefined,
+    });
   });
 
   it('misuse is a ConfigurationError, not a webhook refusal', async () => {
     const headers = signed(BODY);
-    await expect(verifyWebhook({ ...base, body: BODY, headers, secret: SECRET as unknown as Secret })).rejects.toThrow(
-      ConfigurationError,
-    );
+    await expect(
+      verifyWebhook({ ...base, body: BODY, headers, secret: SECRET as unknown as Secret }),
+    ).rejects.toThrow(ConfigurationError);
     await expect(verifyWebhook({ ...base, body: BODY, headers, toleranceSeconds: 0 })).rejects.toThrow(
       ConfigurationError,
     );
-    await expect(
-      verifyWebhook({ ...base, body: JSON.parse(BODY) as unknown as string, headers }),
-    ).rejects.toThrow(/raw request body/);
+    await expect(verifyWebhook({ ...base, body: {} as never, headers })).rejects.toThrow(/raw request body/);
   });
 
   it('works with the system clock when none is given', async () => {

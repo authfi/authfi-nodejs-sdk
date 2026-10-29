@@ -21,6 +21,7 @@ export interface Role {
   readonly createdAt: string;
 }
 
+/** What creating a role takes. */
 export interface CreateRole {
   /** Unique in the project. */
   readonly name: string;
@@ -36,6 +37,7 @@ export interface Permission {
   readonly createdAt: string;
 }
 
+/** What creating a permission takes. */
 export interface CreatePermission {
   readonly action: string;
   readonly resource: string;
@@ -55,6 +57,7 @@ export interface Binding {
   readonly createdAt: string;
 }
 
+/** What giving a subject a role takes. */
 export interface AssignBinding {
   /** `user:<id>`, `app:<client id>`, `agent:<agent id>` or `group:<id>`. */
   readonly subject: string;

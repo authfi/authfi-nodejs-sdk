@@ -122,8 +122,9 @@ function objectOf(value: unknown, res: HttpResponse): Record<string, unknown> {
 }
 
 function arrayOf(value: unknown, res: HttpResponse): Record<string, unknown>[] {
-  if (!Array.isArray(value) || !value.every(isObject)) throw invalid(res, 'data that is not a list of objects');
-  return value as Record<string, unknown>[];
+  if (!Array.isArray(value) || !value.every(isObject))
+    throw invalid(res, 'data that is not a list of objects');
+  return value;
 }
 
 /** Fields whose value is the tenant's own JSON and keeps its keys as written. */
@@ -142,6 +143,8 @@ export function toWire(input: object): Record<string, unknown> {
 }
 
 /** An answer's top-level keys in camelCase; the tenant's `attributes` object is left as written. */
+// The caller names the model the platform's JSON is read as; the shape is the platform's contract.
+// eslint-disable-next-line @typescript-eslint/no-unnecessary-type-parameters
 export function fromWire<T>(input: Record<string, unknown>): T {
   const out: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(input)) out[OPAQUE.has(key) ? key : camel(key)] = value;
@@ -188,10 +191,13 @@ export async function* eachItem<T>(
 }
 
 /** Builds a {@link Page} from the platform's page. */
-export function pageOf<T>(raw: {
-  items: Record<string, unknown>[];
-  nextCursor: string | undefined;
-}, map: (item: Record<string, unknown>) => T): Page<T> {
+export function pageOf<T>(
+  raw: {
+    items: Record<string, unknown>[];
+    nextCursor: string | undefined;
+  },
+  map: (item: Record<string, unknown>) => T,
+): Page<T> {
   return {
     items: raw.items.map(map),
     nextCursor: raw.nextCursor,

@@ -70,7 +70,9 @@ function headerOf(headers: WebhookHeaders, name: string): string | undefined {
   if (typeof (headers as Headers).get === 'function') return (headers as Headers).get(name) ?? undefined;
   let found: string | readonly string[] | undefined;
   let seen = false;
-  for (const [key, value] of Object.entries(headers as Record<string, string | readonly string[] | undefined>)) {
+  for (const [key, value] of Object.entries(
+    headers as Record<string, string | readonly string[] | undefined>,
+  )) {
     if (key.toLowerCase() !== name) continue;
     if (seen) throw repeated(name);
     seen = true;
@@ -109,8 +111,10 @@ function parseEvent(text: string, deliveryId: string | undefined): WebhookEvent 
     throw new InvalidWebhook('webhook_body_invalid', 'the signed body is not an AuthFI event');
   }
   const data = body.data as Record<string, unknown>;
-  const field = (key: string): string | undefined =>
-    typeof data[key] === 'string' ? (data[key] as string) : undefined;
+  const field = (key: string): string | undefined => {
+    const value = data[key];
+    return typeof value === 'string' ? value : undefined;
+  };
   return {
     id: body.id,
     type: body.event,
