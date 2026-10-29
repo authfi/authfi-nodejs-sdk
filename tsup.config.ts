@@ -8,6 +8,7 @@ export default defineConfig({
     index: 'src/index.ts',
     express: 'src/express/index.ts',
     node: 'src/node/index.ts',
+    signals: 'src/signals/index.ts',
     'vercel-ai': 'src/vercel-ai/index.ts',
   },
   format: ['esm', 'cjs'],

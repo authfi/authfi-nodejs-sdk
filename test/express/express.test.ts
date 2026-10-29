@@ -11,7 +11,7 @@ import {
 import type { Logger } from '../../src/core/logger.js';
 import { AuthFI } from '../../src/core/project.js';
 import { authfiErrorHandler, protect, type ProtectOptions } from '../../src/express/index.js';
-import type { Verifier } from '../../src/verify/verifier.js';
+import type { RequestCredentials, Verifier } from '../../src/verify/verifier.js';
 import { GUARD_CASES } from '../support/guard-cases.js';
 import { API, TestIssuer } from '../support/issuer.js';
 
@@ -244,37 +244,32 @@ describe('a failure that is not a refusal', () => {
   });
 });
 
-describe('the URL a DPoP proof is checked against', () => {
-  function recording(): { verifier: Verifier; urls: (string | undefined)[] } {
-    const urls: (string | undefined)[] = [];
+describe('what the middleware hands the verifier for a DPoP proof', () => {
+  function recording(): { verifier: Verifier; seen: RequestCredentials[] } {
+    const seen: RequestCredentials[] = [];
     const verifier: Verifier = {
       verify: () => Promise.reject(new Error('unused')),
       verifyRequest: (input) => {
-        urls.push('url' in input ? input.url : undefined);
+        seen.push(input);
         return Promise.reject(new InvalidToken('token_missing', 'x'));
       },
     };
-    return { verifier, urls };
+    return { verifier, seen };
   }
 
-  it('is built from publicUrl, not from a Host header the client chose', async () => {
-    const { verifier, urls } = recording();
-    const base = await serve(verifier, { publicUrl: 'https://api.example.com' });
-    await call(base, '/orders?x=1', { host: 'attacker.example' });
-    expect(urls).toEqual(['https://api.example.com/orders?x=1']);
-  });
-
-  it('falls back to the Host header only when publicUrl is not given', async () => {
-    const { verifier, urls } = recording();
+  it('is the request target only: the origin is the verifier publicUrl, never the Host header', async () => {
+    const { verifier, seen } = recording();
     const base = await serve(verifier);
-    await call(base, '/orders');
-    expect(urls[0]).toBe(`${base}/orders`);
+    await call(base, '/orders?x=1', { host: 'attacker.example' });
+    expect(seen[0]?.url).toBe('/orders?x=1');
+    expect(seen[0]?.method).toBe('GET');
   });
 
-  it('must be an origin', () => {
-    const { verifier } = recording();
-    expect(() => protect(verifier, { publicUrl: 'https://api.example.com/path' })).toThrow('origin only');
-    expect(() => protect(verifier, { publicUrl: 'http://api.example.com' })).toThrow('https');
+  it('carries the forwarding headers raw, for a verifier that trusts them', async () => {
+    const { verifier, seen } = recording();
+    const base = await serve(verifier);
+    await call(base, '/orders', { 'x-forwarded-proto': 'https', 'x-forwarded-host': 'api.example.com' });
+    expect(seen[0]?.forwarded).toEqual({ proto: 'https', host: 'api.example.com' });
   });
 });
 

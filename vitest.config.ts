@@ -47,6 +47,7 @@ export default defineConfig({
         'src/express/**': { lines: 85 },
         'src/gateway/**': { lines: 95, branches: 90 },
         'src/vercel-ai/**': { lines: 85 },
+        'src/signals/**': { lines: 95, branches: 90 },
         'src/signin/**': { lines: 95, branches: 90 },
       },
     },

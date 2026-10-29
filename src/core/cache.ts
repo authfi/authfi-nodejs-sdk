@@ -73,20 +73,38 @@ export function maxAgeOf(cacheControl: string | null): number | undefined {
   return m?.[1] === undefined ? undefined : Number(m[1]) * 1000;
 }
 
+/** After a failed refresh, how long to wait before trying again while a stale value is still served. */
+const STALE_RETRY_MS = 15_000;
+
 /**
  * A document fetched once and kept for its TTL: the answer's `max-age`, clamped to 60 s to 24 h,
  * 300 s when it gives none. Concurrent readers share one fetch, and a failed fetch is never cached.
+ *
+ * With `staleGraceMs`, a document whose refresh fails is still served for that long past its TTL, and
+ * the refresh is retried at most every 15 s: an outage of the issuer's key endpoint does not take every
+ * request down with it. With `failureBackoffMs`, a failed load with nothing to serve is remembered for
+ * that long, so a flood of requests does not become a flood of fetches against a failing endpoint.
  */
 export class CachedDocument<T> {
   readonly #load: () => Promise<Loaded<T>>;
   readonly #clock: Clock;
   readonly #flight = new SingleFlight<0, T>();
+  readonly #staleGraceMs: number;
+  readonly #failureBackoffMs: number;
   #value: T | undefined;
   #expiresAt = 0;
+  #retryAt = 0;
+  #failure: { readonly error: Error; readonly until: number } | undefined;
 
-  constructor(load: () => Promise<Loaded<T>>, clock: Clock) {
+  constructor(
+    load: () => Promise<Loaded<T>>,
+    clock: Clock,
+    options: { staleGraceMs?: number; failureBackoffMs?: number } = {},
+  ) {
     this.#load = load;
     this.#clock = clock;
+    this.#staleGraceMs = options.staleGraceMs ?? 0;
+    this.#failureBackoffMs = options.failureBackoffMs ?? 0;
   }
 
   /** The document, fetched when absent, expired or when `refresh` is set. */
@@ -94,10 +112,38 @@ export class CachedDocument<T> {
     if (options.refresh !== true && this.#value !== undefined && this.#clock.monotonic() < this.#expiresAt) {
       return Promise.resolve(this.#value);
     }
+    if (
+      options.refresh !== true &&
+      this.#value !== undefined &&
+      this.#clock.monotonic() < this.#retryAt &&
+      this.#clock.monotonic() < this.#expiresAt + this.#staleGraceMs
+    ) {
+      return Promise.resolve(this.#value);
+    }
+    if (this.#failure !== undefined && this.#clock.monotonic() < this.#failure.until) {
+      return Promise.reject(this.#failure.error);
+    }
     return this.#flight.run(
       0,
       async () => {
-        const loaded = await this.#load();
+        let loaded: Loaded<T>;
+        try {
+          loaded = await this.#load();
+        } catch (e) {
+          const now = this.#clock.monotonic();
+          if (this.#value !== undefined && now < this.#expiresAt + this.#staleGraceMs) {
+            this.#retryAt = now + STALE_RETRY_MS;
+            return this.#value;
+          }
+          if (this.#failureBackoffMs > 0)
+            this.#failure = {
+              error: e instanceof Error ? e : new Error(String(e)),
+              until: now + this.#failureBackoffMs,
+            };
+          throw e;
+        }
+        this.#retryAt = 0;
+        this.#failure = undefined;
         const ttl = Math.min(MAX_TTL_MS, Math.max(MIN_TTL_MS, loaded.maxAgeMs ?? DEFAULT_TTL_MS));
         this.#value = loaded.value;
         this.#expiresAt = this.#clock.monotonic() + ttl;

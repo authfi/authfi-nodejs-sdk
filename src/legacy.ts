@@ -1,8 +1,28 @@
+import { systemClock, type Clock } from './core/clock.js';
 import { ConfigurationError, NotSupportedError } from './core/errors.js';
 import { consoleLogger, type Logger } from './core/logger.js';
 import { AuthFI } from './core/project.js';
-import { protect, type ExpressRequest, type ExpressResponse, type NextFunction } from './express/index.js';
+import {
+  protect,
+  requestCredentials,
+  type ExpressRequest,
+  type ExpressResponse,
+  type NextFunction,
+} from './express/index.js';
+import {
+  createReceiver,
+  createRevocationStore,
+  registerStream,
+  type MemoryRevocationStore,
+  type PushRequest,
+  type PushResponse,
+  type ReceiverOptions,
+  type Stream,
+  type StreamRequest,
+} from './signals/index.js';
 import type { AccessToken } from './verify/access-token.js';
+import { DEFAULT_ROOT_PINS } from './verify/chain.js';
+import type { ReplayGuard } from './verify/dpop-proof.js';
 import type { TokenVerifier } from './verify/verifier.js';
 
 /** The settings of the 0.1 factory. */
@@ -27,6 +47,31 @@ export interface LegacyConfig {
   readonly autoSync?: boolean;
   /** Ignored: the key set is cached for its own max-age. */
   readonly jwksRefreshInterval?: number;
+  /** How an agent's token is treated: `enforce` (default), `watch` or `off`. See `VerifierOptions.agentTokens`. */
+  readonly agentTokens?: 'enforce' | 'watch' | 'off';
+  /** The origin clients call this API at; required to check any DPoP proof. */
+  readonly publicUrl?: string;
+  /** Take the origin for a proof's `htu` from the forwarding headers when no `publicUrl` is set. */
+  readonly trustForwarded?: boolean;
+  /** Where single-use proof ids are recorded; share one across replicas. */
+  readonly replayGuard?: ReplayGuard;
+  /** At least 16 bytes: proofs must then carry the server nonce. */
+  readonly nonceKey?: string | Uint8Array;
+  /** Hex SHA-256 pins of the trusted roots; defaults to AuthFI Root CA R1. */
+  readonly rootPins?: readonly string[];
+  /** PEM roots to complete a chain whose `x5c` omits its root. */
+  readonly rootCerts?: readonly string[];
+  /** The tenant the issuer belongs to. */
+  readonly tenantId?: string;
+  /** Clock leeway in seconds, 0 to 300 (default 60). */
+  readonly leeway?: number;
+  /** A store from `createRevocationStore()`: verification then refuses revoked tokens. */
+  readonly revocations?: MemoryRevocationStore;
+  /** The clock in epoch milliseconds, for tests (`now` is the same). */
+  readonly clock?: () => number;
+  readonly now?: () => number;
+  /** Ignored: the key set is read from the issuer's discovery document. */
+  readonly jwksUrl?: string;
   readonly fetch?: typeof fetch;
   readonly logger?: Logger;
 }
@@ -45,8 +90,16 @@ export interface LegacyClient {
   requireRole(...roles: string[]): Middleware;
   /** @deprecated Use `protect(verifier)` from `@authfi/sdk/express`. */
   authenticate(): Middleware;
-  /** @deprecated Use `af.verifier({ audience }).verify(token)`. Returns the verified claims. */
+  /** @deprecated Use `af.verifier({ audience }).verify(token)`. Returns the verified claims; refuses an agent's token. */
   verifyToken(token: string): Promise<Readonly<Record<string, unknown>>>;
+  /** @deprecated Use `af.verifier({ audience }).verifyRequest(request)`. Returns the verified claims. */
+  verifyRequest(req: ExpressRequest): Promise<Readonly<Record<string, unknown>>>;
+  /** @deprecated Use `createReceiver(af, options)` from `@authfi/sdk/signals`. */
+  receiver(
+    options: Omit<ReceiverOptions, 'revocations'>,
+  ): (req: PushRequest, res: PushResponse) => Promise<void>;
+  /** @deprecated Use `registerStream(af, bearer, request)` from `@authfi/sdk/signals`. */
+  registerStream(bearer: string, request: StreamRequest): Promise<Stream>;
   /** @deprecated Fetches discovery and the key set ahead of the first request; nothing else. */
   start(): Promise<void>;
   /** @deprecated Permission sync does not exist on the platform; throws `NotSupportedError`. */
@@ -61,6 +114,9 @@ export interface LegacyClient {
 }
 
 const warned = new Set<string>();
+
+const seconds = (value: number | undefined): number | undefined =>
+  value === undefined ? undefined : value * 1000;
 
 function deprecated(logger: Logger, symbol: string, instead: string): void {
   if (warned.has(symbol)) return;
@@ -91,10 +147,13 @@ export default function authfi(config: LegacyConfig): LegacyClient {
     'clientSecret',
     'autoSync',
     'jwksRefreshInterval',
+    'jwksUrl',
   ] as const) {
     if (config[key] !== undefined) logger.warn(`authfi(): ${key} is ignored in 0.2 and is removed in 1.0`);
   }
-  const af = new AuthFI({ issuer, fetch: config.fetch, logger });
+  const now = config.now ?? config.clock;
+  const clock: Clock | undefined = now === undefined ? undefined : { ...systemClock, now };
+  const af = new AuthFI({ issuer, fetch: config.fetch, logger, clock, leewayMs: seconds(config.leeway) });
   let verifier: TokenVerifier | undefined;
   const verifierOf = (): TokenVerifier => {
     if (config.audience === undefined) {
@@ -102,7 +161,19 @@ export default function authfi(config: LegacyConfig): LegacyClient {
         "authfi(): audience is required to verify tokens: your API's client id (or your front end's), as audience: ['api_…']",
       );
     }
-    verifier ??= af.verifier({ audience: config.audience });
+    verifier ??= af.verifier({
+      audience: config.audience,
+      expectedTenantId: config.tenantId,
+      leewayMs: seconds(config.leeway),
+      agentTokens: config.agentTokens,
+      publicUrl: config.publicUrl,
+      trustForwarded: config.trustForwarded,
+      replayGuard: config.replayGuard,
+      nonceKey: config.nonceKey,
+      rootPins: config.rootPins,
+      rootCerts: config.rootCerts,
+      revocations: config.revocations,
+    });
     return verifier;
   };
   const middleware = (requirements: { permissions?: string[]; roles?: string[] }): Middleware => {
@@ -135,6 +206,23 @@ export default function authfi(config: LegacyConfig): LegacyClient {
     verifyToken: async (token) => {
       deprecated(logger, 'verifyToken()', 'use af.verifier({ audience }).verify(token)');
       return (await verifierOf().verify(token)).claims;
+    },
+    verifyRequest: async (req) => (await verifierOf().verifyRequest(requestCredentials(req))).claims,
+    receiver: (options) => {
+      deprecated(logger, 'receiver()', "use createReceiver(af, options) from '@authfi/sdk/signals'");
+      if (config.revocations === undefined)
+        throw new ConfigurationError(
+          'receiver needs the revocations option (a store from authfi.createRevocationStore())',
+        );
+      return createReceiver(af, { ...options, revocations: config.revocations });
+    },
+    registerStream: (bearer, request) => {
+      deprecated(
+        logger,
+        'registerStream()',
+        "use registerStream(af, bearer, request) from '@authfi/sdk/signals'",
+      );
+      return registerStream(af, bearer, request);
     },
     start: async () => {
       await af.metadata();
@@ -169,3 +257,8 @@ export default function authfi(config: LegacyConfig): LegacyClient {
     },
   };
 }
+
+// 0.1 exposed these on the factory function: keep them there for the same one minor.
+/* eslint-disable @typescript-eslint/no-deprecated */
+authfi.createRevocationStore = createRevocationStore;
+authfi.DEFAULT_ROOT_PINS = DEFAULT_ROOT_PINS;

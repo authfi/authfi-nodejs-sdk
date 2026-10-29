@@ -36,7 +36,13 @@ export function runVectors(): void {
     return new Response(JSON.stringify(body), { headers: { 'content-type': 'application/json' } });
   };
   const af = new AuthFI({ issuer: doc.issuer, fetch: fetchDocs, clock, leewayMs: doc.leeway_seconds * 1000 });
-  const verifier = af.verifier({ audience: doc.audience, expectedTenantId: doc.tenant_id });
+  // The vectors fix how claims are read and which tokens are refused on their own; an agent's proof of
+  // possession and key chain are the subject of test/containment.
+  const verifier = af.verifier({
+    audience: doc.audience,
+    expectedTenantId: doc.tenant_id,
+    agentTokens: 'off',
+  });
 
   for (const v of doc.vectors as Vector[]) {
     it(`vector: ${v.name}`, async () => {
