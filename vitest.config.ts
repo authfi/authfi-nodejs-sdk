@@ -48,6 +48,7 @@ export default defineConfig({
         'src/gateway/**': { lines: 95, branches: 90 },
         'src/vercel-ai/**': { lines: 85 },
         'src/signin/**': { lines: 95, branches: 90 },
+        'src/saml/**': { lines: 90, branches: 85 },
       },
     },
   },

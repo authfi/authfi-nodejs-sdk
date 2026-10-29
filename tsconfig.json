@@ -24,7 +24,8 @@
       "@authfi/sdk": ["./src/index.ts"],
       "@authfi/sdk/express": ["./src/express/index.ts"],
       "@authfi/sdk/node": ["./src/node/index.ts"],
-      "@authfi/sdk/vercel-ai": ["./src/vercel-ai/index.ts"]
+      "@authfi/sdk/vercel-ai": ["./src/vercel-ai/index.ts"],
+      "@authfi/sdk/saml": ["./src/saml/index.ts"]
     }
   },
   "include": ["src/**/*.ts", "test/**/*.ts", "scripts/**/*.ts", "examples/**/*.ts", "*.config.ts"]
