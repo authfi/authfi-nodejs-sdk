@@ -12,6 +12,7 @@ const NEUTRAL = [
   'src/gateway/**',
   'src/signin/**',
   'src/vercel-ai/**',
+  'src/signals/**',
   'src/index.ts',
 ];
 

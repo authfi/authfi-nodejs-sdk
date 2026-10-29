@@ -4,7 +4,13 @@
 
 import { build } from 'esbuild';
 
-const ENTRIES = ['src/index.ts', 'src/express/index.ts', 'src/vercel-ai/index.ts'];
+const ENTRIES = [
+  'src/index.ts',
+  'src/admin/index.ts',
+  'src/express/index.ts',
+  'src/signals/index.ts',
+  'src/vercel-ai/index.ts',
+];
 
 process.stdout.write(`check-browser-bundle: bundling ${ENTRIES.join(', ')} for platform=browser\n`);
 const result = await build({

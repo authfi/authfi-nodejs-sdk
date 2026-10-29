@@ -1,10 +1,11 @@
 import { ConfigurationError, GatewayTokenRefused, TransportError } from '../core/errors.js';
-import { isValidRequestId, requestId as newRequestId } from '../core/ids.js';
+import { isValidRequestId, isValidRunId, newRunId, requestId as newRequestId } from '../core/ids.js';
 import { apiErrorOf, dataOf } from '../core/oauth.js';
 import type { Core } from '../core/project.js';
 import { Secret } from '../core/secret.js';
 import { requireAllowedOrigin, type TokenSource } from '../core/token-source.js';
 import { contextOf } from '../core/transport.js';
+import { SDK_VERSION } from '../core/version.js';
 
 /**
  * The tool argument that carries an AuthFI approval id on a retried call. Only an adapter adds it,
@@ -58,6 +59,9 @@ export type ToolOutcome =
     }
   | { readonly kind: 'approval_required'; readonly approvalId: string; readonly code: string };
 
+/** The response header on which the gateway returns the run it derived from the token. */
+const RUN_HEADER = 'AuthFI-Run-Id';
+
 /** The longest credential the platform issues, in seconds. */
 const MAX_CLOUD_SECONDS = 900;
 
@@ -101,17 +105,56 @@ export class Gateway {
   readonly mcpUrl: string;
   /** The agent the credential belongs to (its own, or the actor of a delegated token). */
   readonly agentId: string | undefined;
+  /**
+   * What the credential is: `agent` (an agent key) or `client_credentials` (a machine client's
+   * id and secret). Sent in the User-Agent, which the gateway records as the caller's name for
+   * itself, so the console can tell the two apart.
+   */
+  readonly kind: 'agent' | 'client_credentials';
+  /** This run's id (see {@link Gateway.forRun}): the prefix of each call's `X-Request-Id`. Undefined on a gateway not bound to a run. */
+  readonly runId: string | undefined;
+  /** The OTLP/HTTP trace endpoint of the project, `<issuer origin>/otlp/v1/traces`. */
+  readonly otlpTracesUrl: string;
+  #serverRunId: string | undefined;
+  #calls = 0;
   readonly #core: Core;
   readonly #source: TokenSource;
   readonly #origins: () => Promise<readonly string[]>;
 
   /** Use `agent.gateway()` or `delegatedToken.gateway()`. */
-  constructor(core: Core, source: TokenSource, agentId: string | undefined) {
+  constructor(
+    core: Core,
+    source: TokenSource,
+    agentId: string | undefined,
+    options: { kind?: 'agent' | 'client_credentials'; runId?: string | undefined } = {},
+  ) {
+    if (options.runId !== undefined && !isValidRunId(options.runId))
+      throw new ConfigurationError('runId must be 1-96 of A-Z a-z 0-9 . _ : - (it prefixes X-Request-Id)');
     this.#core = core;
     this.#source = source;
     this.agentId = agentId;
+    this.kind = options.kind ?? 'agent';
+    this.runId = options.runId;
     this.mcpUrl = `${core.issuer}/mcp`;
+    this.otlpTracesUrl = `${new URL(core.issuer).origin}/otlp/v1/traces`;
     this.#origins = () => core.ownOrigins();
+  }
+
+  /**
+   * A gateway for one run of the same credential: each call's `X-Request-Id` is `<runId>.<n>`, so
+   * the run's calls join in the gateway's records and the spans of the run carry the same id.
+   * Without `runId` a fresh one is made.
+   */
+  forRun(runId: string = newRunId()): Gateway {
+    return new Gateway(this.#core, this.#source, this.agentId, { kind: this.kind, runId });
+  }
+
+  /**
+   * The run the gateway derived from the token and returned in `AuthFI-Run-Id` on its last answer,
+   * or undefined before any answer. The gateway decides this id; a caller cannot choose it.
+   */
+  get serverRunId(): string | undefined {
+    return this.#serverRunId;
   }
 
   /**
@@ -164,11 +207,19 @@ export class Gateway {
     for (const [k, v] of Object.entries(await this.#source.headers(request.method, request.url)))
       headers.set(k, v);
     const given = headers.get('x-request-id');
-    if (given === null || !isValidRequestId(given)) headers.set('x-request-id', newRequestId());
+    if (given === null || !isValidRequestId(given))
+      headers.set(
+        'x-request-id',
+        this.runId === undefined ? newRequestId() : `${this.runId}.${String(++this.#calls)}`,
+      );
+    if (!headers.has('user-agent'))
+      headers.set('user-agent', `authfi-node/${SDK_VERSION} (${this.kind.replace('_', '-')})`);
     for (const [k, v] of Object.entries(this.#core.transport.traceHeaders()))
       if (!headers.has(k)) headers.set(k, v);
     headers.delete('x-api-key');
     const res = await this.#core.fetch(new Request(request, { headers, redirect: 'error' }));
+    const answeredRun = res.headers.get(RUN_HEADER);
+    if (answeredRun !== null && answeredRun !== '') this.#serverRunId = answeredRun;
     if (res.status === 401) {
       await res.body?.cancel();
       throw new GatewayTokenRefused(

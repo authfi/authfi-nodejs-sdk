@@ -32,6 +32,12 @@ export type SdkErrorCode =
   | 'issuer_mismatch'
   | 'not_supported'
   | 'token_act_chain_unsupported'
+  | 'agent_token_needs_request'
+  | 'token_revoked'
+  | 'token_iat_exp_required'
+  | 'chain_not_proven'
+  | 'chain_policy'
+  | 'chain_pin'
   | 'insufficient_permission'
   | 'insufficient_scope'
   | 'gateway_token_refused'
@@ -57,7 +63,13 @@ export type SdkErrorCode =
   | 'callback_parameter_repeated'
   | 'id_token_subject_changed'
   | 'userinfo_subject_mismatch'
-  | 'wait_timeout';
+  | 'wait_timeout'
+  | 'webhook_signature_missing'
+  | 'webhook_signature_malformed'
+  | 'webhook_signature_invalid'
+  | 'webhook_timestamp_invalid'
+  | 'webhook_timestamp_outside_tolerance'
+  | 'webhook_body_invalid';
 
 /** Every code this SDK knows by name. */
 export type KnownCode = KernelTokenCode | OAuthErrorCode | SdkErrorCode;
@@ -220,6 +232,34 @@ export class InvalidToken extends AuthFIError {
   override readonly name: string = 'InvalidToken';
 }
 
+/**
+ * A DPoP-bound request must carry a current server nonce (RFC 9449 §8). `nonce` is the one to send
+ * back: an adapter answers 401 with it in `DPoP-Nonce`, and the client retries once.
+ */
+export class DPoPNonceRequired extends InvalidToken {
+  override readonly name: string = 'DPoPNonceRequired';
+  /** The current server nonce. */
+  readonly nonce: string;
+  constructor(nonce: string, message: string) {
+    super('dpop_proof_nonce_invalid', message);
+    this.nonce = nonce;
+  }
+}
+
+/**
+ * AuthFI withdrew the token's subject (or its actor) after the token was issued. `ref` is the id of
+ * the Shared Signals event that decided it, so a refusal can be traced to its cause.
+ */
+export class TokenRevoked extends InvalidToken {
+  override readonly name: string = 'TokenRevoked';
+  /** The `jti` of the event that revoked the subject, when it had one. */
+  readonly ref: string;
+  constructor(ref: string, message: string) {
+    super('token_revoked', message);
+    this.ref = ref;
+  }
+}
+
 /** The token lacks a permission or role the call needs. `required` names what was asked for. */
 export class InsufficientPermission extends InvalidToken {
   override readonly name: string = 'InsufficientPermission';
@@ -322,6 +362,29 @@ export class InvalidPendingSignIn extends AuthFIError {
   }
 }
 
+/**
+ * A webhook delivery that could not be trusted: its signature header is missing or malformed
+ * (`webhook_signature_missing`, `webhook_signature_malformed`), the signature does not match
+ * (`webhook_signature_invalid`), the timestamp is unreadable or outside the tolerance window
+ * (`webhook_timestamp_invalid`, `webhook_timestamp_outside_tolerance`), or the signed body is not an
+ * event (`webhook_body_invalid`). Answer 400 and do not act on the delivery.
+ */
+export class InvalidWebhook extends AuthFIError {
+  override readonly name: string = 'InvalidWebhook';
+  constructor(
+    code:
+      | 'webhook_signature_missing'
+      | 'webhook_signature_malformed'
+      | 'webhook_signature_invalid'
+      | 'webhook_timestamp_invalid'
+      | 'webhook_timestamp_outside_tolerance'
+      | 'webhook_body_invalid',
+    message: string,
+  ) {
+    super(code, message, { status: 400 });
+  }
+}
+
 /** The error classes by name, for {@link isAuthFIError}'s second argument. */
 export interface AuthFIErrorKinds {
   AuthFIError: AuthFIError;
@@ -336,6 +399,8 @@ export interface AuthFIErrorKinds {
   WaitTimeout: WaitTimeout;
   APIError: APIError;
   InvalidToken: InvalidToken;
+  DPoPNonceRequired: DPoPNonceRequired;
+  TokenRevoked: TokenRevoked;
   InsufficientPermission: InsufficientPermission;
   InsufficientScope: InsufficientScope;
   InsufficientAuthentication: InsufficientAuthentication;
@@ -344,6 +409,7 @@ export interface AuthFIErrorKinds {
   InvalidCallback: InvalidCallback;
   InvalidIdToken: InvalidIdToken;
   InvalidPendingSignIn: InvalidPendingSignIn;
+  InvalidWebhook: InvalidWebhook;
 }
 
 const PARENTS: Readonly<Record<string, string>> = {
@@ -358,6 +424,8 @@ const PARENTS: Readonly<Record<string, string>> = {
   WaitTimeout: 'AuthFIError',
   APIError: 'AuthFIError',
   InvalidToken: 'AuthFIError',
+  DPoPNonceRequired: 'InvalidToken',
+  TokenRevoked: 'InvalidToken',
   InsufficientPermission: 'InvalidToken',
   InsufficientScope: 'InvalidToken',
   InsufficientAuthentication: 'InvalidToken',
@@ -366,6 +434,7 @@ const PARENTS: Readonly<Record<string, string>> = {
   InvalidCallback: 'AuthFIError',
   InvalidIdToken: 'AuthFIError',
   InvalidPendingSignIn: 'AuthFIError',
+  InvalidWebhook: 'AuthFIError',
 };
 
 /**
