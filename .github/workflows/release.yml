@@ -1,5 +1,10 @@
 name: Release to npm
 
+# Publishes @authfi/sdk with npm trusted publishing: GitHub proves to npm which repository and
+# workflow is publishing (OIDC), so there is no npm token to leak or rotate, and the package gets a
+# provenance statement. The trusted publisher is set on npmjs.com (package @authfi/sdk, repository
+# authfi/authfi-nodejs-sdk, workflow release.yml).
+
 on:
   push:
     tags:
@@ -11,13 +16,20 @@ jobs:
     runs-on: authfi-ci-node
     permissions:
       contents: read
+      id-token: write # the OIDC token npm exchanges for a short-lived publish credential
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-node@v4
+      # Node 24 ships npm 11, and trusted publishing needs npm 11.5.1 or later (Node 22.x ships npm 10).
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: '20'
+          node-version: 24
           registry-url: 'https://registry.npmjs.org'
+
+      - name: Check npm can publish with trusted publishing
+        run: |
+          npm --version
+          node -e "const [a,b,c]=process.argv[1].split('.').map(Number); if (a<11 || (a===11 && (b<5 || (b===5 && c<1)))) { console.error('npm '+process.argv[1]+' is older than 11.5.1: trusted publishing needs 11.5.1 or later'); process.exit(1); }" "$(npm --version)"
 
       - name: Verify package version matches tag
         if: github.event_name == 'push'
@@ -29,10 +41,16 @@ jobs:
             exit 1
           fi
 
+      - name: Install
+        run: npm ci --no-audit --no-fund
+
       - name: Test
         run: npm test
 
+      - name: Build and check the package
+        run: |
+          npm run build
+          npm run check:package
+
       - name: Publish
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm publish --access public
+        run: npm publish --provenance --access public
