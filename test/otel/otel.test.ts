@@ -13,7 +13,12 @@ import { json } from '../support/fake-fetch.js';
 import { AGENT_ID, FakeAS } from '../support/fake-as.js';
 
 const logs: { warn: string[] } = { warn: [] };
-const logger = { debug() {}, info() {}, warn: (m: string) => logs.warn.push(m), error() {} };
+const logger = {
+  debug() {},
+  info() {},
+  warn: (m: string, f?: object) => logs.warn.push(`${m} ${JSON.stringify(f ?? {})}`),
+  error() {},
+};
 let live: AuthFITelemetry | undefined;
 
 afterEach(async () => {
@@ -100,7 +105,7 @@ describe('exporting steps to AuthFI', () => {
     live = registerAuthFITelemetry({ source: agent, global: false, logger });
     fake.on('POST', url, () => json({ error: 'unavailable' }, 503));
     await step(live);
-    expect(logs.warn.join('\n')).toContain('did not take the trace export');
+    expect(logs.warn.join('\n')).toContain('HTTP 503');
     fake.on('POST', url, () => proto(rejected(3)));
     await step(live);
     expect(logs.warn.join('\n')).toContain('did not keep some spans');
