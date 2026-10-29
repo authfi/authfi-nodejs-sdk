@@ -74,6 +74,36 @@
         "default": "./dist/vercel-ai.cjs"
       }
     },
+    "./langchain": {
+      "import": {
+        "types": "./dist/langchain.d.ts",
+        "default": "./dist/langchain.js"
+      },
+      "require": {
+        "types": "./dist/langchain.d.cts",
+        "default": "./dist/langchain.cjs"
+      }
+    },
+    "./openai-agents": {
+      "import": {
+        "types": "./dist/openai-agents.d.ts",
+        "default": "./dist/openai-agents.js"
+      },
+      "require": {
+        "types": "./dist/openai-agents.d.cts",
+        "default": "./dist/openai-agents.cjs"
+      }
+    },
+    "./mastra": {
+      "import": {
+        "types": "./dist/mastra.d.ts",
+        "default": "./dist/mastra.js"
+      },
+      "require": {
+        "types": "./dist/mastra.d.cts",
+        "default": "./dist/mastra.cjs"
+      }
+    },
     "./package.json": "./package.json"
   },
   "scripts": {
@@ -101,6 +131,12 @@
     "@arethetypeswrong/cli": "0.18.5",
     "@edge-runtime/vm": "5.0.0",
     "@eslint/js": "10.0.1",
+    "@langchain/core": "^1.3.1",
+    "@langchain/langgraph": "^1.5.3",
+    "@langchain/mcp-adapters": "^2.0.1",
+    "@mastra/core": "^1.80.0",
+    "@mastra/mcp": "^2.6.0",
+    "@openai/agents": "^0.21.0",
     "@opentelemetry/api": "^1.9.1",
     "@opentelemetry/context-async-hooks": "^2.1.0",
     "@opentelemetry/sdk-trace-base": "^2.1.0",
@@ -127,7 +163,13 @@
     "ai": ">=7.0.82 <8",
     "@ai-sdk/anthropic": ">=4.0.0 <5",
     "@ai-sdk/mcp": ">=2.0.0 <3",
-    "@opentelemetry/api": ">=1.9.0 <2"
+    "@opentelemetry/api": ">=1.9.0 <2",
+    "@langchain/core": ">=1.0.0 <2",
+    "@langchain/langgraph": ">=1.0.0 <2",
+    "@langchain/mcp-adapters": ">=2.0.0 <3",
+    "@openai/agents": ">=0.21.0 <1",
+    "@mastra/core": ">=1.80.0 <2",
+    "@mastra/mcp": ">=2.6.0 <3"
   },
   "peerDependenciesMeta": {
     "express": {
@@ -143,6 +185,24 @@
       "optional": true
     },
     "@opentelemetry/api": {
+      "optional": true
+    },
+    "@langchain/core": {
+      "optional": true
+    },
+    "@langchain/langgraph": {
+      "optional": true
+    },
+    "@langchain/mcp-adapters": {
+      "optional": true
+    },
+    "@openai/agents": {
+      "optional": true
+    },
+    "@mastra/core": {
+      "optional": true
+    },
+    "@mastra/mcp": {
       "optional": true
     }
   }
