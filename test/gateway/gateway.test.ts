@@ -98,6 +98,19 @@ describe('reading a tool result', () => {
     const { gateway, as } = await setup();
     expect(gateway.scopeOf({ _meta: { 'io.authfi/scope': 'mcp:a.b' } })).toBe('mcp:a.b');
     expect(gateway.scopeOf({})).toBeUndefined();
+    // the outlook is read from _meta first (a client may drop annotations), then the annotation
+    const key = 'io.authfi/governance';
+    expect(gateway.governanceOf({ _meta: { [key]: 'never_allowed' } })).toBe('never_allowed');
+    expect(gateway.governanceOf({ annotations: { [key]: 'may_require_approval' } })).toBe(
+      'may_require_approval',
+    );
+    expect(
+      gateway.governanceOf({
+        _meta: { [key]: 'never_allowed' },
+        annotations: { [key]: 'no_policy_restriction' },
+      }),
+    ).toBe('never_allowed');
+    expect(gateway.governanceOf({})).toBeUndefined();
     expect(gateway.modelBaseUrl('anthropic')).toBe(`${as.issuer}/mcp`);
     expect(gateway.modelBaseUrl('openai')).toBe(`${as.issuer}/mcp/v1`);
     expect(gateway.mcpUrl).toBe(`${as.issuer}/mcp`);

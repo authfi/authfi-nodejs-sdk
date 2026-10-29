@@ -7,6 +7,10 @@ All notable changes to this package. It follows [Semantic Versioning](https://se
 
 ### Added
 
+- **The adapters do not offer a tool the gateway says is never allowed** (`vercel-ai`, `langchain`,
+  `openai-agents`, `mastra`): the outlook `io.authfi/governance` is read from the tool's `_meta`,
+  falling back to the annotation for older gateways (`Gateway.governanceOf`, `Gateway.offerable`).
+  Advisory only: the gateway still decides every call, and a call to a hidden tool is refused.
 - **Agent tokens are proven, and withdrawn agents are refused** (ported from 0.1 #30 and #31): DPoP
   proofs (RFC 9449), the AuthFI certificate chain of the signing key, `agentTokens` modes,
   `publicUrl`, `trustForwarded`, `replayGuard`, `nonceKey`, `rootPins`/`rootCerts`, and

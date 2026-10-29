@@ -17,6 +17,8 @@ export const APPROVAL_ARGUMENT = '_authfi_approval_id';
 const REFUSAL_META = 'io.authfi/refusal';
 /** Where `tools/list` names the grant object (`mcp:<upstream>.<tool>`) of each tool. */
 const SCOPE_META = 'io.authfi/scope';
+/** The calling agent's advisory outlook for a tool: in `_meta` (kept by every MCP client) and, for older gateways, in `annotations`. */
+const GOVERNANCE_KEY = 'io.authfi/governance';
 /**
  * The gateway's hold, as prose until it answers a structured one, read by this one pattern in every
  * AuthFI SDK (Python exports the same string). It matches the gateway's exact message, which
@@ -168,6 +170,31 @@ export class Gateway {
   /** The grant object of a tool from `tools/list` (`mcp:<upstream>.<tool>`), or undefined without AuthFI's `_meta`. */
   scopeOf(tool: { readonly _meta?: Readonly<Record<string, unknown>> | undefined }): string | undefined {
     return str(tool._meta?.[SCOPE_META]);
+  }
+
+  /**
+   * The calling agent's advisory outlook for a tool from `tools/list`: `no_policy_restriction`,
+   * `may_require_approval` or `never_allowed`; undefined when the gateway has no opinion. Read from
+   * `_meta` first, because a client that drops unknown annotation keys (Python `mcp` 2.x) still keeps
+   * it; the annotation is the fallback for older gateways. Advisory only: the gateway decides each call.
+   */
+  governanceOf(tool: {
+    readonly _meta?: Readonly<Record<string, unknown>> | undefined;
+    readonly annotations?: Readonly<Record<string, unknown>> | undefined;
+  }): string | undefined {
+    return str(tool._meta?.[GOVERNANCE_KEY]) ?? str(tool.annotations?.[GOVERNANCE_KEY]);
+  }
+
+  /**
+   * Whether the model may be offered the tool: false when {@link Gateway.governanceOf} says
+   * `never_allowed`. Advisory only: a tool shown is still decided per call, and a call to a hidden
+   * tool is refused by the gateway.
+   */
+  offerable(tool: {
+    readonly _meta?: Readonly<Record<string, unknown>> | undefined;
+    readonly annotations?: Readonly<Record<string, unknown>> | undefined;
+  }): boolean {
+    return this.governanceOf(tool) !== 'never_allowed';
   }
 
   /** What AuthFI decided about a tool call, from its result (see {@link ToolOutcome}). */

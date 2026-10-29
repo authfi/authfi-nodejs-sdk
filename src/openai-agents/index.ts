@@ -33,7 +33,15 @@ export type { AdapterOptions as OpenAIAgentsOptions, GatewaySource, SpanApi } fr
 
 /** The part of `MCPServerStreamableHttp` the adapter uses. */
 export interface McpServerLike {
-  listTools(): Promise<readonly { name: string; description?: string | undefined; inputSchema: unknown }[]>;
+  listTools(): Promise<
+    readonly {
+      name: string;
+      description?: string | undefined;
+      inputSchema: unknown;
+      _meta?: Readonly<Record<string, unknown>> | undefined;
+      annotations?: Readonly<Record<string, unknown>> | undefined;
+    }[]
+  >;
   callToolResult?(name: string, args: Record<string, unknown> | null): Promise<unknown>;
 }
 
@@ -102,30 +110,37 @@ export class OpenAIAgentsAdapter {
       throw new ConfigurationError('tools() takes a connected MCPServerStreamableHttp');
     this.#server = server;
     const listed = await server.listTools();
-    return listed.map((mcp) => {
-      const key = mcp.name;
-      const idOf = (input: unknown, callId: string | undefined): string =>
-        callId ?? `${key}\u0000${canonicalJson(input)}`;
-      return tool({
-        name: key,
-        description: mcp.description ?? '',
-        parameters: mcp.inputSchema as never,
-        strict: false,
-        needsApproval: async (_context: unknown, input: unknown, callId?: string) => {
-          const id = idOf(input, callId);
-          const seen = this.#guard.entry(id) !== undefined;
-          const entry = await this.#guard.begin(id, key, input);
-          if (entry.status !== 'pending') return false;
-          return seen ? (await this.#guard.decision(id)) === 'pending' : true;
-        },
-        execute: async (input: unknown, _context: unknown, details?: { toolCall?: { callId?: string } }) => {
-          const id = idOf(input, details?.toolCall?.callId);
-          const result = await this.#guard.answer(id, key, input);
-          if (details?.toolCall?.callId === undefined) this.#guard.forget(id);
-          return textOf(result);
-        },
+    // A tool the gateway says is never allowed to this agent is not offered to the model.
+    return listed
+      .filter((mcp) => this.#run.gateway.offerable(mcp))
+      .map((mcp) => {
+        const key = mcp.name;
+        const idOf = (input: unknown, callId: string | undefined): string =>
+          callId ?? `${key}\u0000${canonicalJson(input)}`;
+        return tool({
+          name: key,
+          description: mcp.description ?? '',
+          parameters: mcp.inputSchema as never,
+          strict: false,
+          needsApproval: async (_context: unknown, input: unknown, callId?: string) => {
+            const id = idOf(input, callId);
+            const seen = this.#guard.entry(id) !== undefined;
+            const entry = await this.#guard.begin(id, key, input);
+            if (entry.status !== 'pending') return false;
+            return seen ? (await this.#guard.decision(id)) === 'pending' : true;
+          },
+          execute: async (
+            input: unknown,
+            _context: unknown,
+            details?: { toolCall?: { callId?: string } },
+          ) => {
+            const id = idOf(input, details?.toolCall?.callId);
+            const result = await this.#guard.answer(id, key, input);
+            if (details?.toolCall?.callId === undefined) this.#guard.forget(id);
+            return textOf(result);
+          },
+        });
       });
-    });
   }
 
   /** The calls that wait on a person's approval in AuthFI. */

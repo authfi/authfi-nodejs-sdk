@@ -21,6 +21,42 @@ export const STRUCTURE = 'deepwiki__read_wiki_structure';
 export const CONTENTS = 'deepwiki__read_wiki_contents';
 export const QUESTION = 'deepwiki__ask_wiki_question';
 
+/** What the gateway says of each tool for the calling agent (architecture section 6). */
+const OUTLOOK = {
+  [STRUCTURE]: 'no_policy_restriction',
+  [CONTENTS]: 'may_require_approval',
+  [QUESTION]: 'never_allowed',
+} as const;
+let advertise: 'off' | 'meta' | 'annotation' | 'both-conflicting' = 'off';
+
+/**
+ * Where `tools/list` puts the outlook, for the gateways made after this call: in `_meta` (current
+ * gateways), in the annotation (older ones), both with the annotation wrong, or nowhere (default).
+ */
+export function advertiseGovernance(where: typeof advertise): void {
+  advertise = where;
+}
+
+function outlookOf(wire: string): Record<string, unknown> {
+  const key = 'io.authfi/governance';
+  const value = OUTLOOK[wire as keyof typeof OUTLOOK];
+  switch (advertise) {
+    case 'meta':
+      return { _meta: { 'io.authfi/scope': scopeOf(wire), [key]: value } };
+    case 'annotation':
+      return { _meta: { 'io.authfi/scope': scopeOf(wire) }, annotations: { [key]: value } };
+    case 'both-conflicting':
+      return {
+        _meta: { 'io.authfi/scope': scopeOf(wire), [key]: value },
+        annotations: { [key]: 'no_policy_restriction' },
+      };
+    default:
+      return { _meta: { 'io.authfi/scope': scopeOf(wire) } };
+  }
+}
+
+const scopeOf = (wire: string): string => `mcp:${wire.replace('__', '.')}`;
+
 interface ModelBody {
   model: string;
   messages: {
@@ -150,7 +186,7 @@ export class FakeGateway {
               properties: { repoName: { type: 'string' } },
               required: ['repoName'],
             },
-            _meta: { 'io.authfi/scope': `mcp:${n}` },
+            ...outlookOf(n.replace('.', '__')),
           })),
         });
       case 'tools/call':
