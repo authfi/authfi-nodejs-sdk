@@ -322,7 +322,7 @@ describe('the kinds of key a certificate may certify', () => {
         {
           kid: 'k',
           algs: ['ES256'],
-          jwk: { ...key, kid: 'k', 'x5t#S256': s.pki.leafThumb, x5c: s.pki.x5c } as never,
+          jwk: { ...key, kid: 'k', 'x5t#S256': s.pki.leafThumb, x5c: s.pki.x5c },
         },
         s.pki.leafThumb,
       ),

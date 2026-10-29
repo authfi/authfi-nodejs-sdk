@@ -1,5 +1,5 @@
 import { compactVerify } from 'jose';
-import { fromBase64url, fromUtf8, utf8 } from '../core/bytes.js';
+import { fromBase64url, fromBase64urlStrict, fromUtf8, utf8 } from '../core/bytes.js';
 import { ConfigurationError, InvalidToken, isAuthFIError, TokenRevoked } from '../core/errors.js';
 import type { Logger } from '../core/logger.js';
 import { coreOf, type AuthFI, type Core } from '../core/project.js';
@@ -154,6 +154,9 @@ export function decodeUnverified(raw: string): {
     throw new InvalidToken('token_malformed', 'the token is encrypted (JWE), not a signed access token');
   if (parts.length !== 3 || parts.some((p) => p === ''))
     throw new InvalidToken('token_malformed', 'the token is not a compact JWS');
+  // Each segment must be the canonical spelling of what it decodes to, so one token has one string.
+  if (parts.some((p) => fromBase64urlStrict(p) === undefined))
+    throw new InvalidToken('token_malformed', 'the token is not canonical base64url');
   const [header, payload] = parts as [string, string, string];
   return { header: decodeJson(header), payload: decodeJson(payload) };
 }
@@ -311,16 +314,11 @@ export class TokenVerifier implements Verifier {
    * a token bound to a key and for every agent's token, the DPoP proof, method and URL, and the
    * certificate chain of the signing key. Takes a Fetch API `Request`, or the parts.
    */
-  verifyRequest(input: Request | RequestCredentials): Promise<AccessToken> {
+  async verifyRequest(input: Request | RequestCredentials): Promise<AccessToken> {
     const credentials = credentialsOf(input);
-    let parsed: { scheme: Scheme; raw: string };
-    try {
-      if ((credentials.headerCounts?.authorization ?? 0) > 1)
-        throw new InvalidToken('token_missing', 'exactly one Authorization header is allowed');
-      parsed = parseAuthorization(credentials.authorization);
-    } catch (e) {
-      return Promise.reject(e as Error);
-    }
+    if ((credentials.headerCounts?.authorization ?? 0) > 1)
+      throw new InvalidToken('token_missing', 'exactly one Authorization header is allowed');
+    const parsed = parseAuthorization(credentials.authorization);
     return this.verifyAs(parsed.raw, parsed.scheme, this.expectedTenantId, undefined, credentials);
   }
 
@@ -663,16 +661,12 @@ export class MultiIssuerVerifier implements Verifier {
   }
 
   /** Verifies the credential of a request (see {@link TokenVerifier.verifyRequest}). */
-  verifyRequest(input: Request | RequestCredentials): Promise<AccessToken> {
-    try {
-      const credentials = credentialsOf(input);
-      if ((credentials.headerCounts?.authorization ?? 0) > 1)
-        throw new InvalidToken('token_missing', 'exactly one Authorization header is allowed');
-      const { scheme, raw } = parseAuthorization(credentials.authorization);
-      return this.#verify(raw, scheme, undefined, credentials);
-    } catch (e) {
-      return Promise.reject(e as Error);
-    }
+  async verifyRequest(input: Request | RequestCredentials): Promise<AccessToken> {
+    const credentials = credentialsOf(input);
+    if ((credentials.headerCounts?.authorization ?? 0) > 1)
+      throw new InvalidToken('token_missing', 'exactly one Authorization header is allowed');
+    const { scheme, raw } = parseAuthorization(credentials.authorization);
+    return this.#verify(raw, scheme, undefined, credentials);
   }
 
   async #verify(

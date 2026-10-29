@@ -216,8 +216,10 @@ export class ChainProver {
       throw notProven('a certificate carries a critical extension this SDK does not understand');
 
     // x5c holds at least one certificate, so both exist.
-    const leafCert = certs[0] as Certificate;
-    const leafDer = ders[0] as Uint8Array;
+    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+    const leafCert = certs[0]!;
+    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+    const leafDer = ders[0]!;
     const thumbprint = base64url(await sha256(leafDer as Uint8Array<ArrayBuffer>));
     if (thumbprint !== headerX5t || thumbprint !== keyX5t)
       throw notProven('x5t#S256 does not name the leaf certificate');
@@ -278,7 +280,8 @@ export class ChainProver {
       throw policyError('the leaf certificate states no AuthFI policy');
     const caEnd = rootIndex >= 0 ? rootIndex : certs.length;
     for (let i = 1; i < caEnd; i++) {
-      const m = certs[i] as Certificate;
+      // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+      const m = certs[i]!;
       if (!m.isCA) throw policyError('a certificate between the leaf and the root is not a CA');
       if (m.keyUsage !== null && !m.keyCertSign)
         throw policyError('a CA certificate may not sign certificates');

@@ -115,7 +115,7 @@ describe('baseline verification', () => {
     const s = scenario();
     const [h, p, g] = s.token(s.claims()).split('.');
     const bad = `${h}.${p}.${(g ?? '').slice(0, -1)}B`;
-    await expect(s.client.verifyToken(bad)).rejects.toMatchObject({ name: 'InvalidToken' });
+    await rejectsWith(s.client.verifyToken(bad), 'token_malformed');
   });
   it('token_malformed: an empty signature', () =>
     refuse('token_malformed', (s) => {
