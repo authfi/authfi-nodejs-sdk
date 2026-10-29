@@ -392,12 +392,28 @@ platform gates each call on a permission (`manage:organizations`, `manage:users`
 `read:policy`) and on the project's plan, and a refusal is an `APIError` with `status` (401, 402,
 403) and `code`.
 
+A machine app needs two things set up in AuthFI before its first admin call works:
+
+1. **The console is an allowed audience.** `authfi-console` is in the app's allowed audiences, and the
+   token is requested with `resource=authfi-console` (the `resource` option below). A token without it
+   is for the app itself, and the admin API refuses it.
+2. **The app holds a role that allows the call.** The principal `app:<client_id>` holds a role with
+   `manage:organizations` and/or `manage:users` (and `manage:roles` for roles and bindings).
+
+Calls only a person can make stay refused for a machine app whatever its role: see the end of this
+section.
+
 ```ts
 import { AdminClient } from '@authfi/sdk/admin';
 
-// No `resource`: this token is for AuthFI's own API, whose origin it may go to. The "no resource"
-// warning is for tokens meant for your own API.
-const m2m = af.clientCredentials({ clientId, clientSecret: new Secret(process.env.AUTHFI_CLIENT_SECRET!) });
+// resource: the token's audience is the console API; sendTo: the project's own origin, the only
+// place this token may go.
+const m2m = af.clientCredentials({
+  clientId,
+  clientSecret: new Secret(process.env.AUTHFI_CLIENT_SECRET!),
+  resource: 'authfi-console',
+  sendTo: [af.apiOrigin],
+});
 const admin = new AdminClient(af, m2m);
 
 const org = await admin.organizations.create({ slug: 'initech', displayName: 'Initech' });
