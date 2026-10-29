@@ -100,7 +100,7 @@ describe('the pending sign-in', () => {
   it('refuses a blob that is altered, expired, or from another app or key', async () => {
     const { web, af, idp } = await setup();
     const blob = await (await web.startSignIn()).dump();
-    const flipped = `${blob.slice(0, -2)}${blob.endsWith('A') ? 'B' : 'A'}${blob.slice(-1)}`;
+    const flipped = `${blob.slice(0, -2)}${blob.at(-2) === 'A' ? 'B' : 'A'}${blob.slice(-1)}`;
     const refused = (code: string) => ({ name: 'InvalidPendingSignIn', code });
     await expect(web.loadPending(flipped)).rejects.toMatchObject(refused('pending_sign_in_tampered'));
     await expect(web.loadPending('v1.!!!')).rejects.toMatchObject(refused('pending_sign_in_malformed'));
