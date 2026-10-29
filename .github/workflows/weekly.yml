@@ -1,0 +1,71 @@
+name: Weekly
+
+# Catches a platform change before a customer does: the live documents the SDK reads, and the
+# kernel's refusal codes against the pinned tag.
+
+on:
+  schedule:
+    - cron: '17 4 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  drift:
+    name: platform drift
+    runs-on: ${{ vars.SDK_RUNNER || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Check the fields the SDK depends on in platform-beta's public documents
+        run: node scripts/check-drift.mjs https://platform-beta.authfi.io
+
+  kernel-codes:
+    name: kernel codes
+    runs-on: ${{ vars.SDK_RUNNER || 'ubuntu-latest' }}
+    # The kernel repository is private: this job reads it with a read-only token kept in the
+    # `drift` environment, which pull requests never reach.
+    environment: drift
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: authfi/authfi-regional-kernel
+          path: kernel
+          fetch-depth: 0
+          token: ${{ secrets.KERNEL_READ_TOKEN }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Compare the committed codes with the pinned kernel tag
+        run: node scripts/gen-codes.mjs --check --kernel kernel
+      - name: Compare with the kernel's newest tag
+        run: node scripts/gen-codes.mjs --check --kernel kernel --ref "$(git -C kernel describe --tags --abbrev=0 origin/main)"
+
+  framework-canary:
+    name: framework canary
+    runs-on: ${{ vars.SDK_RUNNER || 'ubuntu-latest' }}
+    # The newest release of each framework the adapters support, so a framework change is seen here
+    # before a customer sees it.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Install the newest Vercel AI SDK and Express
+        run: npm install --no-save ai@latest @ai-sdk/anthropic@latest @ai-sdk/mcp@latest @ai-sdk/otel@latest express@latest
+      - name: Run the adapter suites against them
+        run: npx vitest run --project node test/vercel-ai test/express
