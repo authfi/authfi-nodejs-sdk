@@ -549,6 +549,13 @@ export class SamlServiceProvider {
     if (assertionId === undefined || assertionId === '') {
       throw new SamlAssertionRefused('saml_id_missing', 'the assertion has no ID');
     }
+    // @node-saml 5.0 does not compare the assertion's Issuer when only the assertion is signed.
+    if (
+      textValue(Array.isArray(assertion.Issuer) ? (assertion.Issuer as unknown[])[0] : undefined) !==
+      this.#idp.entityId
+    ) {
+      throw new SamlAssertionRefused('saml_issuer_mismatch', 'the assertion is from another issuer');
+    }
     const conditions = first(assertion.Conditions);
     const ends = times(conditions, 'NotOnOrAfter');
     if (ends === undefined) {
