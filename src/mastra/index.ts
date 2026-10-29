@@ -30,6 +30,13 @@ export type { AdapterOptions as MastraOptions, GatewaySource, SpanApi } from '..
 /** The part of a Mastra tool the adapter replaces or reads. */
 export interface MastraToolLike {
   execute?: ((input: unknown, context?: MastraContextLike) => Promise<unknown>) | undefined;
+  /** Where `@mastra/mcp` keeps the MCP tool's `_meta` and annotations. */
+  mcp?:
+    | {
+        _meta?: Readonly<Record<string, unknown>> | undefined;
+        annotations?: Readonly<Record<string, unknown>> | undefined;
+      }
+    | undefined;
 }
 
 /** The part of Mastra's tool execution context the adapter reads. */
@@ -96,7 +103,7 @@ export class MastraAdapter {
   }
 
   /**
-   * The tools `mcp.listTools()` returned, with AuthFI's decision in front of each: a model-written
+   * The tools `mcp.listTools()` returned, without the tools AuthFI says are never allowed to this agent, and with AuthFI's decision in front of each: a model-written
    * approval id is removed, a refusal is the tool's answer, and a call that needs a person goes
    * through Mastra's own approval and runs only once AuthFI has approved it.
    */
@@ -106,6 +113,8 @@ export class MastraAdapter {
     const out: Record<string, object> = {};
     for (const [name, tool] of Object.entries(listed)) {
       const execute = (tool as MastraToolLike).execute;
+      // A tool the gateway says is never allowed to this agent is not offered to the model.
+      if (!this.#run.gateway.offerable((tool as MastraToolLike).mcp ?? {})) continue;
       if (typeof execute !== 'function')
         throw new ConfigurationError(`MCP tool ${name} has no execute function`);
       // The gateway names the tool by its MCP name; Mastra keys it `<server>_<tool>`.

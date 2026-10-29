@@ -133,7 +133,7 @@ export class VercelAIAdapter {
 
   /**
    * The MCP tools for `generateText`, under their gateway names (`<server>__<tool>`). Each execute
-   * strips a model-written approval id, calls the gateway, and answers a refusal as the tool's
+   * omits the tools AuthFI says are never allowed to this agent, strips a model-written approval id, calls the gateway, and answers a refusal as the tool's
    * result. A call AuthFI already answered during approval is not made again.
    */
   tools<T extends ToolSet>(mcpTools: T): T {
@@ -144,6 +144,8 @@ export class VercelAIAdapter {
       const execute = (tool as { execute?: unknown }).execute;
       if (typeof execute !== 'function')
         throw new ConfigurationError(`MCP tool ${key} has no execute function`);
+      // A tool the gateway says is never allowed to this agent is not offered to the model.
+      if (!this.#run.gateway.offerable(tool as object)) continue;
       this.#tools.set(key, { execute: execute as ToolExecute });
       out[key] = {
         ...tool,
