@@ -7,26 +7,34 @@ import type { Logger } from './logger.js';
 import { contextOf, jsonOf, MAX_DOCUMENT_BYTES, type Transport } from './transport.js';
 
 /** The algorithms the SDK verifies issuer signatures with. */
-export type VerifyAlgorithm = 'RS256' | 'ES256' | 'EdDSA';
+export type VerifyAlgorithm = 'RS256' | 'PS256' | 'ES256' | 'EdDSA';
 
-/** A published key the verifier may use: its kid and the one algorithm it verifies. */
-interface UsableKey {
+/** A published key the verifier may use: its kid and the algorithms it verifies. */
+export interface UsableKey {
   readonly kid: string;
-  readonly alg: VerifyAlgorithm;
+  /** The algorithms the key's type allows; one when the key names its `alg`. */
+  readonly algs: readonly VerifyAlgorithm[];
   readonly jwk: JWK;
 }
 
 const PRIVATE_MEMBERS = ['d', 'p', 'q', 'dp', 'dq', 'qi', 'k', 'oth'] as const;
 const MIN_RSA_BITS = 2048;
+const MAX_KEYS = 100;
 
 /** A key whose kid the token names is not published, after the rate-limited refetch. */
 export const UNKNOWN_KID_REFETCH_MS = 30_000;
 
-/** The algorithm a key's type implies, or undefined for a type the SDK does not verify. */
-function algorithmOfType(jwk: JWK): VerifyAlgorithm | undefined {
-  if (jwk.kty === 'RSA') return 'RS256';
-  if (jwk.kty === 'EC' && jwk.crv === 'P-256') return 'ES256';
-  if (jwk.kty === 'OKP' && jwk.crv === 'Ed25519') return 'EdDSA';
+/** How long a failed key set fetch is remembered, so an outage is not hammered. */
+export const FAILED_FETCH_BACKOFF_MS = 15_000;
+
+/** How long past its TTL a key set is still used when it cannot be refreshed. */
+export const STALE_KEYS_MS = 60 * 60 * 1000;
+
+/** The algorithms a key's type implies, or undefined for a type the SDK does not verify. */
+function algorithmsOfType(jwk: JWK): readonly VerifyAlgorithm[] | undefined {
+  if (jwk.kty === 'RSA') return ['RS256', 'PS256'];
+  if (jwk.kty === 'EC' && jwk.crv === 'P-256') return ['ES256'];
+  if (jwk.kty === 'OKP' && jwk.crv === 'Ed25519') return ['EdDSA'];
   return undefined;
 }
 
@@ -39,9 +47,9 @@ export function refusalOf(jwk: JWK): string | undefined {
   if (jwk.use !== undefined && jwk.use !== 'sig') return `its use is ${jwk.use}`;
   if (PRIVATE_MEMBERS.some((m) => (jwk as Record<string, unknown>)[m] !== undefined))
     return 'it carries a private member';
-  const implied = algorithmOfType(jwk);
+  const implied = algorithmsOfType(jwk);
   if (implied === undefined) return `its type ${jwk.kty ?? '-'}/${jwk.crv ?? '-'} is not verified by the SDK`;
-  if (jwk.alg !== undefined && jwk.alg !== implied)
+  if (jwk.alg !== undefined && !(implied as readonly string[]).includes(jwk.alg))
     return `its alg ${jwk.alg} disagrees with its type ${jwk.kty}`;
   if (jwk.kty === 'RSA') {
     let bits: number;
@@ -71,19 +79,17 @@ export class KeySet {
 
   constructor(transport: Transport, jwksUri: () => Promise<string>, clock: Clock, logger: Logger) {
     this.#clock = clock;
-    this.#doc = new CachedDocument(async () => loadKeys(transport, await jwksUri(), logger), clock);
+    this.#doc = new CachedDocument(async () => loadKeys(transport, await jwksUri(), logger), clock, {
+      staleGraceMs: STALE_KEYS_MS,
+      failureBackoffMs: FAILED_FETCH_BACKOFF_MS,
+    });
   }
 
   /**
-   * The verification key for `kid`, with the one algorithm it verifies. Refuses (as `InvalidToken`
-   * `token_key_unknown`) an unknown kid, and a header `alg` that is not the key's: as in the kernel's
-   * `middleware/jwks.go`, a key of another type is no key for the token.
+   * The published key for `kid`, or undefined. A kid not in the set triggers one refetch, at most
+   * once per 30 seconds.
    */
-  async key(
-    kid: string,
-    alg: string,
-    signal?: AbortSignal,
-  ): Promise<{ key: CryptoKey; alg: VerifyAlgorithm }> {
+  async lookup(kid: string, signal?: AbortSignal): Promise<UsableKey | undefined> {
     let keys = await this.#doc.get({ signal });
     let found = keys.get(kid);
     if (found === undefined && this.#clock.monotonic() - this.#lastUnknownRefetch >= UNKNOWN_KID_REFETCH_MS) {
@@ -91,22 +97,37 @@ export class KeySet {
       keys = await this.#doc.get({ refresh: true, signal });
       found = keys.get(kid);
     }
+    return found;
+  }
+
+  /**
+   * The verification key for `kid`, with the algorithm the token names. Refuses (as `InvalidToken`
+   * `token_key_unknown`) an unknown kid, and a header `alg` that is not one the key's type allows:
+   * as in the kernel's `middleware/jwks.go`, a key of another type is no key for the token.
+   */
+  async key(
+    kid: string,
+    alg: string,
+    signal?: AbortSignal,
+  ): Promise<{ key: CryptoKey; alg: VerifyAlgorithm; published: UsableKey }> {
+    const found = await this.lookup(kid, signal);
     if (found === undefined)
       throw new InvalidToken('token_key_unknown', `the issuer publishes no usable key ${kid}`);
-    if (alg !== found.alg) {
+    const allowed = found.algs.find((a) => a === alg);
+    if (allowed === undefined) {
       throw new InvalidToken(
         'token_key_unknown',
-        `the token's alg ${alg} is not ${found.alg}, the algorithm of key ${kid}`,
+        `the token's alg ${alg} is not ${found.algs.join(' or ')}, the algorithm of key ${kid}`,
       );
     }
-    const cacheKey = `${kid}\u0000${JSON.stringify(found.jwk)}`;
+    const cacheKey = `${kid}\u0000${alg}\u0000${JSON.stringify(found.jwk)}`;
     let imported = this.#imported.get(cacheKey);
     if (imported === undefined) {
-      imported = importJWK(found.jwk, found.alg).then((k) => k as CryptoKey);
+      imported = importJWK(found.jwk, allowed).then((k) => k as CryptoKey);
       imported.catch(() => this.#imported.delete(cacheKey));
       this.#imported.set(cacheKey, imported);
     }
-    return { key: await imported, alg: found.alg };
+    return { key: await imported, alg: allowed, published: found };
   }
 }
 
@@ -128,7 +149,7 @@ async function loadKeys(
     throw new DiscoveryError('discovery_failed', `the key set at ${url} has no keys array`, contextOf(res));
   }
   const keys = new Map<string, UsableKey>();
-  for (const raw of doc.keys as unknown[]) {
+  for (const raw of (doc.keys as unknown[]).slice(0, MAX_KEYS)) {
     if (typeof raw !== 'object' || raw === null) continue;
     const jwk = raw as JWK;
     const refusal = refusalOf(jwk);
@@ -140,8 +161,23 @@ async function loadKeys(
       });
       continue;
     }
-    const alg = algorithmOfType(jwk);
-    if (alg !== undefined && typeof jwk.kid === 'string') keys.set(jwk.kid, { kid: jwk.kid, alg, jwk });
+    const all = algorithmsOfType(jwk);
+    // The first key of a kid wins.
+    if (all === undefined || typeof jwk.kid !== 'string' || keys.has(jwk.kid)) continue;
+    const algs = jwk.alg === undefined ? all : all.filter((a) => a === jwk.alg);
+    const [first] = algs;
+    try {
+      if (first === undefined) throw new TypeError('no algorithm');
+      await importJWK(jwk, first); // a key that does not parse is skipped, never fatal to the others
+    } catch {
+      logger.warn('ignored a published key', {
+        jwks_uri: url,
+        kid: jwk.kid,
+        reason: 'it cannot be imported',
+      });
+      continue;
+    }
+    keys.set(jwk.kid, { kid: jwk.kid, algs, jwk });
   }
   return { value: keys, maxAgeMs: maxAgeOf(res.headers.get('cache-control')) };
 }

@@ -163,6 +163,56 @@ const { allowed, approvalRequired } = await af.check(m2m, {
 });
 ```
 
+## Agent tokens and revocation
+
+An agent's token (`sub` or `client_id` starting `agt_`, or an `act` claim) is accepted only when the
+request proves it. With `agentTokens: 'enforce'` (the default) `verifier.verifyRequest()` and
+`protect()` require:
+
+1. `Authorization: DPoP <token>` with `cnf.jkt`, and exactly one valid DPoP proof (RFC 9449): `typ
+   dpop+jwt`; EdDSA, ES256 or PS256 bound to the embedded key; `htm` and `htu` equal to this request;
+   `iat` within 60 s (5 s ahead); `ath` the token's hash; the key's RFC 7638 thumbprint equal to
+   `cnf.jkt`; a `jti` not used before (single use per key); and the server nonce when `nonceKey` is set;
+2. a signing key certified by a chain: the key set's `x5c` leaf certifies it, `x5t#S256` in the
+   token header and the key set equals the leaf, the chain reaches a pinned AuthFI root (SHA-256 of
+   its SPKI; `rootPins` and `rootCerts` override), the leaf and every CA between state AuthFI policy
+   `1.3.6.1.4.1.67322.1.1` or `.1.2`, and every signature and date verifies.
+
+```ts
+const verifier = af.verifier({
+  audience: 'api_orders',
+  publicUrl: 'https://api.example.com', // the origin clients call: the Host header is never used
+  // trustForwarded: true,              // behind a proxy you control, instead of publicUrl
+  // replayGuard, nonceKey, rootPins, rootCerts, agentTokens: 'watch' | 'off'
+});
+```
+
+`verifier.verify(token)` has no request to prove anything with, so it refuses an agent's token as
+`agent_token_needs_request`. With more than one replica supply a shared `replayGuard`
+(`record(key, expiresAtMs)`). `watch` logs what `enforce` would refuse and accepts; `off` skips both
+checks and warns once.
+
+Access tokens verify offline, so a withdrawn agent would keep working until its token expires.
+`@authfi/sdk/signals` takes the signed Shared Signals event (RFC 8935 push) AuthFI sends:
+
+```ts
+import { createReceiver, createRevocationStore, registerStream } from '@authfi/sdk/signals';
+
+const revocations = createRevocationStore({ tokenLifetimeSeconds: 86_400 }); // your longest token
+const verifier = af.verifier({ audience: 'api_orders', publicUrl, revocations });
+app.post('/ssf/push', createReceiver(af, { revocations, audience: 'my-stream', authToken: process.env.PUSH_BEARER }));
+await registerStream(af, operatorBearer, { audience: 'my-stream', endpointUrl: 'https://api.example.com/ssf/push' });
+```
+
+The receiver answers 202 (also for a retry and for an event older than any token it could affect),
+400 `{"err","description"}` for a SET that is refused for good, and 503 for anything that can heal (a
+key not in the key set yet, a key set it cannot read, an `iat` ahead of its clock), because the
+transmitter treats a 400 as final. `session-revoked`, `account-purged` and `credential-compromise`
+revoke the subject: tokens issued at or before the event's `iat` are refused as `token_revoked` (the
+error carries the event's `jti` as `ref`); a token issued after it is accepted. A delegated token is
+refused when its actor is revoked. The store is in memory: a restart empties it, so run one stream per
+process and keep token lifetimes short.
+
 ## Machine clients
 
 ```ts
@@ -225,14 +275,61 @@ person can consent again, and raises `ConsentExpired` near expiry.
 - `agent.approval(id)` raises `NotSupportedError` (`agent_approval_status`) on a project that does
   not offer approval status to agents.
 
+## Connect from the environment
+
+`connect()` (from `@authfi/sdk/node`) reads `AUTHFI_ISSUER` and the credential, and returns what the
+gateways and the Vercel AI adapter take as `source`:
+
+- an agent, the default: `AUTHFI_AGENT_ID` with `AUTHFI_AGENT_KEY_FILE` (or `AUTHFI_AGENT_PRIVATE_KEY` and
+  `AUTHFI_AGENT_KID`), exactly as `agentFromEnv` reads them;
+- else a machine client: `AUTHFI_CLIENT_ID` with `AUTHFI_CLIENT_SECRET`. Its token is minted for the
+  gateway (`<issuer>/mcp`) and reaches the gateways as a client, with no agent id; the gateway records the
+  caller as `client-credentials`.
+
+A missing variable is a `ConfigurationError` that names it. When `@opentelemetry/api` is installed it is
+given to the project, so each gateway call carries the active trace.
+
+```ts
+import { connect } from '@authfi/sdk/node';
+import { createVercelAI } from '@authfi/sdk/vercel-ai';
+
+const authfi = createVercelAI({ source: await connect(), approvalSecret });
+```
+
+## Steps to AuthFI
+
+`@authfi/sdk/otel` exports the steps of your framework (model calls, tool calls) to
+`<issuer>/otlp/v1/traces` as OTLP/HTTP protobuf. AuthFI keeps each span as the token's agent's.
+
+- The credential is read for every export, so a renewed token is used and none is held in a header; a
+  refused token is renewed once.
+- Prompts, answers and tool arguments and results are dropped before export unless `captureContent`
+  is on (AuthFI drops them on arrival too).
+- Every span carries `authfi.agent_id` and `authfi.run_id`.
+- Install the optional peers: `@opentelemetry/api`, `@opentelemetry/sdk-trace-base`,
+  `@opentelemetry/otlp-transformer` (and `@ai-sdk/otel` for the AI SDK).
+
+```ts
+// Vercel AI SDK: one line, wired through the AI SDK's own telemetry seam.
+const steps = await authfi.exportSteps();
+// ... generateText(...) ...
+await steps.shutdown(); // sends what is buffered
+
+// Any other framework that takes an OpenTelemetry tracer:
+import { registerAuthFITelemetry } from '@authfi/sdk/otel';
+const telemetry = registerAuthFITelemetry({ source: await connect(), global: false });
+// give telemetry.tracer to the framework
+```
+
 ## The gateways
 
-`agent.gateway()` (or `delegatedToken.gateway()`) is the project's MCP gateway and AI gateway for
+`agent.gateway()`, `delegatedToken.gateway()` or `clientCredentials.gateway()` is the project's MCP gateway and AI gateway for
 that credential.
 
 | | |
 |---|---|
 | `gateway.mcpUrl` | `<issuer>/mcp` |
+| `gateway.forRun(runId?)` | the same credential for one run: each call's `X-Request-Id` is `<runId>.<n>` (the run id also goes on spans as `authfi.run_id`); `gateway.serverRunId` is the run AuthFI derived, from `AuthFI-Run-Id` |
 | `gateway.modelBaseUrl('anthropic' \| 'openai')` | the base URL for a provider SDK |
 | `gateway.fetch` | the credential per request, `X-Request-Id` and `traceparent`, AuthFI's origins only, no redirects; a 401 is `GatewayTokenRefused` |
 | `gateway.readResult(result)` | a `ToolOutcome`: `allowed`, `refused` (with `code`, `reason`, `requiredScope`) or `approval_required` (with `approvalId`) |
@@ -248,7 +345,8 @@ answer. Never give a hold's text to a model: it names the approval. An adapter s
 | Framework | Package | |
 |---|---|---|
 | Express | `@authfi/sdk/express` | `protect`, `authfiErrorHandler` |
-| Vercel AI SDK 7 | `@authfi/sdk/vercel-ai` | `createVercelAI({ source, approvalSecret })`: `.anthropic()`, `.mcpTransport()`, `.tools()`, `.approvals()`, `.awaitApprovals()`, `.telemetry()` |
+| Vercel AI SDK 7 | `@authfi/sdk/vercel-ai` | `createVercelAI({ source, approvalSecret })`: `.anthropic()`, `.mcpTransport()`, `.tools()`, `.approvals()`, `.awaitApprovals()`, `.telemetry()`, `.exportSteps()` |
+| OpenTelemetry | `@authfi/sdk/otel` | `registerAuthFITelemetry({ source })`, `AuthFISpanExporter` |
 
 Framework packages are optional peer dependencies; install the ones you use.
 

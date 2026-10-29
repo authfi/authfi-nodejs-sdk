@@ -32,6 +32,12 @@ export type SdkErrorCode =
   | 'issuer_mismatch'
   | 'not_supported'
   | 'token_act_chain_unsupported'
+  | 'agent_token_needs_request'
+  | 'token_revoked'
+  | 'token_iat_exp_required'
+  | 'chain_not_proven'
+  | 'chain_policy'
+  | 'chain_pin'
   | 'insufficient_permission'
   | 'insufficient_scope'
   | 'gateway_token_refused'
@@ -226,6 +232,34 @@ export class InvalidToken extends AuthFIError {
   override readonly name: string = 'InvalidToken';
 }
 
+/**
+ * A DPoP-bound request must carry a current server nonce (RFC 9449 §8). `nonce` is the one to send
+ * back: an adapter answers 401 with it in `DPoP-Nonce`, and the client retries once.
+ */
+export class DPoPNonceRequired extends InvalidToken {
+  override readonly name: string = 'DPoPNonceRequired';
+  /** The current server nonce. */
+  readonly nonce: string;
+  constructor(nonce: string, message: string) {
+    super('dpop_proof_nonce_invalid', message);
+    this.nonce = nonce;
+  }
+}
+
+/**
+ * AuthFI withdrew the token's subject (or its actor) after the token was issued. `ref` is the id of
+ * the Shared Signals event that decided it, so a refusal can be traced to its cause.
+ */
+export class TokenRevoked extends InvalidToken {
+  override readonly name: string = 'TokenRevoked';
+  /** The `jti` of the event that revoked the subject, when it had one. */
+  readonly ref: string;
+  constructor(ref: string, message: string) {
+    super('token_revoked', message);
+    this.ref = ref;
+  }
+}
+
 /** The token lacks a permission or role the call needs. `required` names what was asked for. */
 export class InsufficientPermission extends InvalidToken {
   override readonly name: string = 'InsufficientPermission';
@@ -365,6 +399,8 @@ export interface AuthFIErrorKinds {
   WaitTimeout: WaitTimeout;
   APIError: APIError;
   InvalidToken: InvalidToken;
+  DPoPNonceRequired: DPoPNonceRequired;
+  TokenRevoked: TokenRevoked;
   InsufficientPermission: InsufficientPermission;
   InsufficientScope: InsufficientScope;
   InsufficientAuthentication: InsufficientAuthentication;
@@ -388,6 +424,8 @@ const PARENTS: Readonly<Record<string, string>> = {
   WaitTimeout: 'AuthFIError',
   APIError: 'AuthFIError',
   InvalidToken: 'AuthFIError',
+  DPoPNonceRequired: 'InvalidToken',
+  TokenRevoked: 'InvalidToken',
   InsufficientPermission: 'InvalidToken',
   InsufficientScope: 'InvalidToken',
   InsufficientAuthentication: 'InvalidToken',

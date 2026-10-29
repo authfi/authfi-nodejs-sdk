@@ -17,12 +17,21 @@ import { API, ISSUER, TENANT, TestIssuer, unsignedJwt } from '../support/issuer.
 
 const silent = { debug() {}, info() {}, warn() {}, error() {} };
 
-async function setup(options: { expectedTenantId?: string; audience?: string[] } = {}) {
+async function setup(
+  options: {
+    expectedTenantId?: string;
+    audience?: string[];
+    agentTokens?: 'enforce' | 'watch' | 'off';
+    publicUrl?: string;
+  } = {},
+) {
   const t = await TestIssuer.create();
   const af = new AuthFI({ issuer: t.issuer, fetch: t.fake.fetch, logger: silent });
   const verifier = af.verifier({
     audience: options.audience ?? [API],
     expectedTenantId: options.expectedTenantId,
+    agentTokens: options.agentTokens,
+    publicUrl: options.publicUrl,
   });
   return { t, af, verifier };
 }
@@ -291,7 +300,8 @@ describe('the seven token shapes', () => {
   ];
   for (const [what, claims, principal, actor, kind] of shapes) {
     it(`reads ${what}`, async () => {
-      const { t, verifier } = await setup();
+      // The shape of the claims is read here; agent proofs are the subject of test/containment.
+      const { t, verifier } = await setup({ agentTokens: 'off' });
       const token = await verifier.verify(
         await t.sign(claims, { alg: kind === 'agent' || what.startsWith('T5') ? 'EdDSA' : 'RS256' }),
       );
@@ -331,7 +341,7 @@ describe('the seven token shapes', () => {
 
 describe('requirements on a token', () => {
   async function token(claims: Record<string, unknown>) {
-    const { t, verifier } = await setup();
+    const { t, verifier } = await setup({ agentTokens: 'off' });
     return verifier.verify(await t.sign(claims));
   }
 
@@ -379,7 +389,7 @@ describe('requirements on a token', () => {
 
 describe('verifyRequest', () => {
   it('reads the Bearer and DPoP schemes from a Fetch Request or the parts', async () => {
-    const { t, verifier } = await setup();
+    const { t, verifier } = await setup({ publicUrl: 'https://api.example.com' });
     const raw = await t.sign();
     const req = new Request('https://api.example.com/orders', {
       headers: { authorization: `bearer ${raw}` },
@@ -390,9 +400,10 @@ describe('verifyRequest', () => {
         verifier.verifyRequest({ authorization: `DPoP ${raw}`, dpop: 'p', method: 'GET', url: 'u' }),
       ),
     ).toBe('token_dpop_unbound');
+    // A bound token is checked against a proof: with none, it is refused for that.
     const bound = await t.sign({ cnf: { jkt: 'x' } });
     expect(await refusal(verifier.verifyRequest({ authorization: `DPoP ${bound}` }))).toBe(
-      'token_dpop_unsupported',
+      'dpop_proof_missing',
     );
     expect(await refusal(verifier.verifyRequest({ authorization: null }))).toBe('token_missing');
     expect(await refusal(verifier.verifyRequest({ authorization: `Basic abc` }))).toBe('token_missing');

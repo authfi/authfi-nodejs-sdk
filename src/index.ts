@@ -22,6 +22,7 @@ export {
   ConsentDenied,
   ConsentExpired,
   DiscoveryError,
+  DPoPNonceRequired,
   GatewayTokenRefused,
   InsufficientAuthentication,
   InsufficientPermission,
@@ -36,6 +37,7 @@ export {
   OAuthError,
   StepUpRequired,
   TemporarilyUnavailable,
+  TokenRevoked,
   TransportError,
   WaitTimeout,
   type AuthFIErrorKinds,
@@ -52,6 +54,7 @@ export {
   MultiIssuerVerifier,
   TokenVerifier,
   type RequestCredentials,
+  type RevocationStore,
   type Scheme,
   type TrustedIssuer,
   type Verifier,
@@ -65,6 +68,8 @@ export {
   type RefusalAnswer,
   type Requirements,
 } from './verify/answer.js';
+export { DEFAULT_ROOT_PINS } from './verify/chain.js';
+export { memoryReplayGuard, type ReplayGuard } from './verify/dpop-proof.js';
 export type { CheckRequest, CheckResult } from './verify/check.js';
 export { ClientCredentials, type ClientCredentialsOptions } from './machine/client-credentials.js';
 // The 0.1 factory, deprecated and kept for one minor version.

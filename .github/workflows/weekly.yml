@@ -14,7 +14,7 @@ permissions:
 jobs:
   drift:
     name: platform drift
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.SDK_RUNNER || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -27,7 +27,7 @@ jobs:
 
   kernel-codes:
     name: kernel codes
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.SDK_RUNNER || 'ubuntu-latest' }}
     # The kernel repository is private: this job reads it with a read-only token kept in the
     # `drift` environment, which pull requests never reach.
     environment: drift
@@ -52,7 +52,7 @@ jobs:
 
   framework-canary:
     name: framework canary
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.SDK_RUNNER || 'ubuntu-latest' }}
     # The newest release of each framework the adapters support, so a framework change is seen here
     # before a customer sees it.
     steps:
