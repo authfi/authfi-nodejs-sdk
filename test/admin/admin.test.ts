@@ -292,7 +292,7 @@ describe('refusals', () => {
 
   it('encodes an id so it cannot add a path segment or a query', async () => {
     const { t, admin } = await setup();
-    t.fake.on('GET', () => true as unknown as string, () => json({ data: orgWire() }));
+    t.fake.on('GET', () => true, () => json({ data: orgWire() }));
     await admin.organizations.get('../users?x=1');
     const url = t.fake.requests.at(-1)!.url;
     expect(url).toBe(`${V1}/organizations/..%2Fusers%3Fx%3D1`);
