@@ -84,6 +84,16 @@
         "default": "./dist/otel.cjs"
       }
     },
+    "./signals": {
+      "import": {
+        "types": "./dist/signals.d.ts",
+        "default": "./dist/signals.js"
+      },
+      "require": {
+        "types": "./dist/signals.d.cts",
+        "default": "./dist/signals.cjs"
+      }
+    },
     "./package.json": "./package.json"
   },
   "scripts": {

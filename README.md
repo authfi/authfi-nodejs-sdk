@@ -163,6 +163,56 @@ const { allowed, approvalRequired } = await af.check(m2m, {
 });
 ```
 
+## Agent tokens and revocation
+
+An agent's token (`sub` or `client_id` starting `agt_`, or an `act` claim) is accepted only when the
+request proves it. With `agentTokens: 'enforce'` (the default) `verifier.verifyRequest()` and
+`protect()` require:
+
+1. `Authorization: DPoP <token>` with `cnf.jkt`, and exactly one valid DPoP proof (RFC 9449): `typ
+   dpop+jwt`; EdDSA, ES256 or PS256 bound to the embedded key; `htm` and `htu` equal to this request;
+   `iat` within 60 s (5 s ahead); `ath` the token's hash; the key's RFC 7638 thumbprint equal to
+   `cnf.jkt`; a `jti` not used before (single use per key); and the server nonce when `nonceKey` is set;
+2. a signing key certified by a chain: the key set's `x5c` leaf certifies it, `x5t#S256` in the
+   token header and the key set equals the leaf, the chain reaches a pinned AuthFI root (SHA-256 of
+   its SPKI; `rootPins` and `rootCerts` override), the leaf and every CA between state AuthFI policy
+   `1.3.6.1.4.1.67322.1.1` or `.1.2`, and every signature and date verifies.
+
+```ts
+const verifier = af.verifier({
+  audience: 'api_orders',
+  publicUrl: 'https://api.example.com', // the origin clients call: the Host header is never used
+  // trustForwarded: true,              // behind a proxy you control, instead of publicUrl
+  // replayGuard, nonceKey, rootPins, rootCerts, agentTokens: 'watch' | 'off'
+});
+```
+
+`verifier.verify(token)` has no request to prove anything with, so it refuses an agent's token as
+`agent_token_needs_request`. With more than one replica supply a shared `replayGuard`
+(`record(key, expiresAtMs)`). `watch` logs what `enforce` would refuse and accepts; `off` skips both
+checks and warns once.
+
+Access tokens verify offline, so a withdrawn agent would keep working until its token expires.
+`@authfi/sdk/signals` takes the signed Shared Signals event (RFC 8935 push) AuthFI sends:
+
+```ts
+import { createReceiver, createRevocationStore, registerStream } from '@authfi/sdk/signals';
+
+const revocations = createRevocationStore({ tokenLifetimeSeconds: 86_400 }); // your longest token
+const verifier = af.verifier({ audience: 'api_orders', publicUrl, revocations });
+app.post('/ssf/push', createReceiver(af, { revocations, audience: 'my-stream', authToken: process.env.PUSH_BEARER }));
+await registerStream(af, operatorBearer, { audience: 'my-stream', endpointUrl: 'https://api.example.com/ssf/push' });
+```
+
+The receiver answers 202 (also for a retry and for an event older than any token it could affect),
+400 `{"err","description"}` for a SET that is refused for good, and 503 for anything that can heal (a
+key not in the key set yet, a key set it cannot read, an `iat` ahead of its clock), because the
+transmitter treats a 400 as final. `session-revoked`, `account-purged` and `credential-compromise`
+revoke the subject: tokens issued at or before the event's `iat` are refused as `token_revoked` (the
+error carries the event's `jti` as `ref`); a token issued after it is accepted. A delegated token is
+refused when its actor is revoked. The store is in memory: a restart empties it, so run one stream per
+process and keep token lifetimes short.
+
 ## Machine clients
 
 ```ts

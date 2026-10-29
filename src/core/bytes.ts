@@ -81,3 +81,25 @@ export function constantTimeEqual(a: Uint8Array, b: Uint8Array): boolean {
 export async function sha256(bytes: Uint8Array<ArrayBuffer>): Promise<Uint8Array<ArrayBuffer>> {
   return new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
 }
+
+/**
+ * Decodes standard base64 with padding, or returns undefined unless the input is exactly the
+ * canonical encoding of what it decodes to (no whitespace, no stray bits, no other alphabet).
+ */
+export function fromBase64(s: string): Uint8Array<ArrayBuffer> | undefined {
+  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(s) || s.length % 4 !== 0) return undefined;
+  const bin = atob(s);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return base64(out) === s ? out : undefined;
+}
+
+/** Decodes base64url, or returns undefined unless the input is the canonical encoding of what it decodes to. */
+export function fromBase64urlStrict(s: string): Uint8Array<ArrayBuffer> | undefined {
+  try {
+    const out = fromBase64url(s);
+    return base64url(out) === s ? out : undefined;
+  } catch {
+    return undefined;
+  }
+}

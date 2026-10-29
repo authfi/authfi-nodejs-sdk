@@ -6,6 +6,7 @@ import {
   type InsufficientScope,
 } from '../core/errors.js';
 import type { AccessToken } from './access-token.js';
+import { PROOF_ALGORITHMS } from './dpop-proof.js';
 import type { Scheme } from './verifier.js';
 
 /** What an API answers a refused request: status, headers and JSON body. */
@@ -31,6 +32,7 @@ export interface AnswerOptions {
 }
 
 const OPAQUE = 'The access token is not valid.';
+const OPAQUE_PROOF = 'The DPoP proof is not valid.';
 
 function quote(value: string): string {
   return `"${value.replace(/["\\]/g, '')}"`;
@@ -93,6 +95,42 @@ export function refusalAnswer(
         }),
       },
       body: withCode({ error: 'insufficient_user_authentication' }, e),
+    };
+  }
+  if (isAuthFIError(error, 'DPoPNonceRequired')) {
+    return {
+      status: 401,
+      headers: {
+        'www-authenticate': challenge('DPoP', {
+          error: 'use_dpop_nonce',
+          algs: PROOF_ALGORITHMS.join(' '),
+          resource_metadata: rm,
+        }),
+        'dpop-nonce': error.nonce,
+      },
+      body: withCode({ error: 'use_dpop_nonce' }, error),
+    };
+  }
+  if (isAuthFIError(error, 'InvalidToken') && error.code === 'dpop_replay_check_unavailable') {
+    // The proof may be fine: the guard that makes it single-use cannot answer now. Retry.
+    return {
+      status: 503,
+      headers: { 'retry-after': '5' },
+      body: withCode({ error: 'service_unavailable' }, error),
+    };
+  }
+  if (isAuthFIError(error, 'InvalidToken') && error.code.startsWith('dpop_proof_')) {
+    return {
+      status: 401,
+      headers: {
+        'www-authenticate': challenge('DPoP', {
+          error: 'invalid_dpop_proof',
+          error_description: OPAQUE_PROOF,
+          algs: PROOF_ALGORITHMS.join(' '),
+          resource_metadata: rm,
+        }),
+      },
+      body: withCode({ error: 'invalid_dpop_proof', error_description: OPAQUE_PROOF }, error),
     };
   }
   if (isAuthFIError(error, 'InvalidToken')) {

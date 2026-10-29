@@ -18,7 +18,6 @@
 import { isAuthFIError } from '../core/errors.js';
 import { isValidRequestId } from '../core/ids.js';
 import type { Logger } from '../core/logger.js';
-import { checkOrigin } from '../core/urls.js';
 import type { AccessToken } from '../verify/access-token.js';
 import {
   applyRequirements,
@@ -27,7 +26,7 @@ import {
   type AnswerOptions,
   type Requirements,
 } from '../verify/answer.js';
-import { loggerOf, type Scheme, type Verifier } from '../verify/verifier.js';
+import { loggerOf, type RequestCredentials, type Scheme, type Verifier } from '../verify/verifier.js';
 
 declare global {
   // Express merges this into its Request type.
@@ -46,7 +45,7 @@ export interface ExpressRequest {
   readonly method: string;
   readonly originalUrl?: string;
   readonly url?: string;
-  readonly protocol?: string;
+  readonly rawHeaders?: readonly string[];
   get?(name: string): string | undefined;
   authfi?: AccessToken;
 }
@@ -68,13 +67,6 @@ export interface ProtectOptions extends Requirements, AnswerOptions {
   readonly optional?: boolean | undefined;
   /** Where refusals are logged (code and request id, never the token). Defaults to the project's logger. */
   readonly logger?: Logger | undefined;
-  /**
-   * The origin clients reach this API at, such as `https://api.example.com`. The URL a DPoP proof is
-   * checked against is this plus the request path. Without it the URL is built from the `Host` header
-   * and the connection's protocol, which a client chooses unless Express's `trust proxy` is set
-   * exactly right, so set it whenever the API is behind a proxy or accepts DPoP.
-   */
-  readonly publicUrl?: string | undefined;
 }
 
 const SILENT: Logger = {
@@ -88,13 +80,20 @@ function single(value: string | string[] | undefined): string | undefined {
   return Array.isArray(value) ? value[0] : value;
 }
 
-function urlOf(req: ExpressRequest, publicOrigin: string | undefined): string | undefined {
-  const path = req.originalUrl ?? req.url;
-  if (path === undefined) return undefined;
-  if (publicOrigin !== undefined) return `${publicOrigin}${path}`;
-  const host = req.get?.('host') ?? single(req.headers.host);
-  if (host === undefined) return undefined;
-  return `${req.protocol ?? 'https'}://${host}${path}`;
+/** How many times the request carried `name`: the raw header list sees duplicates the parsed headers fold. */
+function countOf(req: ExpressRequest, name: string): number {
+  let n = 0;
+  const raw = req.rawHeaders;
+  if (raw !== undefined) {
+    for (let i = 0; i < raw.length; i += 2) if ((raw[i] ?? '').toLowerCase() === name) n++;
+  }
+  const value = req.headers[name];
+  return Math.max(n, Array.isArray(value) ? value.length : 0);
+}
+
+/** A header as one string: repeated values are joined with a comma, as HTTP defines. */
+function joined(value: string | string[] | undefined): string | undefined {
+  return Array.isArray(value) ? value.join(', ') : value;
 }
 
 /** What an operator needs to diagnose a failure that is not a refusal: the message, stack and cause. */
@@ -142,6 +141,21 @@ function answer(
   res.status(reply.status).set(headers).json(reply.body);
 }
 
+/** The parts of an Express (or Node) request a verifier reads, in the shape of `verifier.verifyRequest()`. */
+export function requestCredentials(req: ExpressRequest): RequestCredentials {
+  return {
+    authorization: single(req.headers.authorization),
+    dpop: joined(req.headers.dpop),
+    method: req.method,
+    url: req.originalUrl ?? req.url,
+    headerCounts: { authorization: countOf(req, 'authorization'), dpop: countOf(req, 'dpop') },
+    forwarded: {
+      proto: joined(req.headers['x-forwarded-proto']),
+      host: joined(req.headers['x-forwarded-host']),
+    },
+  };
+}
+
 /**
  * Verifies the request's access token (`Bearer` or `DPoP` scheme), applies the requirements, and
  * sets `req.authfi`. A refusal is answered on the wire as the platform answers (one opaque
@@ -160,8 +174,6 @@ export function protect(
     scopes: options.scopes,
   };
   checkRequirements(requirements);
-  const publicOrigin =
-    options.publicUrl === undefined ? undefined : checkOrigin(options.publicUrl, 'publicUrl');
   const logger = options.logger ?? loggerOf(verifier) ?? SILENT;
   return (req, res, next) => {
     const authorization = single(req.headers.authorization);
@@ -169,12 +181,12 @@ export function protect(
       next();
       return;
     }
-    verifier
-      .verifyRequest({
-        authorization,
-        dpop: single(req.headers.dpop),
-        method: req.method,
-        url: urlOf(req, publicOrigin),
+    // Offer the server nonce on every response when the verifier asks for nonces.
+    const nonce = verifier.serverNonce?.() ?? Promise.resolve(undefined);
+    nonce
+      .then((value) => {
+        if (value !== undefined) res.set({ 'dpop-nonce': value });
+        return verifier.verifyRequest(requestCredentials(req));
       })
       .then((token) => {
         applyRequirements(token, requirements);

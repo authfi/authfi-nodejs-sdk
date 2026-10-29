@@ -7,6 +7,11 @@ All notable changes to this package. It follows [Semantic Versioning](https://se
 
 ### Added
 
+- **Agent tokens are proven, and withdrawn agents are refused** (ported from 0.1 #30 and #31): DPoP
+  proofs (RFC 9449), the AuthFI certificate chain of the signing key, `agentTokens` modes,
+  `publicUrl`, `trustForwarded`, `replayGuard`, `nonceKey`, `rootPins`/`rootCerts`, and
+  `@authfi/sdk/signals` (receiver, revocation store, `registerStream`). `verify()` refuses an agent's
+  token (`agent_token_needs_request`). `protect()` no longer takes `publicUrl`: set it on the verifier.
 - **One core for every area.** `new AuthFI({ issuer })` (or `AuthFI.fromEnv()`) is the project: its
   discovery, key set and one HTTP transport. The issuer is the only required setting; every endpoint
   comes from the issuer's discovery document.
