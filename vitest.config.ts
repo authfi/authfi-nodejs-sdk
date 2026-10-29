@@ -54,6 +54,7 @@ export default defineConfig({
         'src/mastra/**': { lines: 85 },
         'src/signals/**': { lines: 95, branches: 90 },
         'src/signin/**': { lines: 95, branches: 90 },
+        'src/saml/**': { lines: 90, branches: 85 },
         'src/webhooks/**': { lines: 95, branches: 95 },
         'src/admin/**': { lines: 95, branches: 90 },
       },

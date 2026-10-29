@@ -11,6 +11,7 @@ export default defineConfig({
     node: 'src/node/index.ts',
     signals: 'src/signals/index.ts',
     'vercel-ai': 'src/vercel-ai/index.ts',
+    saml: 'src/saml/index.ts',
     langchain: 'src/langchain/index.ts',
     'openai-agents': 'src/openai-agents/index.ts',
     mastra: 'src/mastra/index.ts',
