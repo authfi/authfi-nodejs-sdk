@@ -493,6 +493,7 @@ export class SamlServiceProvider {
     }
     this.#checkAlgorithms(text);
     const { assertionId, notOnOrAfter } = this.#check(assertion, pending, now);
+    const signedIn = this.#signIn(assertion, assertionId, pending);
     const expires = notOnOrAfter + this.#o.leewayMs;
     const keys = [`assertion:${assertionId}`, ...(pending ? [`request:${pending.requestId}`] : [])];
     for (const key of keys) {
@@ -500,7 +501,7 @@ export class SamlServiceProvider {
         throw new SamlAssertionRefused('saml_assertion_replayed', 'this response was already used');
       }
     }
-    return this.#signIn(assertion, assertionId, pending);
+    return signedIn;
   }
 
   #decode(samlResponse: string): string {
