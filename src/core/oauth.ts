@@ -7,6 +7,7 @@ import {
   TransportError,
   type ErrorContext,
 } from './errors.js';
+import type { DPoPSigner } from './dpop.js';
 import { Secret } from './secret.js';
 import { contextOf, jsonOf, type HttpResponse, type RetryClass, type Transport } from './transport.js';
 
@@ -234,6 +235,11 @@ export interface TokenRequest {
   readonly retry: RetryClass;
   readonly signal?: AbortSignal | undefined;
   readonly requestId?: string | undefined;
+  /** Asks for a token bound to this key: a proof goes with every attempt, and the server's nonce is answered once. */
+  readonly dpop?: DPoPSigner | undefined;
+  /** Headers and form fields added to every attempt (a fresh actor assertion, the client attestation), made each time. */
+  readonly attempt?:
+    (() => Promise<{ headers?: Record<string, string>; params?: Record<string, string> }>) | undefined;
 }
 
 /**
@@ -245,12 +251,20 @@ export async function requestToken(
   req: TokenRequest,
   nowMs: () => number,
 ): Promise<TokenResponse> {
-  const res = await transport.send({
+  const res = await sendTokenRequest(transport, req);
+  if (res.status !== 200) throw oauthErrorOf(res);
+  return parseTokenResponse(res, nowMs());
+}
+
+/** Posts a token request and returns the raw answer, for a caller that reads a refusal's body itself. */
+export async function sendTokenRequest(transport: Transport, req: TokenRequest): Promise<HttpResponse> {
+  return transport.send({
     method: 'POST',
     url: req.tokenEndpoint,
     retry: req.retry,
     signal: req.signal,
     requestId: req.requestId,
+    ...(req.dpop === undefined ? {} : { dpop: { signer: req.dpop } }),
     prepare: async () => {
       const form = new URLSearchParams();
       for (const [k, v] of Object.entries(req.params)) {
@@ -263,9 +277,12 @@ export async function requestToken(
       }
       const headers: Record<string, string> = { 'content-type': 'application/x-www-form-urlencoded' };
       if (req.auth !== undefined) await applyClientAuth(req.auth, form, headers, req.tokenEndpoint);
+      if (req.attempt !== undefined) {
+        const extra = await req.attempt();
+        Object.assign(headers, extra.headers);
+        for (const [k, v] of Object.entries(extra.params ?? {})) form.set(k, v);
+      }
       return { headers, body: form.toString() };
     },
   });
-  if (res.status !== 200) throw oauthErrorOf(res);
-  return parseTokenResponse(res, nowMs());
 }

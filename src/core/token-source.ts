@@ -1,4 +1,6 @@
+import { asksForNonce, type DPoPSigner } from './dpop.js';
 import { ConfigurationError } from './errors.js';
+import { Secret } from './secret.js';
 import { checkOrigin, originOf } from './urls.js';
 
 /** Options for {@link TokenSource.token}. */
@@ -21,8 +23,17 @@ export interface TokenSource {
   readonly sendTo: readonly string[];
   /** A current access token, minted or renewed as needed. A reveal point. */
   token(options?: TokenOptions): Promise<string>;
-  /** The `Authorization` header for one request to `url`. A reveal point; refuses an origin not in {@link sendTo}. */
+  /**
+   * The headers for one request to `url`: `Authorization: Bearer <token>`, or for a token bound to a
+   * key, `Authorization: DPoP <token>` and a `DPoP` proof made for this request. A reveal point;
+   * refuses an origin not in {@link sendTo}.
+   */
   headers(method: string, url: string | URL): Promise<Record<string, string>>;
+  /**
+   * The key the current token is bound to (DPoP, RFC 9449), once a token has been minted; undefined
+   * for a Bearer token. A caller that sends the request itself answers a server nonce with it.
+   */
+  readonly dpop?: DPoPSigner | undefined;
   /**
    * A `fetch` that attaches the credential to each request, refuses any origin not in
    * {@link sendTo}, and refuses to follow redirects.
@@ -68,18 +79,60 @@ export abstract class BaseTokenSource implements TokenSource {
     return Promise.resolve();
   }
 
-  async headers(_method: string, url: string | URL): Promise<Record<string, string>> {
+  /** The key the current token is bound to; undefined (Bearer) unless a source binds its tokens. */
+  get dpop(): DPoPSigner | undefined {
+    return undefined;
+  }
+
+  async headers(method: string, url: string | URL): Promise<Record<string, string>> {
     await this.ready();
     requireAllowedOrigin(url, this.sendTo);
-    return { authorization: `Bearer ${await this.token()}` };
+    return credentialHeaders(await this.token(), this.dpop, method, url);
   }
 
   readonly fetch: typeof fetch = async (input, init) => {
     const request = new Request(input, init);
     await this.ready(request.signal);
     requireAllowedOrigin(request.url, this.sendTo);
-    const headers = new Headers(request.headers);
-    headers.set('authorization', `Bearer ${await this.token({ signal: request.signal })}`);
-    return this.#baseFetch(new Request(request, { headers, redirect: 'error' }));
+    const token = await this.token({ signal: request.signal });
+    const key = this.dpop;
+    const again = key === undefined ? undefined : request.clone();
+    const send = async (r: Request): Promise<Response> => {
+      const headers = new Headers(r.headers);
+      for (const [k, v] of Object.entries(await credentialHeaders(token, key, r.method, r.url)))
+        headers.set(k, v);
+      return this.#baseFetch(new Request(r, { headers, redirect: 'error' }));
+    };
+    const res = await send(request);
+    if (key !== undefined && again !== undefined && (await learnNonce(key, request.url, res))) {
+      return send(again);
+    }
+    return res;
   };
+}
+
+/**
+ * `Authorization` (and `DPoP`) for one request: a proof of `key` over the method, URL and token when the
+ * token is bound to it, else Bearer. A proof is good once, so each request makes its own.
+ */
+export async function credentialHeaders(
+  token: string,
+  key: DPoPSigner | undefined,
+  method: string,
+  url: string | URL,
+): Promise<Record<string, string>> {
+  if (key === undefined) return { authorization: `Bearer ${token}` };
+  return { authorization: `DPoP ${token}`, dpop: await key.proof(method, String(url), new Secret(token)) };
+}
+
+/**
+ * Keeps the nonce a server asked for (RFC 9449 §8) and says whether it did: the caller then sends the
+ * request once more with a new proof. The answer is left unread.
+ */
+export async function learnNonce(key: DPoPSigner, url: string, res: Response): Promise<boolean> {
+  if ((res.status !== 400 && res.status !== 401) || res.headers.get('dpop-nonce') === null) return false;
+  const body = await res.clone().text();
+  if (!asksForNonce(res.status, res.headers, body)) return false;
+  await res.body?.cancel();
+  return key.rememberNonce(url, res.headers);
 }

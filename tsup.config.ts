@@ -16,6 +16,7 @@ export default defineConfig({
     'openai-agents': 'src/openai-agents/index.ts',
     mastra: 'src/mastra/index.ts',
     otel: 'src/otel/index.ts',
+    a2a: 'src/a2a/index.ts',
   },
   format: ['esm', 'cjs'],
   target: 'es2022',

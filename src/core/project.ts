@@ -1,5 +1,6 @@
 import { CachedDocument } from './cache.js';
 import { systemClock, type Clock } from './clock.js';
+import { DPoPSigner } from './dpop.js';
 import { ConfigurationError } from './errors.js';
 import { KeySet } from './jwks.js';
 import { consoleLogger, redactingLogger, warnOnce, type LogFields, type Logger } from './logger.js';
@@ -57,6 +58,8 @@ export interface Core {
   readonly clock: Clock;
   readonly leewayMs: number;
   readonly fetch: typeof fetch;
+  /** The `@opentelemetry/api` the project was given, if any. */
+  readonly otel: OpenTelemetryApi | undefined;
   readonly keys: KeySet;
   metadata(options?: {
     refresh?: boolean | undefined;
@@ -66,6 +69,8 @@ export interface Core {
   apiOrigin(signal?: AbortSignal): Promise<string>;
   /** The origins AuthFI's own credentials may go to: the issuer's and the API origin. */
   ownOrigins(signal?: AbortSignal): Promise<readonly string[]>;
+  /** The process's DPoP signer (the instance key) over this project's clock; made on first use. */
+  dpop(): Promise<DPoPSigner>;
   warnOnce(key: string, message: string, fields?: LogFields): void;
 }
 
@@ -140,6 +145,7 @@ export class AuthFI {
       await metadata({ signal });
       return this.apiOrigin;
     };
+    let signer: Promise<DPoPSigner> | undefined;
     cores.set(this, {
       issuer,
       transport,
@@ -147,10 +153,12 @@ export class AuthFI {
       clock,
       leewayMs,
       fetch: fetchFn,
+      otel: options.otel,
       keys: new KeySet(transport, async () => (await metadata()).jwks_uri, clock, logger),
       metadata,
       apiOrigin,
       ownOrigins: async (signal) => [...new Set([new URL(issuer).origin, await apiOrigin(signal)])],
+      dpop: () => (signer ??= DPoPSigner.create(clock)),
       warnOnce: (key, message, fields) => {
         warnOnce(logger, warned, key, message, fields);
       },

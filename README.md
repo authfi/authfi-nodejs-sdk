@@ -275,19 +275,96 @@ person can consent again, and raises `ConsentExpired` near expiry.
 - `agent.approval(id)` raises `NotSupportedError` (`agent_approval_status`) on a project that does
   not offer approval status to agents.
 
+### Every call is proven by a key only this process holds (DPoP)
+
+The agent's tokens for AuthFI are bound to a key the process makes for itself (RFC 9449): it lives in
+memory, is never written down and cannot be read back, so a stolen token, log line or header is of no use
+without it. You write nothing for this. `agent.token()`, `agent.fetch`, `agent.headers(method, url)` and
+every gateway, model, cloud and `/otlp/v1/traces` call send `Authorization: DPoP <token>` and a proof made
+for that request; the server's nonce (`use_dpop_nonce`) is answered once. `agent.dpop` is the key a token
+is bound to (undefined for a Bearer one). Acting for a person (`tokenAsUser`, `exchange`) is bound to the
+same key, and the delegated token renews bound. A token for your own API (`forResource`) stays Bearer, because
+a verifier built on this SDK takes no proof; pass `dpop: false` to `af.agent(...)` to keep every token
+Bearer (the gateways refuse a bound agent's Bearer token, not an unbound one).
+
+### A mandate is the authority for one job
+
+A person gives an agent a **mandate** for a piece of work, narrowed from what the agent may ever do. The
+mandate is a credential: hand it to an adapter in place of the agent, and the gateway holds every call to it.
+
+```ts
+await agent.withMandate(
+  'support.refund', // a template of the project's
+  { subjectToken: personsToken, params: { order: '4411' } },
+  async (mandate) => {
+    const authfi = createVercelAI({ source: mandate, approvalSecret });
+    // ... a tool outside the mandate, a spend over its budget and an ended mandate are refused ...
+  },
+);
+```
+
+| | |
+|---|---|
+| `agent.mandate(template, { subjectToken, params?, ttlSeconds? })` | the `Mandate`, waiting for the person's approval when the template needs it |
+| `agent.requestMandate(...)` / `agent.awaitMandate(pending)` | the same in two steps: show the person `pending.approvalUrl` in between |
+| `agent.withMandate(template, options, work)` | runs `work(mandate)` and forgets the mandate after, however `work` ends |
+| `mandate.gateway()`, `mandate.cloud`, `mandate.fetch` | the gateways, cloud credentials and a `fetch`, held to the mandate |
+| `mandate.mandateId`, `.template`, `.tools`, `.budgets`, `.expiresAt` | what the platform granted |
+
+A mandate is one level deep: inside `withMandate`, asking for another is refused, and nothing a refused call
+says offers a wider one. Nothing swaps the agent's own token for the mandate's behind your back, because a
+framework may keep an MCP session open from before it: you pass the mandate in. The mandate's token is held
+by the process's key and never printed or serialised.
+
+A refused tool call says what the agent can still do. `gateway.readResult(result)` gives `why`
+(`outside_mandate`, `over_budget`, `mandate_ended`, `cannot_meter`, `bad_arguments`, `in_progress` or
+`refused`), `nextStep` and `modelText`, and every adapter hands the model that same text. `refusalData(outcome)`
+is the same as data for code that plans around it.
+
+### Cloud credentials by handle
+
+`gateway.cloud.credentials({ account, role })` (also `agent.cloud`, `mandate.cloud`) returns a **handle**
+(`credentialId`, `account`, `role`, `expiresAt`, `scope`) and never a secret, so it is safe in a tool result a
+model reads. The runtime that calls the cloud fetches the secret with `cloud.secret(handle)`: once, with the
+same key, and not after it expires (`POST /mcp/v1/cloud/credentials/{credential_id}/secret`).
+`cloud.fetchCredential(request)` does both for code that is not a tool.
+
 ## Connect from the environment
 
 `connect()` (from `@authfi/sdk/node`) reads `AUTHFI_ISSUER` and the credential, and returns what the
 gateways and the Vercel AI adapter take as `source`:
 
-- an agent, the default: `AUTHFI_AGENT_ID` with `AUTHFI_AGENT_KEY_FILE` (or `AUTHFI_AGENT_PRIVATE_KEY` and
-  `AUTHFI_AGENT_KID`), exactly as `agentFromEnv` reads them;
+- an agent, the default: `AUTHFI_AGENT_ID`. On a workload an admin bound to the agent it signs in **as an
+  instance**, with no key to keep (below). Otherwise, legacy, with `AUTHFI_AGENT_KEY_FILE` (or
+  `AUTHFI_AGENT_PRIVATE_KEY` and `AUTHFI_AGENT_KID`), exactly as `agentFromEnv` reads them; `connect()` says
+  so once;
 - else a machine client: `AUTHFI_CLIENT_ID` with `AUTHFI_CLIENT_SECRET`. Its token is minted for the
   gateway (`<issuer>/mcp`) and reaches the gateways as a client, with no agent id; the gateway records the
   caller as `client-credentials`.
 
 A missing variable is a `ConfigurationError` that names it. When `@opentelemetry/api` is installed it is
 given to the project, so each gateway call carries the active trace.
+
+### Sign in as an instance
+
+An instance is one execution of the agent: a pod, a process, a laptop session. It makes its key in memory,
+shows where it runs (its **evidence**), and trades that for a 15-minute attestation and a token bound to its
+key. `connect()` finds the evidence itself:
+
+| Variable | |
+|---|---|
+| `AUTHFI_AGENT_ID` | the agent (`agt_...`) |
+| `AUTHFI_SERVICE_ACCOUNT_TOKEN_FILE` | the projected service-account token, if it is not at `/var/run/secrets/kubernetes.io/serviceaccount/token`. Project it with `audience` set to the project's origin and `expirationSeconds: 600`; it works once, so the kubelet's rotation renews it |
+| `AUTHFI_DEVICE_KEY_FILE`, `AUTHFI_DEVICE_KEY_KID` | the device key the device was bound with, for a laptop. Custody is `software` until hardware attestation is verified |
+| `AUTHFI_CONFIG_VERSION`, `AUTHFI_CONFIG_DIGEST` | the signed configuration this instance runs (`7`, `sha256:...`); the platform attests no instance without one |
+| `AUTHFI_IMAGE_DIGEST` | the image it runs, `sha256:<64 hex>` |
+
+The instance then runs challenge, attest and the token request (`OAuth-Client-Attestation`,
+`OAuth-Client-Attestation-PoP` and `DPoP` headers), and attests again before the attestation expires.
+`instance.instanceId` is the id the platform gave it. A key file named with no configuration is the legacy key,
+as it always was. An instance has no key to sign an assertion with, so CIBA, `requestApproval` and
+`requestMandate` are refused with the fix; token exchange works. The platform gives every failed sign-in the
+same 401, so an error names the causes to check and points at the `agent.attest.refused` event on the audit tape.
 
 ```ts
 import { connect } from '@authfi/sdk/node';
@@ -334,11 +411,30 @@ that credential.
 | `gateway.fetch` | the credential per request, `X-Request-Id` and `traceparent`, AuthFI's origins only, no redirects; a 401 is `GatewayTokenRefused` |
 | `gateway.readResult(result)` | a `ToolOutcome`: `allowed`, `refused` (with `code`, `reason`, `requiredScope`) or `approval_required` (with `approvalId`) |
 | `gateway.scopeOf(tool)` | the grant object of a tool, from `tools/list` |
-| `gateway.cloudCredentials({ account, role, expiresInSeconds? })` | a short-lived cloud credential (`expiresInSeconds` from 1 to 900, default 900), or `approval_required` |
+| `gateway.cloudCredentials({ account, role, expiresInSeconds? })` | a handle to a short-lived cloud credential (`expiresInSeconds` from 1 to 900, default 900), or `approval_required`; `gateway.cloudSecret(id)` fetches its secret once (see above) |
 
 A refusal and a hold are values, not exceptions: a framework hands them to the model as the tool's
 answer. Never give a hold's text to a model: it names the approval. An adapter strips an
 `_authfi_approval_id` (`APPROVAL_ARGUMENT`) a model writes, and adds it only on a resume.
+
+## LangSmith and A2A
+
+**Tracing.** `registerAuthFITelemetry` (`@authfi/sdk/otel`) follows LangSmith's OpenTelemetry mapping
+(`langsmith.span.kind`, `langsmith.trace.name` on a root span, `langsmith.metadata.authfi_agent_id` and
+`authfi_run_id`), so a customer who also adds LangSmith's exporter to the same provider changes no code. With
+`@opentelemetry/api` given to the project (`connect()` does), every `gateway.readResult` is also recorded as a
+finished `tool` child span of the step that made the call, with `authfi.decision.outcome`
+(`allow`, `deny`, `needs_approval`), the rule or grant that decided, `authfi.decision.id` and `authfi.mandate.id`
+where the gateway named them in `_meta["io.authfi/decision"]`. Content capture is off by default; with it on or
+off, a value shaped like a token or a key and any attribute named like a credential leave as `[redacted]`. The
+SDK never forwards the AuthFI token to LangSmith.
+
+**A2A 1.0** (`@authfi/sdk/a2a`). `remote(agent, 'https://partner.example', { trustRoots: [R1_PEM] })` fetches
+the agent card, verifies its JWS (RFC 8785; an AuthFI agent's chain must lead to a root you trust and carry the
+agent-custody policy `1.3.6.1.4.1.67322.1.4`) or refuses it, and returns an agent to `send()` to. The token goes
+to the card's own origin only. `statusFor(decision)` and `statusForOutcome(outcome)` map an AuthFI decision to
+the state a remote caller reads: `TASK_STATE_INPUT_REQUIRED` when a person must approve, `TASK_STATE_AUTH_REQUIRED`
+for consent or credentials, `TASK_STATE_REJECTED` with the reason for a deny.
 
 ## Frameworks
 

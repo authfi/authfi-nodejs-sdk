@@ -94,11 +94,13 @@ async function signedBy(cert: Certificate, issuer: Certificate): Promise<boolean
   }
 }
 
-async function selfSigned(cert: Certificate): Promise<boolean> {
+/** Whether `cert` is signed by its own key. */
+export async function selfSigned(cert: Certificate): Promise<boolean> {
   return same(cert.issuer, cert.subject) && (await signedBy(cert, cert));
 }
 
-async function issued(cert: Certificate, by: Certificate): Promise<boolean> {
+/** Whether `cert` names `by` as its issuer and verifies under its key. */
+export async function issued(cert: Certificate, by: Certificate): Promise<boolean> {
   return same(cert.issuer, by.subject) && (await signedBy(cert, by));
 }
 
