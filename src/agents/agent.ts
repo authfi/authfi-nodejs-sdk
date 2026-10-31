@@ -9,26 +9,46 @@ import {
   TransportError,
   WaitTimeout,
 } from '../core/errors.js';
+import { isBoundTo, type DPoPSigner } from '../core/dpop.js';
 import {
   ACCESS_TOKEN_TYPE,
   apiErrorOf,
   dataOf,
   GRANT,
   oauthErrorOf,
+  parseTokenResponse,
   requestToken,
+  sendTokenRequest,
   type ClientAuth,
   type TokenResponse,
 } from '../core/oauth.js';
+import type { ServerMetadata } from '../core/metadata.js';
 import { coreOf, type AuthFI, type Core } from '../core/project.js';
 import { isSecret, Secret } from '../core/secret.js';
 import { BaseTokenSource, checkSendTo, type TokenOptions, type TokenSource } from '../core/token-source.js';
-import { contextOf, jsonOf } from '../core/transport.js';
+import { contextOf, jsonOf, type HttpResponse } from '../core/transport.js';
 import { isAtOrUnder, originOf } from '../core/urls.js';
 import { decodeUnverified } from '../verify/verifier.js';
 import type { Signer } from './agent-key.js';
 import { clientAssertion } from './assertion.js';
 import { DelegatedToken } from './delegated.js';
-import { Gateway } from '../gateway/gateway.js';
+import { Gateway, type CloudAccess } from '../gateway/gateway.js';
+import { Mandate, MANDATE_DETAIL_TYPE, type MandatePending } from './mandate.js';
+import { noAssertion } from './no-assertion.js';
+import { refuseNested, runInMandate } from './scope.js';
+
+/**
+ * How an instance of the agent signs in instead of presenting a key (see `InstanceAuth`). It returns the
+ * token answer of the attested `client_credentials` request, bound to `signer`'s key.
+ */
+export interface InstanceSignIn {
+  mint(request: {
+    readonly meta: ServerMetadata;
+    readonly resource: string | undefined;
+    readonly signer: DPoPSigner;
+    readonly signal?: AbortSignal | undefined;
+  }): Promise<TokenResponse>;
+}
 
 /** How `af.agent()` is configured. */
 export interface AgentOptions {
@@ -43,6 +63,13 @@ export interface AgentOptions {
   readonly resource?: string | undefined;
   /** Mint a new token this long before the current one expires (default 60 000 ms). */
   readonly refreshSkewMs?: number | undefined;
+  /**
+   * Bind the agent's tokens for AuthFI to this process's key (DPoP, RFC 9449), so a stolen token is of no
+   * use. On by default; `false` leaves them Bearer, which the gateways refuse for a bound agent.
+   */
+  readonly dpop?: boolean | undefined;
+  /** Signs in by instance attestation in place of a key. Made by `InstanceAuth`, never set by hand. */
+  readonly instance?: InstanceSignIn | undefined;
 }
 
 /** A poll interval the caller gave: finite and above zero, or a {@link ConfigurationError}. */
@@ -102,9 +129,49 @@ interface AgentConfiguration {
 interface CachedToken {
   readonly response: TokenResponse;
   readonly renewAt: number;
+  /** The key the token is bound to, or undefined for a Bearer token. */
+  readonly bound: DPoPSigner | undefined;
+}
+
+interface Minted {
+  readonly response: TokenResponse;
+  readonly bound: DPoPSigner | undefined;
 }
 
 const AGENT_API = '/apis/regional/v1/ai/auth';
+const JWT_TOKEN_TYPE = 'urn:ietf:params:oauth:token-type:jwt';
+const MAX_MANDATE_SECONDS = 30 * 24 * 3600;
+
+/** The 400 `authorization_pending` that holds a mandate for a person's approval, or undefined. */
+function pendingMandateOf(res: HttpResponse): MandatePending | undefined {
+  if (res.status !== 400) return undefined;
+  let body: Record<string, unknown> | undefined;
+  try {
+    body = jsonOf(res) as Record<string, unknown> | undefined;
+  } catch {
+    return undefined;
+  }
+  if (body?.error !== 'authorization_pending') return undefined;
+  const { auth_req_id: authReqId, authfi_mandate_id: mandateId, interval, approval_url: url } = body;
+  if (
+    typeof authReqId !== 'string' ||
+    authReqId === '' ||
+    typeof mandateId !== 'string' ||
+    mandateId === ''
+  ) {
+    throw new OAuthError(
+      'invalid_response',
+      'the token endpoint held the mandate without a request to wait on',
+      contextOf(res),
+    );
+  }
+  return {
+    authReqId: new Secret(authReqId),
+    mandateId,
+    intervalMs: (typeof interval === 'number' && interval > 0 ? interval : 5) * 1000,
+    approvalUrl: typeof url === 'string' && url !== '' ? url : undefined,
+  };
+}
 const SLOW_DOWN_MS = 5000;
 
 function date(value: unknown): Date | undefined {
@@ -148,8 +215,10 @@ export class AgentAuth extends BaseTokenSource {
   readonly #resource: string | undefined;
   readonly #skew: number;
   readonly #tokens = new Map<string, CachedToken>();
-  readonly #flight = new SingleFlight<string, TokenResponse>();
+  readonly #flight = new SingleFlight<string, Minted>();
   readonly #agentConfig: CachedDocument<AgentConfiguration>;
+  readonly #dpop: boolean;
+  readonly #instance: InstanceSignIn | undefined;
   #gateway: Gateway | undefined;
 
   /** Use `af.agent()`. */
@@ -178,11 +247,18 @@ export class AgentAuth extends BaseTokenSource {
     this.#signer = options.key;
     this.#resource = options.resource;
     this.#skew = skew;
+    this.#dpop = options.dpop !== false;
+    this.#instance = options.instance;
     this.#agentConfig = new CachedDocument(() => this.#loadAgentConfiguration(), core.clock);
   }
 
   #isOwn(af: AuthFI, resource: string): boolean {
     return isAtOrUnder(resource, af.issuer) || isAtOrUnder(resource, af.apiOrigin);
+  }
+
+  /** The project this agent belongs to. */
+  get project(): AuthFI {
+    return this.#af;
   }
 
   /** AuthFI's own origins: the issuer's and the API origin. */
@@ -216,29 +292,83 @@ export class AgentAuth extends BaseTokenSource {
     const now = this.#core.clock.now();
     const cached = this.#tokens.get(key);
     if (options.force !== true && cached !== undefined && now < cached.renewAt) return cached;
-    const response = await this.#flight.run(key, () => this.#mint(resource), options.signal);
-    const entry = { response, renewAt: response.expiresAt - this.#skew };
+    const { response, bound } = await this.#flight.run(key, () => this.#mint(resource), options.signal);
+    const entry = { response, bound, renewAt: response.expiresAt - this.#skew };
     this.#tokens.set(key, entry);
     return entry;
   }
 
+  /**
+   * The key to bind a token for `resource` to: this process's, when the project accepts its algorithm.
+   * Only a token for AuthFI itself is bound. One for a customer's API stays Bearer: that API verifies it,
+   * and a verifier built on this SDK takes no proof.
+   */
+  async #keyFor(meta: ServerMetadata, resource: string | undefined): Promise<DPoPSigner | undefined> {
+    if (!this.#dpop || (resource !== undefined && !this.#isOwn(this.#af, resource))) return undefined;
+    const algs = meta.dpop_signing_alg_values_supported;
+    if (Array.isArray(algs) && algs.length > 0 && !algs.includes('ES256')) {
+      this.#core.warnOnce(
+        'dpop-alg',
+        'the project accepts no proof-of-possession algorithm this SDK signs (ES256): agent tokens stay Bearer',
+      );
+      return undefined;
+    }
+    return this.#core.dpop();
+  }
+
   /** The shared mint belongs to no caller, so it takes no caller's signal. */
-  async #mint(resource: string | undefined): Promise<TokenResponse> {
+  async #mint(resource: string | undefined): Promise<Minted> {
     const meta = await this.#core.metadata();
+    // An instance's token is bound to its key for any resource: the attestation names the key.
+    const signer =
+      this.#instance === undefined
+        ? await this.#keyFor(meta, resource)
+        : this.#dpop
+          ? await this.#core.dpop()
+          : undefined;
+    if (this.#instance !== undefined) {
+      if (signer === undefined) {
+        throw new ConfigurationError(
+          'an instance signs in by attestation, which binds its token to the instance key: dpop cannot be off',
+        );
+      }
+      const response = await this.#instance.mint({ meta, resource, signer });
+      return { response, bound: this.#boundBy(response, signer) };
+    }
     this.#requireAgentAuth(
       meta.token_endpoint_auth_methods_supported,
       meta.token_endpoint_auth_signing_alg_values_supported,
     );
-    return requestToken(
+    const response = await requestToken(
       this.#core.transport,
       {
         tokenEndpoint: meta.token_endpoint,
         params: { grant_type: GRANT.clientCredentials, resource },
         auth: this.#auth(),
         retry: 'safe',
+        dpop: signer,
       },
       () => this.#core.clock.now(),
     );
+    return { response, bound: this.#boundBy(response, signer) };
+  }
+
+  /** The key a token answer is bound to: `signer` when it is, undefined when the platform left it Bearer. */
+  #boundBy(response: TokenResponse, signer: DPoPSigner | undefined): DPoPSigner | undefined {
+    return signer !== undefined && isBoundTo(response.tokenType, response.accessToken, signer)
+      ? signer
+      : undefined;
+  }
+
+  /** The key the agent's current token for its default resource is bound to, if it is bound. */
+  override get dpop(): DPoPSigner | undefined {
+    return this.#tokens.get(this.#resource ?? '')?.bound;
+  }
+
+  /** The token and the key it is bound to, for a request this class sends itself. */
+  async #own(signal?: AbortSignal): Promise<{ token: Secret; signer: DPoPSigner | undefined }> {
+    const cached = await this.#tokenFor(this.#resource, { signal });
+    return { token: cached.response.accessToken, signer: cached.bound };
   }
 
   #requireAgentAuth(methods: readonly string[] | undefined, algs: readonly string[] | undefined): void {
@@ -291,6 +421,9 @@ export class AgentAuth extends BaseTokenSource {
       protected override async ready(signal?: AbortSignal): Promise<void> {
         if (sendTo === undefined) await agent.#core.metadata({ signal });
       }
+      override get dpop(): DPoPSigner | undefined {
+        return agent.#tokens.get(resource)?.bound;
+      }
       token(opts: TokenOptions = {}): Promise<string> {
         return agent.token({ ...opts, resource });
       }
@@ -333,6 +466,7 @@ export class AgentAuth extends BaseTokenSource {
         'bindingMessage is required: it is what the person reads, such as "Refund order 4411"',
       );
     }
+    this.#needsKey();
     const meta = await this.#requireGrant(GRANT.ciba, 'ciba', request.signal);
     const endpoint = meta.backchannel_authentication_endpoint;
     if (endpoint === undefined)
@@ -404,10 +538,37 @@ export class AgentAuth extends BaseTokenSource {
   ): Promise<DelegatedToken> {
     const sendTo = this.#sendToFor(options.resource ?? this.#resource, options.sendTo);
     const clock = this.#core.clock;
-    const meta = await this.#core.metadata({ signal: options.signal });
-    const waitDeadline = clock.monotonic() + (options.timeoutMs ?? 300_000);
     const requestDeadline = clock.monotonic() + Math.max(0, request.expiresAt.getTime() - clock.now());
-    let interval = Math.max(request.intervalMs, pollIntervalOf(options.pollIntervalMs) ?? 0);
+    const { response, bound } = await this.#poll({
+      authReqId: request.authReqId,
+      intervalMs: Math.max(request.intervalMs, pollIntervalOf(options.pollIntervalMs) ?? 0),
+      requestDeadline,
+      timeoutMs: options.timeoutMs,
+      resource: options.resource ?? this.#resource,
+      signal: options.signal,
+    });
+    return this.#delegated('ciba', response, sendTo, undefined, bound);
+  }
+
+  /**
+   * Polls the token endpoint for a CIBA request until the person decides (CIBA §7.3): the first poll waits
+   * the interval, `authorization_pending` waits on, `slow_down` adds five seconds. The grant is redeemed
+   * under the agent's key, and bound to this process's key when `resource` is AuthFI's own.
+   */
+  async #poll(args: {
+    authReqId: Secret;
+    intervalMs: number;
+    requestDeadline: number;
+    timeoutMs: number | undefined;
+    resource: string | undefined;
+    signal: AbortSignal | undefined;
+  }): Promise<Minted> {
+    const clock = this.#core.clock;
+    const meta = await this.#core.metadata({ signal: args.signal });
+    const signer = await this.#keyFor(meta, args.resource);
+    const waitDeadline = clock.monotonic() + (args.timeoutMs ?? 300_000);
+    const requestDeadline = args.requestDeadline;
+    let interval = args.intervalMs;
     for (;;) {
       if (clock.monotonic() + interval > Math.min(waitDeadline, requestDeadline)) {
         if (requestDeadline <= waitDeadline) {
@@ -417,7 +578,7 @@ export class AgentAuth extends BaseTokenSource {
           'the person had not decided in time; the request is still open, and waiting on it again continues it',
         );
       }
-      await clock.sleep(interval, options.signal);
+      await clock.sleep(interval, args.signal);
       try {
         const response = await requestToken(
           this.#core.transport,
@@ -425,16 +586,17 @@ export class AgentAuth extends BaseTokenSource {
             tokenEndpoint: meta.token_endpoint,
             params: {
               grant_type: GRANT.ciba,
-              auth_req_id: request.authReqId.reveal(),
-              resource: options.resource ?? this.#resource,
+              auth_req_id: args.authReqId.reveal(),
+              resource: args.resource,
             },
             auth: this.#auth(),
             retry: 'unsafe',
-            signal: options.signal,
+            signal: args.signal,
+            dpop: signer,
           },
           () => clock.now(),
         );
-        return this.#delegated('ciba', response, sendTo, undefined);
+        return { response, bound: this.#boundBy(response, signer) };
       } catch (e) {
         if (!(e instanceof OAuthError)) throw e;
         if (e.code === 'authorization_pending') continue;
@@ -496,7 +658,8 @@ export class AgentAuth extends BaseTokenSource {
     }
     const sendTo = this.#sendToFor(options.resource, options.sendTo);
     const meta = await this.#requireGrant(GRANT.tokenExchange, 'token_exchange', options.signal);
-    const exchangeOnce = async (signal?: AbortSignal): Promise<TokenResponse> => {
+    const signer = await this.#keyFor(meta, options.resource ?? this.#resource);
+    const exchangeOnce = async (signal?: AbortSignal): Promise<Minted> => {
       const subject = isSecret(subjectToken)
         ? subjectToken
         : new Secret(await subjectToken.token({ signal }));
@@ -506,7 +669,7 @@ export class AgentAuth extends BaseTokenSource {
           "the person's token has expired; the agent cannot act for them until they sign in again",
         );
       }
-      return requestToken(
+      const response = await requestToken(
         this.#core.transport,
         {
           tokenEndpoint: meta.token_endpoint,
@@ -522,11 +685,214 @@ export class AgentAuth extends BaseTokenSource {
           },
           retry: 'unsafe',
           signal,
+          dpop: signer,
         },
         () => this.#core.clock.now(),
       );
+      return { response, bound: this.#boundBy(response, signer) };
     };
-    return this.#delegated('exchange', await exchangeOnce(options.signal), sendTo, exchangeOnce);
+    const first = await exchangeOnce(options.signal);
+    return this.#delegated('exchange', first.response, sendTo, exchangeOnce, first.bound);
+  }
+
+  /** Refuses a call that signs with the agent's key when this is an instance, which has none. */
+  #needsKey(): void {
+    if (this.#instance !== undefined) throw noAssertion();
+  }
+
+  /** The key that holds a mandate: this process's, or a refusal naming why none can. */
+  async #mandateKey(meta: ServerMetadata): Promise<DPoPSigner> {
+    if (!this.#dpop) {
+      throw new ConfigurationError(
+        "a mandate is held by this process's key: dpop cannot be off for an agent that uses one",
+      );
+    }
+    const signer = await this.#keyFor(meta, undefined);
+    if (signer === undefined) {
+      throw new NotSupportedError(
+        'dpop',
+        'This AuthFI project accepts no DPoP key this process can make, so it cannot hold a mandate.',
+      );
+    }
+    return signer;
+  }
+
+  /**
+   * Asks for a mandate: a person's authority for one job, bounded by a template of the project's.
+   * `subjectToken` is the person's token from an app linked to this agent (a {@link TokenSource}, or their
+   * access token as a {@link Secret}). The answer is the {@link Mandate}, or a {@link MandatePending} when
+   * the person must approve first: show them `approvalUrl` and wait with {@link awaitMandate}. A mandate is
+   * one level deep: this is refused inside {@link withMandate}. Sent once: a retry would ask twice.
+   */
+  async requestMandate(
+    template: string,
+    options: {
+      subjectToken: TokenSource | Secret;
+      params?: Readonly<Record<string, unknown>> | undefined;
+      ttlSeconds?: number | undefined;
+      signal?: AbortSignal | undefined;
+    },
+  ): Promise<Mandate | MandatePending> {
+    refuseNested();
+    this.#needsKey();
+    if (typeof template !== 'string' || template.trim() === '')
+      throw new ConfigurationError("template is required: it is the mandate's name, such as support.refund");
+    const { subjectToken } = options;
+    if (!isSecret(subjectToken) && typeof (subjectToken as Partial<TokenSource>).token !== 'function') {
+      throw new ConfigurationError(
+        'subjectToken must be a TokenSource or a Secret: wrap a raw token as new Secret(token)',
+      );
+    }
+    const ttl = options.ttlSeconds;
+    if (ttl !== undefined && !(ttl > 0 && ttl <= MAX_MANDATE_SECONDS)) {
+      throw new ConfigurationError('ttlSeconds must be from 1 second to 30 days');
+    }
+    let details: string;
+    try {
+      details = JSON.stringify([
+        {
+          type: MANDATE_DETAIL_TYPE,
+          template: template.trim(),
+          params: options.params ?? {},
+          ...(ttl === undefined ? {} : { ttl_seconds: Math.floor(ttl) }),
+        },
+      ]);
+    } catch {
+      throw new ConfigurationError('params must be JSON: strings, numbers, booleans, lists and objects');
+    }
+    const meta = await this.#requireGrant(GRANT.tokenExchange, 'token_exchange', options.signal);
+    const signer = await this.#mandateKey(meta);
+    const subject = isSecret(subjectToken)
+      ? subjectToken
+      : new Secret(await subjectToken.token({ signal: options.signal }));
+    const res = await sendTokenRequest(this.#core.transport, {
+      tokenEndpoint: meta.token_endpoint,
+      params: {
+        grant_type: GRANT.tokenExchange,
+        subject_token: subject.reveal(),
+        subject_token_type: ACCESS_TOKEN_TYPE,
+        actor_token_type: JWT_TOKEN_TYPE,
+        authorization_details: details,
+      },
+      retry: 'unsafe',
+      signal: options.signal,
+      dpop: signer,
+      // The actor token is the agent's own signed assertion, new for every attempt, naming the key that
+      // will hold the mandate; there is no client authentication beside it.
+      attempt: async () => ({
+        params: {
+          actor_token: (
+            await clientAssertion(this.#signer, this.agentId, meta.token_endpoint, this.#core.clock, {
+              jkt: signer.thumbprint,
+            })
+          ).reveal(),
+        },
+      }),
+    });
+    const pending = pendingMandateOf(res);
+    if (pending !== undefined) {
+      this.#core.logger.info('an agent asked a person to approve a mandate', {
+        agent_id: this.agentId,
+        mandate_id: pending.mandateId,
+      });
+      return pending;
+    }
+    if (res.status !== 200) throw oauthErrorOf(res);
+    return this.#held(parseTokenResponse(res, this.#core.clock.now()), signer);
+  }
+
+  #held(response: TokenResponse, signer: DPoPSigner): Mandate {
+    if (this.#boundBy(response, signer) === undefined) {
+      throw new OAuthError(
+        'invalid_response',
+        'the token endpoint answered a mandate that no key holds: it is not usable',
+        { status: 200 },
+      );
+    }
+    const mandate = new Mandate({
+      core: this.#core,
+      agentId: this.agentId,
+      sendTo: this.sendTo,
+      response,
+      signer,
+    });
+    this.#core.logger.info('an agent holds a mandate', {
+      agent_id: this.agentId,
+      mandate_id: mandate.mandateId,
+    });
+    return mandate;
+  }
+
+  /**
+   * Waits for the person's decision on a mandate, then returns it. As {@link awaitUserToken}:
+   * {@link ConsentDenied} when they refuse, {@link ConsentExpired} when it ran out, {@link WaitTimeout} when
+   * `timeoutMs` passes first (the request stays open, and waiting again continues it).
+   */
+  async awaitMandate(
+    pending: MandatePending,
+    options: {
+      timeoutMs?: number | undefined;
+      pollIntervalMs?: number | undefined;
+      signal?: AbortSignal | undefined;
+    } = {},
+  ): Promise<Mandate> {
+    refuseNested();
+    const meta = await this.#core.metadata({ signal: options.signal });
+    const signer = await this.#mandateKey(meta);
+    const { response } = await this.#poll({
+      authReqId: pending.authReqId,
+      intervalMs: Math.max(pending.intervalMs, pollIntervalOf(options.pollIntervalMs) ?? 0),
+      requestDeadline: Number.POSITIVE_INFINITY,
+      timeoutMs: options.timeoutMs,
+      resource: undefined,
+      signal: options.signal,
+    });
+    return this.#held(response, signer);
+  }
+
+  /** {@link requestMandate}, then {@link awaitMandate} when the person must approve. */
+  async mandate(
+    template: string,
+    options: {
+      subjectToken: TokenSource | Secret;
+      params?: Readonly<Record<string, unknown>> | undefined;
+      ttlSeconds?: number | undefined;
+      timeoutMs?: number | undefined;
+      pollIntervalMs?: number | undefined;
+      signal?: AbortSignal | undefined;
+    },
+  ): Promise<Mandate> {
+    const started = await this.requestMandate(template, options);
+    return started instanceof Mandate ? started : this.awaitMandate(started, options);
+  }
+
+  /**
+   * Runs `work` with a mandate and forgets it when `work` ends, however it ends. Inside `work` a second
+   * mandate is refused (a mandate is one level deep). Hand the mandate to an adapter in place of the agent:
+   * the gateway then holds every call to it.
+   *
+   * @example
+   * await agent.withMandate('support.refund', { subjectToken: person, params: { order: '4411' } }, async (m) => {
+   *   const authfi = createVercelAI({ source: m, approvalSecret });
+   *   // ...
+   * });
+   */
+  async withMandate<T>(
+    template: string,
+    options: Parameters<AgentAuth['mandate']>[1],
+    work: (mandate: Mandate) => Promise<T> | T,
+  ): Promise<T> {
+    const mandate = await this.mandate(template, options);
+    try {
+      return await runInMandate(() => work(mandate));
+    } finally {
+      mandate.close();
+    }
+  }
+
+  /** Cloud credentials through the gateway: `agent.cloud.credentials({ account, role })`. */
+  get cloud(): CloudAccess {
+    return this.gateway().cloud;
   }
 
   #expired(token: Secret): boolean {
@@ -542,12 +908,14 @@ export class AgentAuth extends BaseTokenSource {
     via: 'ciba' | 'exchange',
     response: TokenResponse,
     sendTo: readonly string[] | undefined,
-    renew: ((signal?: AbortSignal) => Promise<TokenResponse>) | undefined,
+    renew: ((signal?: AbortSignal) => Promise<Minted>) | undefined,
+    bound: DPoPSigner | undefined,
   ): DelegatedToken {
     return new DelegatedToken({
       core: this.#core,
       via,
       response,
+      bound,
       sendTo,
       ownOrigins: () => this.sendTo,
       refreshSkewMs: this.#skew,
@@ -571,18 +939,18 @@ export class AgentAuth extends BaseTokenSource {
     if (typeof action !== 'string' || action.trim() === '')
       throw new ConfigurationError('action is required');
     const url = `${await this.#core.apiOrigin(options.signal)}${AGENT_API}/transaction-token`;
+    const { token, signer } = await this.#own(options.signal);
     const res = await this.#core.transport.send({
       method: 'POST',
       url,
       retry: 'unsafe',
       signal: options.signal,
-      prepare: async () => ({
-        headers: {
-          authorization: `Bearer ${await this.token({ signal: options.signal })}`,
-          'content-type': 'application/json',
-        },
-        body: JSON.stringify({ action, resource: options.resource, context: options.context }),
-      }),
+      ...(signer === undefined ? {} : { dpop: { signer, accessToken: token } }),
+      headers: {
+        authorization: `${signer === undefined ? 'Bearer' : 'DPoP'} ${token.reveal()}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ action, resource: options.resource, context: options.context }),
     });
     if (res.status !== 200) throw apiErrorOf(res);
     const data = dataOf(res) as { transaction_token?: unknown; txn?: unknown; expires_in?: unknown } | null;
@@ -681,6 +1049,7 @@ export class AgentAuth extends BaseTokenSource {
   ): Promise<Approval> {
     if (typeof action !== 'string' || action.trim() === '')
       throw new ConfigurationError('action is required');
+    this.#needsKey();
     const { requestApproval } = await this.#agentConfig.get({ signal: options.signal });
     const meta = await this.#core.metadata({ signal: options.signal });
     const res = await this.#core.transport.send({
@@ -714,14 +1083,14 @@ export class AgentAuth extends BaseTokenSource {
   async approval(approvalId: string, options: { signal?: AbortSignal | undefined } = {}): Promise<Approval> {
     const { approval } = await this.#agentConfig.get({ signal: options.signal });
     const url = approval.replace('{id}', encodeURIComponent(approvalId));
+    const { token, signer } = await this.#own(options.signal);
     const res = await this.#core.transport.send({
       method: 'GET',
       url,
       retry: 'safe',
       signal: options.signal,
-      prepare: async () => ({
-        headers: { authorization: `Bearer ${await this.token({ signal: options.signal })}` },
-      }),
+      ...(signer === undefined ? {} : { dpop: { signer, accessToken: token } }),
+      headers: { authorization: `${signer === undefined ? 'Bearer' : 'DPoP'} ${token.reveal()}` },
     });
     if (res.status === 403) {
       throw new NotSupportedError(

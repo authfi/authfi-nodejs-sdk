@@ -7,6 +7,29 @@ All notable changes to this package. It follows [Semantic Versioning](https://se
 
 ### Added
 
+- **Agent identity, ported from the Python SDK (#52, #53).**
+  - **DPoP on every gateway call.** An agent's tokens for AuthFI are bound to a per-process key (RFC 9449);
+    `agent.fetch`, `headers()`, the gateways, the cloud door and the trace export carry a proof per request and
+    answer the server's nonce once. CIBA and token exchange are bound to the same key, and a delegated token
+    renews bound. `agent.dpop` is the key; `af.agent({ dpop: false })` keeps tokens Bearer.
+    `TokenSource.headers` now gives `Authorization: DPoP` and a `DPoP` proof for a bound token, and the
+    action gate and approval-status calls send the proof too.
+  - **Mandates.** `agent.mandate()`, `requestMandate()` / `awaitMandate()` and `withMandate()` start a
+    mandate by token exchange (an actor assertion naming the key, `authorization_details` of type
+    `authfi_mandate`). A `Mandate` is a credential for the adapters; it is one level deep, closed after use,
+    and a refused call says why (`why`, `nextStep`, `modelText`) in every adapter.
+  - **Cloud credentials by handle.** `gateway.cloudCredentials()` returns a handle and no secret;
+    `gateway.cloudSecret(id)` / `gateway.cloud.secret(handle)` fetches the secret once, under the same key
+    (`POST /mcp/v1/cloud/credentials/{credential_id}/secret`). **Breaking:** `CloudCredentialOutcome.issued`
+    carries `handle`, not `credential`.
+  - **Instance sign-in in `connect()`.** `InstanceAuth`, `instanceFromEnv`, `findEvidence` and the
+    `AUTHFI_SERVICE_ACCOUNT_TOKEN_FILE`, `AUTHFI_DEVICE_KEY_FILE`, `AUTHFI_CONFIG_VERSION`,
+    `AUTHFI_CONFIG_DIGEST` and `AUTHFI_IMAGE_DIGEST` variables. An agent key file stays as the labelled
+    legacy fallback.
+  - **LangSmith mapping** in `@authfi/sdk/otel` (run type, trace name, metadata), a decision span per
+    `readResult`, and redaction of secret-shaped values on every export.
+  - **`@authfi/sdk/a2a`**: signed agent cards (RFC 8785, `x5c` to a root you trust), calling a remote agent,
+    and the AuthFI decision to A2A task state mapping.
 - **The adapters do not offer a tool the gateway says is never allowed** (`vercel-ai`, `langchain`,
   `openai-agents`, `mastra`): the outlook `io.authfi/governance` is read from the tool's `_meta`,
   falling back to the annotation for older gateways (`Gateway.governanceOf`, `Gateway.offerable`).

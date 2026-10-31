@@ -19,7 +19,7 @@ export interface GatewaySource {
 }
 
 /** The OpenTelemetry API, for the request id on the active span. */
-export interface SpanApi extends OpenTelemetryApi {
+export interface SpanApi extends Omit<OpenTelemetryApi, 'trace'> {
   readonly trace: {
     getActiveSpan(): { setAttribute(key: string, value: string): unknown } | undefined;
   };
@@ -213,7 +213,11 @@ export class HoldGuard {
       entry.result = undefined;
       return;
     }
-    entry.result = result;
+    // A call a mandate refused is told to the model with what it can still do, whichever framework asks.
+    entry.result =
+      outcome.kind === 'refused' && outcome.nextStep !== undefined
+        ? { ...result, content: [{ type: 'text', text: outcome.modelText }] }
+        : result;
     if (outcome.kind === 'refused') entry.status = approving ? 'denied' : 'refused';
     else entry.status = approving ? 'approved' : 'allowed';
   }

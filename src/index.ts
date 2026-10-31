@@ -85,13 +85,20 @@ export {
   type TransactionToken,
 } from './agents/agent.js';
 export { DelegatedToken, type DelegationRoute } from './agents/delegated.js';
+export { Mandate, type MandateDetails, type MandatePending } from './agents/mandate.js';
+export { InstanceAuth, type Configuration, type Evidence, type InstanceOptions } from './agents/instance.js';
+export type { DPoPSigner } from './core/dpop.js';
 export {
   APPROVAL_ARGUMENT,
+  CloudAccess,
   Gateway,
   HOLD_MESSAGE,
   HOLD_PATTERN,
+  MANDATE_GUIDANCE,
+  refusalData,
   type CloudCredential,
   type CloudCredentialOutcome,
+  type CloudHandle,
   type ToolOutcome,
   type ToolResult,
 } from './gateway/gateway.js';

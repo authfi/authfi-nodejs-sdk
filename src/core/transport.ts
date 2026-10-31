@@ -26,6 +26,22 @@ export interface OpenTelemetryApi {
   readonly propagation: {
     inject(context: unknown, carrier: Record<string, string>, setter?: unknown): void;
   };
+  /**
+   * When present (the real `@opentelemetry/api` has it), each gateway decision is also recorded as a
+   * finished child span of the active span, in LangSmith's words.
+   */
+  readonly trace?:
+    | {
+        getActiveSpan?(): { spanContext(): { traceId: string } } | undefined;
+        getTracer(name: string): {
+          startSpan(
+            name: string,
+            options: { attributes: Record<string, string> },
+            context: unknown,
+          ): { end(): void };
+        };
+      }
+    | undefined;
 }
 
 /** A request body the transport sends as is. */

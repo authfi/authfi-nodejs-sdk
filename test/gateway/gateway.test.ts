@@ -159,12 +159,26 @@ describe('the gateway fetch', () => {
 describe('cloud credentials', () => {
   const url = (issuer: string) => `${issuer}/mcp/v1/cloud/credentials`;
 
-  it('issues a credential whose secrets are Secrets', async () => {
+  it('issues a handle that carries no secret, and the secret is fetched once by its handle', async () => {
     const { gateway, as, fake } = await setup();
     fake.on('POST', url(as.issuer), (r) => {
       expect(JSON.parse(r.body)).toEqual({ account: 'acct', role: 'reader', duration_seconds: 600 });
       expect(r.headers.get('authorization')?.startsWith('Bearer ')).toBe(true);
       return json(
+        {
+          data: {
+            credential_id: 'c1',
+            account: 'acct',
+            role: 'reader',
+            expires_at: '2026-10-20T12:00:00Z',
+            scope: 'cloud.credentials',
+          },
+        },
+        201,
+      );
+    });
+    fake.on('POST', `${url(as.issuer)}/c1/secret`, () =>
+      json(
         {
           data: {
             provider: 'aws',
@@ -175,32 +189,51 @@ describe('cloud credentials', () => {
             expiration: '2026-10-20T12:00:00Z',
           },
         },
-        201,
-      );
-    });
+        200,
+      ),
+    );
     const out = await gateway.cloudCredentials({ account: 'acct', role: 'reader', expiresInSeconds: 600 });
     expect(out.kind).toBe('issued');
     if (out.kind !== 'issued') return;
-    expect(out.credential).toMatchObject({ provider: 'aws', credentialId: 'c1', accessKeyId: 'AKIA' });
-    expect(out.credential.secretAccessKey?.reveal()).toBe('sk');
-    expect(JSON.stringify(out)).not.toContain('"sk"');
-    expect(out.credential.expiresAt?.toISOString()).toBe('2026-10-20T12:00:00.000Z');
+    expect(out.handle).toEqual({
+      credentialId: 'c1',
+      account: 'acct',
+      role: 'reader',
+      expiresAt: new Date('2026-10-20T12:00:00Z'),
+      scope: 'cloud.credentials',
+    });
+    expect(JSON.stringify(out)).not.toContain('sk');
+    const credential = await gateway.cloud.secret(out.handle);
+    expect(credential).toMatchObject({ provider: 'aws', credentialId: 'c1', accessKeyId: 'AKIA' });
+    expect(credential.secretAccessKey?.reveal()).toBe('sk');
+    expect(JSON.stringify(credential)).not.toContain('"sk"');
+    expect(credential.expiresAt?.toISOString()).toBe('2026-10-20T12:00:00.000Z');
   });
 
   it('answers approval_required, and passes the approval id on the retry', async () => {
     const { gateway, as, fake } = await setup();
     fake.on('POST', url(as.issuer), (r) =>
       JSON.parse(r.body).approval_id === 'apr-1'
-        ? json({ data: { provider: 'gcp', credential_id: 'c2', access_token: 'gat', expires_in: 900 } }, 201)
+        ? json(
+            {
+              data: { credential_id: 'c2', account: 'a', role: 'admin', expires_at: '2026-10-20T12:15:00Z' },
+            },
+            201,
+          )
         : json({ data: { status: 'approval_required', approval_id: 'apr-1', message: 'm' } }, 202),
+    );
+    fake.on('POST', `${url(as.issuer)}/c2/secret`, () =>
+      json({ data: { provider: 'gcp', credential_id: 'c2', access_token: 'gat', expires_in: 900 } }),
     );
     expect(await gateway.cloudCredentials({ account: 'a', role: 'admin' })).toEqual({
       kind: 'approval_required',
       approvalId: 'apr-1',
     });
     const out = await gateway.cloudCredentials({ account: 'a', role: 'admin', approvalId: 'apr-1' });
-    expect(out.kind === 'issued' && out.credential.accessToken?.reveal()).toBe('gat');
-    expect(out.kind === 'issued' && out.credential.expiresAt).toBeInstanceOf(Date);
+    expect(out.kind === 'issued' && out.handle.credentialId).toBe('c2');
+    const both = await gateway.cloud.fetchCredential({ account: 'a', role: 'admin', approvalId: 'apr-1' });
+    expect(both.kind === 'issued' && both.credential.accessToken?.reveal()).toBe('gat');
+    expect(both.kind === 'issued' && both.credential.expiresAt).toBeInstanceOf(Date);
   });
 
   it('treats only 201 and 202 as an answer: a 200 carrying a credential is refused', async () => {
@@ -218,7 +251,7 @@ describe('cloud credentials', () => {
 
   it('refuses a duration the platform would refuse, naming its 900 s limit, before sending anything', async () => {
     const { gateway, as, fake } = await setup();
-    fake.on('POST', url(as.issuer), () => json({ data: { provider: 'aws' } }, 201));
+    fake.on('POST', url(as.issuer), () => json({ data: { credential_id: 'c1' } }, 201));
     for (const bad of [901, 43_200, 0, -5, 1.5, Number.NaN]) {
       await expect(
         gateway.cloudCredentials({ account: 'a', role: 'r', expiresInSeconds: bad }),
@@ -251,9 +284,9 @@ describe('cloud credentials', () => {
       code: 'response_invalid',
     });
     await expect(gateway.cloudCredentials({ account: '', role: 'r' })).rejects.toThrow('account and role');
-    fake.on('POST', url(as.issuer), () => json({ data: { provider: 'aws' } }, 201));
+    fake.on('POST', url(as.issuer), () => json({ data: { credential_id: 'c9' } }, 201));
     const bare = await gateway.cloudCredentials({ account: 'a', role: 'r' });
-    expect(bare.kind === 'issued' && bare.credential.expiresAt).toBeUndefined();
+    expect(bare.kind === 'issued' && bare.handle.expiresAt).toBeUndefined();
   });
 });
 

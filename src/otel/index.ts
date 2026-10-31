@@ -31,6 +31,7 @@ import { ConfigurationError, GatewayTokenRefused } from '../core/errors.js';
 import { isValidRunId, newRunId } from '../core/ids.js';
 import { consoleLogger, type Logger } from '../core/logger.js';
 import type { Gateway } from '../gateway/gateway.js';
+import { LangSmithProcessor, redactSpan } from './langsmith.js';
 
 /** A credential the exporter can use: anything with gateways, an `AgentAuth` or a `ClientCredentials`. */
 export interface TelemetrySource {
@@ -116,7 +117,10 @@ export class AuthFISpanExporter implements SpanExporter {
   }
 
   async #send(spans: ReadableSpan[]): Promise<void> {
-    const body = ProtobufTraceSerializer.serializeRequest(this.#capture ? spans : spans.map(withoutContent));
+    // A secret never leaves in a span, with content capture on or off.
+    const body = ProtobufTraceSerializer.serializeRequest(
+      spans.map((s) => redactSpan(this.#capture ? s : withoutContent(s))),
+    );
     if (body === undefined) return;
     let res: Response;
     try {
@@ -219,6 +223,11 @@ export function registerAuthFITelemetry(options: AuthFITelemetryOptions): AuthFI
       new StampProcessor({
         ...(agentId === undefined ? {} : { 'authfi.agent_id': agentId }),
         'authfi.run_id': runId,
+      }),
+      // LangSmith's run type, trace name and metadata, so the same spans go to LangSmith and to AuthFI.
+      new LangSmithProcessor({
+        ...(agentId === undefined ? {} : { authfi_agent_id: agentId }),
+        authfi_run_id: runId,
       }),
       new BatchSpanProcessor(exporter, {
         scheduledDelayMillis: options.scheduleDelayMs ?? 5000,

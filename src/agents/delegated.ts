@@ -1,6 +1,7 @@
 import { SingleFlight } from '../core/cache.js';
 import { ConsentExpired } from '../core/errors.js';
 import type { TokenResponse } from '../core/oauth.js';
+import type { DPoPSigner } from '../core/dpop.js';
 import type { Core } from '../core/project.js';
 import type { Secret } from '../core/secret.js';
 import { BaseTokenSource, type TokenOptions } from '../core/token-source.js';
@@ -20,8 +21,12 @@ export interface DelegatedInit {
   readonly sendTo: readonly string[] | undefined;
   readonly ownOrigins: () => readonly string[];
   readonly refreshSkewMs: number;
+  /** The key the token is bound to, or undefined for a Bearer token. */
+  readonly bound: DPoPSigner | undefined;
   /** Exchanges again (token exchange only); undefined for CIBA, which only the person can renew. */
-  readonly renew: ((signal?: AbortSignal) => Promise<TokenResponse>) | undefined;
+  readonly renew:
+    | ((signal?: AbortSignal) => Promise<{ response: TokenResponse; bound: DPoPSigner | undefined }>)
+    | undefined;
 }
 
 /**
@@ -46,8 +51,9 @@ export class DelegatedToken extends BaseTokenSource {
   readonly #ownOrigins: () => readonly string[];
   readonly #skew: number;
   readonly #renew: DelegatedInit['renew'];
-  readonly #flight = new SingleFlight<0, TokenResponse>();
+  readonly #flight = new SingleFlight<0, { response: TokenResponse; bound: DPoPSigner | undefined }>();
   #token: Secret;
+  #bound: DPoPSigner | undefined;
   #expiresAt: number;
   #scopes: ReadonlySet<string>;
   #gateway: Gateway | undefined;
@@ -62,6 +68,7 @@ export class DelegatedToken extends BaseTokenSource {
     this.#skew = init.refreshSkewMs;
     this.#renew = init.renew;
     this.#token = init.response.accessToken;
+    this.#bound = init.bound;
     this.#expiresAt = init.response.expiresAt;
     this.#scopes = new Set(init.response.scope);
     let claims: Record<string, unknown> | undefined;
@@ -92,6 +99,11 @@ export class DelegatedToken extends BaseTokenSource {
     return new Date(this.#expiresAt);
   }
 
+  /** The key the token is bound to; undefined for a Bearer token. */
+  override get dpop(): DPoPSigner | undefined {
+    return this.#bound;
+  }
+
   protected override async ready(signal?: AbortSignal): Promise<void> {
     if (this.#sendTo === undefined) await this.#core.metadata({ signal });
   }
@@ -107,8 +119,9 @@ export class DelegatedToken extends BaseTokenSource {
         'this token was approved by the person once and is about to expire; ask them again',
       );
     }
-    const res = await this.#flight.run(0, () => renew(), options.signal);
+    const { response: res, bound } = await this.#flight.run(0, () => renew(), options.signal);
     this.#token = res.accessToken;
+    this.#bound = bound;
     this.#expiresAt = res.expiresAt;
     if (res.scope.length > 0) this.#scopes = new Set(res.scope);
     return res.accessToken.reveal();

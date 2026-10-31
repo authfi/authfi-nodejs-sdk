@@ -134,6 +134,16 @@
         "default": "./dist/mastra.cjs"
       }
     },
+    "./a2a": {
+      "import": {
+        "types": "./dist/a2a.d.ts",
+        "default": "./dist/a2a.js"
+      },
+      "require": {
+        "types": "./dist/a2a.d.cts",
+        "default": "./dist/a2a.cjs"
+      }
+    },
     "./saml": {
       "import": {
         "types": "./dist/saml.d.ts",
