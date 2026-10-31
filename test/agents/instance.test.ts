@@ -1,8 +1,9 @@
+import type * as Fs from 'node:fs/promises';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { decodeJwt } from 'jose';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AgentAuth } from '../../src/agents/agent.js';
 import { InstanceAuth } from '../../src/agents/instance.js';
 import { AuthFI } from '../../src/core/project.js';
@@ -10,6 +11,17 @@ import { connect, findEvidence, generateAgentKeyFile, instanceFromEnv } from '..
 import { AGENT, CONFIG, FakePlatform } from '../support/fake-platform.js';
 import { call, quiet } from '../support/platform-setup.js';
 import { TestClock, unsignedJwt } from '../support/issuer.js';
+
+// These tests choose what evidence the process has. A runner that is itself a Kubernetes pod has a service-account token at
+// the standard path, which would change which sign-in connect() picks, so that path reads as absent here.
+vi.mock('node:fs/promises', async (original) => {
+  const fs = await original<typeof Fs>();
+  const stat = (path: string) =>
+    path === '/var/run/secrets/kubernetes.io/serviceaccount/token'
+      ? Promise.reject(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }))
+      : fs.stat(path);
+  return { ...fs, stat };
+});
 
 let dir: string;
 beforeEach(async () => {
