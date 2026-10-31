@@ -158,6 +158,8 @@ const RUN_HEADER = 'AuthFI-Run-Id';
 
 /** The cloud credential door, under the model routes. */
 const CLOUD_PATH = '/mcp/v1/cloud/credentials';
+/** The AI gateway's model routes: Anthropic Messages, OpenAI Chat Completions and Responses. */
+const MODEL_PATH = /^\/mcp\/v1\/(messages|chat\/completions|responses)\/?$/;
 
 /** The longest credential the platform issues, in seconds. */
 const MAX_CLOUD_SECONDS = 900;
@@ -356,6 +358,9 @@ export class Gateway {
   readonly fetch: typeof fetch = async (input, init) => {
     const request = new Request(input, init);
     requireAllowedOrigin(request.url, await this.#origins());
+    // The key a token is bound to is known once the token is minted, so mint first: on a run's first call the
+    // source has no key yet, and the server's nonce challenge would be passed on as a refused token.
+    await this.#source.token({ signal: request.signal });
     const bound = this.#source.dpop;
     // A key-bound token is answered once more when the server asks for its nonce.
     const again = bound === undefined ? undefined : request.clone();
@@ -380,6 +385,19 @@ export class Gateway {
     return res;
   };
 
+  /**
+   * Says once that a model call goes with no DPoP proof. The AI gateway refuses such a call once its model proof
+   * check (`MCP_MODEL_PROOF_CHECK`) is enforced, unless the workload is caged, so the run is told while it can
+   * still change its credential.
+   */
+  #sayIfUnproven(url: string, headers: Headers): void {
+    if (!MODEL_PATH.test(new URL(url).pathname) || headers.has('dpop')) return;
+    this.#core.warnOnce(
+      'model-call-unproven',
+      `a model call to ${this.mcpUrl} carries a Bearer token and no DPoP proof; the AI gateway refuses such a call once its proof check (MCP_MODEL_PROOF_CHECK) is enforced, unless the workload is caged. Use a credential bound to this process's key (an agent with dpop on, or an attested instance).`,
+    );
+  }
+
   async #send(request: Request): Promise<{ res: Response; headers: Headers }> {
     const headers = new Headers(request.headers);
     for (const [k, v] of Object.entries(await this.#source.headers(request.method, request.url)))
@@ -395,6 +413,7 @@ export class Gateway {
     for (const [k, v] of Object.entries(this.#core.transport.traceHeaders()))
       if (!headers.has(k)) headers.set(k, v);
     headers.delete('x-api-key');
+    this.#sayIfUnproven(request.url, headers);
     const res = await this.#core.fetch(new Request(request, { headers, redirect: 'error' }));
     return { res, headers };
   }

@@ -7,6 +7,14 @@ All notable changes to this package. It follows [Semantic Versioning](https://se
 
 ### Added
 
+- **Model calls through the AI gateway are tested to prove the key.** The gateway's `fetch` (and so every
+  adapter's `openai()` / `anthropic()` settings) sends `Authorization: DPoP` with a proof on the Anthropic,
+  Chat Completions and Responses routes, against a gateway stand-in that refuses an unproven model call
+  (`MCP_MODEL_PROOF_CHECK=enforce`, `EMODEL020`). A model call that goes with a Bearer token and no proof is said
+  once in the log, because the gateway refuses it once the check is enforced, unless the workload is caged.
+- **A run's first gateway call now answers the server's DPoP nonce.** The key a token is bound to is known only
+  once the token is minted, and the gateway `fetch` read it before the first mint: with a nonce required, the
+  first call of a run was reported as a refused token (`GatewayTokenRefused`). It mints first.
 - **Agent identity, ported from the Python SDK (#52, #53).**
   - **DPoP on every gateway call.** An agent's tokens for AuthFI are bound to a per-process key (RFC 9449);
     `agent.fetch`, `headers()`, the gateways, the cloud door and the trace export carry a proof per request and

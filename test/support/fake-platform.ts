@@ -37,10 +37,17 @@ interface Handle {
   spent: boolean;
 }
 
+/** The AI gateway's model routes. */
+const MODEL_ROUTE = /^\/mcp\/v1\/(messages|chat\/completions|responses)$/;
+
 export class FakePlatform {
   readonly seen = new Set<string>();
   /** Each refusal's reason, which the real attest route keeps for the audit tape only. */
   readonly refusals: string[] = [];
+  /** The gateway's MCP_MODEL_PROOF_CHECK=enforce: a model call whose token is bound to nothing is refused (EMODEL020). */
+  modelProof = false;
+  /** The path of each model call refused for its holder. */
+  readonly unprovenModelCalls: string[] = [];
   /** The DPoP nonce each surface demands; undefined demands none. */
   nonce: Partial<Record<Surface, string>> = {};
   /** Hand a token out Bearer even when a proof was sent (a project that does not bind). */
@@ -465,6 +472,11 @@ export class FakePlatform {
   private async mcp(r: Recorded): Promise<Response> {
     const seen = await this.door(r, 'gateway');
     if (seen instanceof Response) return seen;
+    const path = new URL(r.url).pathname;
+    if (this.modelProof && MODEL_ROUTE.test(path) && seen.jkt === undefined) {
+      this.unprovenModelCalls.push(path);
+      return json({ error: { type: 'permission_error', code: 'EMODEL020', message: 'unproven' } }, 403);
+    }
     const rpc = JSON.parse(r.body || '{}') as {
       id?: number;
       method?: string;
@@ -559,6 +571,8 @@ export class FakePlatform {
     });
     fake.on('POST', `${this.issuer}/mcp`, (r) => this.mcp(r));
     fake.on('POST', `${this.issuer}/mcp/v1/messages`, (r) => this.mcp(r));
+    fake.on('POST', `${this.issuer}/mcp/v1/chat/completions`, (r) => this.mcp(r));
+    fake.on('POST', `${this.issuer}/mcp/v1/responses`, (r) => this.mcp(r));
     fake.on('POST', `${this.origin}/mcp/v1/cloud/credentials`, (r) => this.cloud(r));
     fake.on(
       'POST',
