@@ -3,6 +3,7 @@ import { fromUtf8 } from './bytes.js';
 import { asksForNonce, type DPoPSigner } from './dpop.js';
 import { ConfigurationError, TransportError, type ErrorContext } from './errors.js';
 import { freshTraceparent, isValidRequestId, requestId as newRequestId, traceIdOf } from './ids.js';
+import { stepTraceparent } from './step.js';
 import { warnOnce, type Logger } from './logger.js';
 import type { Secret } from './secret.js';
 import { originOf, requireSecureScheme } from './urls.js';
@@ -22,7 +23,11 @@ export type RetryClass = 'safe' | 'unsafe';
 
 /** The minimal OpenTelemetry API the transport uses to propagate the active trace. */
 export interface OpenTelemetryApi {
-  readonly context: { active(): unknown };
+  readonly context: {
+    active(): unknown;
+    /** Runs `fn` with `context` active; the real API has it. Needed only to attribute a call to a step that is not active. */
+    with?<R>(context: unknown, fn: () => R): R;
+  };
   readonly propagation: {
     inject(context: unknown, carrier: Record<string, string>, setter?: unknown): void;
   };
@@ -33,6 +38,10 @@ export interface OpenTelemetryApi {
   readonly trace?:
     | {
         getActiveSpan?(): { spanContext(): { traceId: string } } | undefined;
+        /** The span context in an OpenTelemetry context: how the step running now is named. */
+        getSpanContext?(
+          context: unknown,
+        ): { traceId: string; spanId: string; traceFlags: number } | undefined;
         getTracer(name: string): {
           startSpan(
             name: string,
@@ -357,22 +366,17 @@ export class Transport {
 
   /**
    * The trace headers for a request the SDK does not send itself (a framework's call through the
-   * gateway): the active OpenTelemetry trace when the project was given the API, else a fresh one.
+   * gateway): the step running now, else a fresh unsampled trace.
    */
   traceHeaders(): Record<string, string> {
     return this.#traceparent();
   }
 
+  /** The one place a `traceparent` is chosen: every request, the SDK's own and a framework's, asks here. */
   #traceparent(): Record<string, string> {
-    const { otel, browser } = this.#settings;
     // The edge's CORS allow-list does not admit traceparent yet, so a browser would fail the preflight.
-    if (browser) return {};
-    if (otel !== undefined) {
-      const carrier: Record<string, string> = {};
-      otel.propagation.inject(otel.context.active(), carrier);
-      if (carrier.traceparent !== undefined) return carrier;
-    }
-    return { traceparent: freshTraceparent() };
+    if (this.#settings.browser) return {};
+    return stepTraceparent(this.#settings.otel) ?? { traceparent: freshTraceparent() };
   }
 
   #headers(req: HttpRequest, prepared: PreparedAttempt, id: string, trace: Record<string, string>): Headers {

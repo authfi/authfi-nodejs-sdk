@@ -1,7 +1,7 @@
 import * as otel from '@opentelemetry/api';
 import { afterEach, describe, expect, it } from 'vitest';
 import { AgentKey } from '../../src/agents/agent-key.js';
-import { AuthFI } from '../../src/core/project.js';
+import { AuthFI, coreOf } from '../../src/core/project.js';
 import { Secret } from '../../src/core/secret.js';
 import {
   AuthFISpanExporter,
@@ -25,6 +25,7 @@ afterEach(async () => {
   await live?.shutdown();
   live = undefined;
   otel.trace.disable();
+  otel.context.disable();
   logs.warn = [];
 });
 
@@ -164,6 +165,71 @@ describe('content', () => {
     expect(isContentAttribute('gen_ai.usage.input_tokens')).toBe(false);
     expect(isContentAttribute('gen_ai.request.model')).toBe(false);
     expect(isContentAttribute('authfi.run_id')).toBe(false);
+  });
+});
+
+describe('the active step', () => {
+  it('registers a context manager when the process has none, so a span stays active across awaits', async () => {
+    const t = await setup();
+    live = registerAuthFITelemetry({ source: t.agent, scheduleDelayMs: 60_000 });
+    const tracer = live.tracer;
+    await tracer.startActiveSpan('step', async (span) => {
+      await Promise.resolve();
+      expect(otel.trace.getSpanContext(otel.context.active())?.spanId).toBe(span.spanContext().spanId);
+      span.end();
+    });
+    expect(otel.trace.getSpanContext(otel.context.active())).toBeUndefined();
+  });
+
+  it('sends the active span as traceparent with no propagator registered, and takes its manager out at shutdown', async () => {
+    const t = await setup();
+    const af = new AuthFI({ issuer: t.as.issuer, fetch: t.fake.fetch, retries: 0, logger, otel });
+    const trace = () => coreOf(af).transport.traceHeaders().traceparent;
+    live = registerAuthFITelemetry({ source: t.agent, scheduleDelayMs: 60_000 });
+    await live.tracer.startActiveSpan('step', async (span) => {
+      await Promise.resolve();
+      const { traceId, spanId } = span.spanContext();
+      expect(trace()).toBe(`00-${traceId}-${spanId}-01`);
+      span.end();
+    });
+    await live.shutdown();
+    live = undefined;
+    // The manager is gone, so a span is no longer the active step: a fresh unsampled value goes out.
+    otel.trace.getTracer('t').startActiveSpan('after', (span) => {
+      expect(trace()).toMatch(/^00-[0-9a-f]{32}-[0-9a-f]{16}-00$/);
+      span.end();
+    });
+  });
+
+  it('leaves the context manager of the app alone, and installs none when asked not to', async () => {
+    const t = await setup();
+    const own = {
+      active: () => otel.ROOT_CONTEXT,
+      with: (_c: unknown, fn: () => unknown) => fn(),
+      bind: <T>(_c: unknown, x: T) => x,
+      enable() {
+        return this;
+      },
+      disable() {
+        return this;
+      },
+    };
+    expect(otel.context.setGlobalContextManager(own as never)).toBe(true);
+    try {
+      live = registerAuthFITelemetry({ source: t.agent, scheduleDelayMs: 60_000 });
+      await live.shutdown();
+      live = undefined;
+      // shutdown did not remove the app's manager: registering it again is refused as a duplicate.
+      expect(otel.context.setGlobalContextManager(own as never)).toBe(false);
+    } finally {
+      otel.context.disable();
+    }
+    otel.trace.disable();
+    live = registerAuthFITelemetry({ source: t.agent, scheduleDelayMs: 60_000, contextManager: false });
+    live.tracer.startActiveSpan('step', (span) => {
+      expect(otel.trace.getSpanContext(otel.context.active())).toBeUndefined();
+      span.end();
+    });
   });
 });
 

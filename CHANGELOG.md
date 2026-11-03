@@ -7,6 +7,16 @@ All notable changes to this package. It follows [Semantic Versioning](https://se
 
 ### Added
 
+- **Every gateway call names the step that made it (authfi/authfi#303).** The `traceparent` on a call to `/mcp`, a
+  model route or the cloud door is now the trace id and span id of the exported span of the step running at that
+  moment, one resolver (`core/step.ts`) for every place that sets the header. It is made from the active span's
+  own ids, so it no longer depends on a registered propagator. `registerAuthFITelemetry` registers an
+  `AsyncLocalStorage` context manager when the process has none (`contextManager: false` opts out), because the
+  AI SDK runs its tool and model calls inside their spans and without one that span is never active; before this,
+  Vercel AI calls carried a fresh trace that matched no stored step. A tool call the AI SDK asks `toolApproval`
+  about names the model call that asked for it (the tool's span does not exist yet). The trace export's own posts
+  carry a fresh value. A header you set is kept, a browser sends none, and with no step active the value is fresh
+  and unsampled, as before.
 - **Model calls through the AI gateway are tested to prove the key.** The gateway's `fetch` (and so every
   adapter's `openai()` / `anthropic()` settings) sends `Authorization: DPoP` with a proof on the Anthropic,
   Chat Completions and Responses routes, against a gateway stand-in that refuses an unproven model call

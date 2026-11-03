@@ -42,7 +42,7 @@ Build one `AuthFI` per issuer and process and share it: it owns the caches.
 | `leewayMs` | `60000` | Clock leeway when checking token times, 0 to 300 000 |
 | `fetch` | the global `fetch` | A proxy-aware or instrumented `fetch` |
 | `logger` | warnings to the console | Any `{ debug, info, warn, error }` logger, such as pino |
-| `otel` | none | `import * as otel from '@opentelemetry/api'`, to send the active trace as `traceparent` |
+| `otel` | none | `import * as otel from '@opentelemetry/api'`, to send the step running now as `traceparent` (below) |
 | `userAgentSuffix` | none | Appended to the `User-Agent`, such as `my-app/1.4` |
 
 ### What the transport does for every call
@@ -54,7 +54,9 @@ Build one `AuthFI` per issuer and process and share it: it owns the caches.
   sent twice after it left: `fetch` cannot tell a refused connection from a reset after the body was
   sent, so only `429`, and `503` with `Retry-After`, are retried for those.
 - **An `X-Request-Id`** on every call (`afr-` and a ULID), the same on every retry, and a
-  `traceparent`. Both are joined to the platform's records.
+  `traceparent`. Both are joined to the platform's records. The `traceparent` is the trace id and span id
+  of the step running when the call goes out (given `otel`, below), else a fresh unsampled one. A
+  `traceparent` you set yourself is kept, and a browser sends none: the edge's CORS list does not admit it.
 - **Deprecations:** a `Deprecation` or `Sunset` answer is logged once per URL, with its successor.
 
 ## Sign people in
@@ -383,6 +385,14 @@ const authfi = createVercelAI({ source: await connect(), approvalSecret });
 - Prompts, answers and tool arguments and results are dropped before export unless `captureContent`
   is on (AuthFI drops them on arrival too).
 - Every span carries `authfi.agent_id` and `authfi.run_id`.
+- **Every gateway call names the step that made it.** Given `@opentelemetry/api` (`connect()` does), each
+  call to `/mcp`, the model routes and the cloud door carries a `traceparent` whose trace id and span id
+  are those of the exported span of the step running at that moment, so a call can be tied to its step.
+  `registerAuthFITelemetry` registers an `AsyncLocalStorage` context manager when the process has none
+  (without one a framework's span is never active); pass `contextManager: false` to keep your own
+  arrangement, and an existing manager is never replaced. With no step active the value is fresh and
+  unsampled. With the AI SDK's `toolApproval`, the gateway is asked before the tool's span exists, so
+  that call names the model call that asked for the tool.
 - Install the optional peers: `@opentelemetry/api`, `@opentelemetry/sdk-trace-base`,
   `@opentelemetry/otlp-transformer` (and `@ai-sdk/otel` for the AI SDK).
 

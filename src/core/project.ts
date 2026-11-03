@@ -42,8 +42,8 @@ export interface AuthFIOptions {
   /** Appended to the User-Agent, for example `my-app/1.4`. */
   userAgentSuffix?: string | undefined;
   /**
-   * The `@opentelemetry/api` module, to send the active trace as `traceparent`. Without it the SDK
-   * sends a fresh, unsampled `traceparent` on each call.
+   * The `@opentelemetry/api` module, to send the step running now as `traceparent` (its trace id and
+   * span id). Without it, or with no step active, the SDK sends a fresh, unsampled `traceparent`.
    */
   otel?: OpenTelemetryApi | undefined;
   /** The clock, for tests. */

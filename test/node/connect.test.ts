@@ -159,4 +159,19 @@ describe('connect and the active trace', () => {
       span.end();
     });
   });
+
+  it('keeps a traceparent the caller already set, even inside a step', async () => {
+    const t = await project();
+    const credential = await connect(
+      { AUTHFI_ISSUER: ISSUER, AUTHFI_CLIENT_ID: 'app_m', AUTHFI_CLIENT_SECRET: 's3cret' },
+      { fetch: t.fake.fetch },
+    );
+    const gateway = credential.gateway();
+    const own = '00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01';
+    await otel.trace.getTracer('t').startActiveSpan('step', async (span) => {
+      await gateway.fetch(gateway.mcpUrl, { method: 'POST', body: '{}', headers: { traceparent: own } });
+      span.end();
+    });
+    expect(t.fake.to(`${ISSUER}/mcp`).at(-1)!.headers.get('traceparent')).toBe(own);
+  });
 });
