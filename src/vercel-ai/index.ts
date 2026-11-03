@@ -21,6 +21,7 @@ import type { ToolApprovalRequestOutput, ToolApprovalStatus, ToolSet } from 'ai'
 import { base64url, constantTimeEqual, utf8 } from '../core/bytes.js';
 import { ConfigurationError } from '../core/errors.js';
 import { consoleLogger, type Logger } from '../core/logger.js';
+import type { OpenTelemetryApi } from '../core/transport.js';
 import { isSecret, type Secret } from '../core/secret.js';
 import {
   HoldGuard,
@@ -78,6 +79,11 @@ export class VercelAIAdapter {
   #steps: Promise<import('../otel/index.js').AuthFITelemetry> | undefined;
   readonly #secret: Uint8Array;
   readonly #logger: Logger;
+  readonly #otel: Pick<OpenTelemetryApi, 'context'> | undefined;
+  /** The model call's OpenTelemetry context, by the AI SDK call id, while its response is being read. */
+  readonly #modelCalls = new Map<string, unknown>();
+  /** The context of the model call that asked for each tool call, by tool call id (bounded). */
+  readonly #askedBy = new Map<string, unknown>();
   readonly #tools = new Map<string, { execute: ToolExecute }>();
   #anonymous = 0;
   #macKey: Promise<CryptoKey> | undefined;
@@ -107,6 +113,7 @@ export class VercelAIAdapter {
     this.runId = this.#run.runId;
     this.captureContent = options.captureContent === true;
     this.#logger = options.logger ?? consoleLogger;
+    this.#otel = options.otel ?? this.#run.gateway.otel;
     this.#guard = new HoldGuard(this.#run, (key, input, signal, context) =>
       this.#call(key, input, signal, context),
     );
@@ -197,7 +204,7 @@ export class VercelAIAdapter {
       const known = this.#guard.entry(id) ?? (await this.#restore(key, raw, id, options.messages));
       if (known === undefined) {
         // First evaluation: AuthFI decides when the call reaches the gateway, so it is made now, once.
-        const fresh = await this.#guard.begin(id, key, raw);
+        const fresh = await this.#asking(id, () => this.#guard.begin(id, key, raw));
         if (fresh.status === 'pending' && fresh.approvalId !== undefined)
           return { type: 'user-approval', reason: await this.#reasonFor(id, key, fresh.approvalId) };
         return { type: 'not-applicable' }; // allowed or refused: execute returns the answer AuthFI gave
@@ -209,6 +216,17 @@ export class VercelAIAdapter {
       this.#guard.forget(id);
       return { type: 'denied', reason: DENIED_REASON };
     };
+  }
+
+  /**
+   * Runs `send` in the OpenTelemetry context of the model call that asked for tool call `id`. The AI
+   * SDK evaluates `toolApproval` after the model call and before the tool's span exists, so no step is
+   * active then; the model call is the step that made this gateway call, and its span is exported.
+   */
+  #asking<T>(id: string, send: () => T): T {
+    const asked = this.#askedBy.get(id);
+    const api = this.#otel?.context;
+    return asked === undefined || api?.with === undefined ? send() : api.with(asked, send);
   }
 
   #mac(toolCallId: string, toolName: string, approvalId: string): Promise<Uint8Array> {
@@ -407,11 +425,37 @@ export class VercelAIAdapter {
     if (typeof integration !== 'object')
       throw new ConfigurationError('telemetry() takes a telemetry integration object');
     const capture = this.captureContent;
+    const otel = this.#otel;
+    const modelCalls = this.#modelCalls;
+    const askedBy = this.#askedBy;
     return new Proxy(integration, {
       get(target, prop) {
         const value: unknown = Reflect.get(target, prop, target);
         if (typeof value !== 'function') return value;
         const fn = value as (...args: unknown[]) => unknown;
+        if (otel !== undefined && prop === 'executeLanguageModelCall') {
+          // The integration runs the provider call inside the model call's span; note that context.
+          return (event: { callId: string; execute: () => unknown }) =>
+            fn.call(target, {
+              ...event,
+              execute: () => {
+                remember(modelCalls, event.callId, otel.context.active());
+                return event.execute();
+              },
+            });
+        }
+        if (otel !== undefined && prop === 'onLanguageModelCallEnd') {
+          return (
+            event: { callId?: string; content?: readonly { type?: string; toolCallId?: string }[] },
+            ...rest: unknown[]
+          ) => {
+            const ctx = event.callId === undefined ? undefined : modelCalls.get(event.callId);
+            for (const part of event.content ?? [])
+              if (ctx !== undefined && part.type === 'tool-call' && part.toolCallId !== undefined)
+                remember(askedBy, part.toolCallId, ctx);
+            return fn.call(target, event, ...rest);
+          };
+        }
         if (!capture && typeof prop === 'string' && /^(experimental_)?on[A-Za-z]*Start$/.test(prop)) {
           return (event: unknown, ...rest: unknown[]) =>
             fn.call(
@@ -430,6 +474,19 @@ export class VercelAIAdapter {
   /** How many tool calls the adapter remembers right now. */
   get remembered(): number {
     return this.#guard.remembered;
+  }
+}
+
+const REMEMBERED = 1000;
+
+/** Sets `key`, dropping the oldest entry beyond {@link REMEMBERED}. */
+function remember(map: Map<string, unknown>, key: string, value: unknown): void {
+  map.delete(key);
+  map.set(key, value);
+  if (map.size <= REMEMBERED) return;
+  for (const oldest of map.keys()) {
+    map.delete(oldest);
+    return;
   }
 }
 

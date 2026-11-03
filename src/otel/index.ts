@@ -17,7 +17,14 @@
  * @packageDocumentation
  */
 
-import { trace, type Tracer, type TracerProvider } from '@opentelemetry/api';
+import {
+  context,
+  ROOT_CONTEXT,
+  trace,
+  type ContextManager,
+  type Tracer,
+  type TracerProvider,
+} from '@opentelemetry/api';
 import { ProtobufTraceSerializer } from '@opentelemetry/otlp-transformer';
 import {
   BasicTracerProvider,
@@ -31,6 +38,7 @@ import { ConfigurationError, GatewayTokenRefused } from '../core/errors.js';
 import { isValidRunId, newRunId } from '../core/ids.js';
 import { consoleLogger, type Logger } from '../core/logger.js';
 import type { Gateway } from '../gateway/gateway.js';
+import { installContextManager } from './context.js';
 import { LangSmithProcessor, redactSpan } from './langsmith.js';
 
 /** A credential the exporter can use: anything with gateways, an `AgentAuth` or a `ClientCredentials`. */
@@ -108,12 +116,15 @@ export class AuthFISpanExporter implements SpanExporter {
   }
 
   async #post(body: Uint8Array): Promise<Response> {
-    return this.#gateway.fetch(this.#gateway.otlpTracesUrl, {
-      method: 'POST',
-      headers: { 'content-type': 'application/x-protobuf' },
-      body: body as BodyInit,
-      signal: AbortSignal.timeout(EXPORT_TIMEOUT_MS),
-    });
+    // The batch timer runs in whichever step ended the first span; the export is not that step's call.
+    return context.with(ROOT_CONTEXT, () =>
+      this.#gateway.fetch(this.#gateway.otlpTracesUrl, {
+        method: 'POST',
+        headers: { 'content-type': 'application/x-protobuf' },
+        body: body as BodyInit,
+        signal: AbortSignal.timeout(EXPORT_TIMEOUT_MS),
+      }),
+    );
   }
 
   async #send(spans: ReadableSpan[]): Promise<void> {
@@ -184,6 +195,13 @@ export interface AuthFITelemetryOptions {
    * framework.
    */
   readonly global?: boolean | undefined;
+  /**
+   * Keep the active step across `await`s (default true): registers an `AsyncLocalStorage` context
+   * manager when the process has none. A framework runs each tool and model call inside its span, and
+   * without a context manager that span is not active, so the gateway call it makes cannot carry it as
+   * `traceparent`. An app's own context manager is left alone; `shutdown()` removes only ours.
+   */
+  readonly contextManager?: boolean | undefined;
   /** How often the batch is sent, in milliseconds (default 5 000). */
   readonly scheduleDelayMs?: number | undefined;
   readonly logger?: Logger | undefined;
@@ -206,7 +224,8 @@ export interface AuthFITelemetry {
  * `<issuer origin>/otlp/v1/traces` under the credential's current token, stamps `authfi.agent_id` and
  * `authfi.run_id` on every span, and drops content unless `captureContent` is on. To join a step
  * with the gateway's record of the call, build the project with the same `@opentelemetry/api`
- * (`connect()` does): calls then carry the active trace as `traceparent`.
+ * (`connect()` does): every gateway call then carries the trace id and span id of the step running at
+ * that moment as `traceparent`, the ids exported here.
  */
 export function registerAuthFITelemetry(options: AuthFITelemetryOptions): AuthFITelemetry {
   const runId = options.runId ?? newRunId();
@@ -240,11 +259,18 @@ export function registerAuthFITelemetry(options: AuthFITelemetryOptions): AuthFI
       'a tracer provider is already registered; pass global: false and give the framework result.tracer',
     );
   }
+  // Ours until shutdown; undefined when the app has its own or the runtime cannot hold a context.
+  let manager: ContextManager | undefined =
+    options.contextManager === false ? undefined : installContextManager();
   return {
     runId,
     tracerProvider: provider,
     tracer: provider.getTracer('@authfi/sdk'),
     forceFlush: () => provider.forceFlush(),
-    shutdown: () => provider.shutdown(),
+    shutdown: async () => {
+      await provider.shutdown();
+      if (manager !== undefined) context.disable();
+      manager = undefined;
+    },
   };
 }

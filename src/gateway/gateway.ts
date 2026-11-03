@@ -5,7 +5,7 @@ import type { DPoPSigner } from '../core/dpop.js';
 import type { Core } from '../core/project.js';
 import { Secret } from '../core/secret.js';
 import { learnNonce, requireAllowedOrigin, type TokenSource } from '../core/token-source.js';
-import { contextOf } from '../core/transport.js';
+import { contextOf, type OpenTelemetryApi } from '../core/transport.js';
 import { SDK_VERSION } from '../core/version.js';
 import { recordDecision, type DecisionNames } from './decision-span.js';
 
@@ -259,6 +259,11 @@ export class Gateway {
    */
   forRun(runId: string = newRunId()): Gateway {
     return new Gateway(this.#core, this.#source, this.agentId, { kind: this.kind, runId });
+  }
+
+  /** The `@opentelemetry/api` the project was given, which names the step a call is made from. */
+  get otel(): OpenTelemetryApi | undefined {
+    return this.#core.otel;
   }
 
   /**

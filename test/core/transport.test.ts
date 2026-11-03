@@ -302,6 +302,46 @@ describe('headers', () => {
     );
   });
 
+  it('names the active span when no propagator is registered, with its sampled flag', async () => {
+    const fake = new FakeFetch().on('GET', URL1, () => json({}));
+    const span = (traceFlags: number) => ({
+      context: { active: () => 'ctx' },
+      propagation: { inject: () => undefined },
+      trace: {
+        getTracer: () => ({ startSpan: () => ({ end: () => undefined }) }),
+        getSpanContext: () => ({
+          traceId: '0af7651916cd43dd8448eb211c80319c',
+          spanId: 'b7ad6b7169203331',
+          traceFlags,
+        }),
+      },
+    });
+    const sent = async (flags: number) => {
+      const f = new FakeFetch().on('GET', URL1, () => json({}));
+      await transport(f, { otel: span(flags) }).t.send({ method: 'GET', url: URL1, retry: 'safe' });
+      return f.requests[0]!.headers.get('traceparent');
+    };
+    expect(await sent(1)).toBe('00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01');
+    expect(await sent(0)).toBe('00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-00');
+    expect(fake.requests).toHaveLength(0);
+  });
+
+  it('sends a fresh unsampled traceparent when the span in the context is not a valid one', async () => {
+    const fake = new FakeFetch().on('GET', URL1, () => json({}));
+    const otel = {
+      context: { active: () => 'ctx' },
+      propagation: { inject: () => undefined },
+      trace: {
+        getTracer: () => ({ startSpan: () => ({ end: () => undefined }) }),
+        getSpanContext: () => ({ traceId: '0'.repeat(32), spanId: '0'.repeat(16), traceFlags: 1 }),
+      },
+    };
+    await transport(fake, { otel }).t.send({ method: 'GET', url: URL1, retry: 'safe' });
+    expect(fake.requests[0]!.headers.get('traceparent')).toMatch(
+      /^00-(?!0{32})[0-9a-f]{32}-[0-9a-f]{16}-00$/,
+    );
+  });
+
   it('sends neither User-Agent nor traceparent from a browser, which the edge CORS would refuse', async () => {
     const fake = new FakeFetch().on('GET', URL1, () => json({}));
     await transport(fake, { browser: true, userAgent: undefined }).t.send({
