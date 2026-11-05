@@ -7,8 +7,10 @@ const mcp = (p: { issuer: string }) => `${p.issuer}/mcp`;
 
 describe("DPoP: the agent's tokens are bound to this process's key", () => {
   it('mints a token bound to the key, and says so', async () => {
-    const { agent, p } = await platform();
+    const { agent, p, warns } = await platform();
     const token = await agent.token();
+    // The control for the Bearer warning: a bound agent has nothing to warn about.
+    expect(warns.filter((w) => w.includes('Bearer'))).toEqual([]);
     const key = agent.dpop;
     expect(key).toBeDefined();
     expect(decodeJwt(token).cnf).toEqual({ jkt: key!.thumbprint });
@@ -122,9 +124,12 @@ describe("DPoP: the agent's tokens are bound to this process's key", () => {
   });
 
   it('is off when asked: the token is Bearer and the gateway takes an unbound token', async () => {
-    const { af, p, key } = await platform();
+    const { af, p, key, warns } = await platform();
     const agent = af.agent({ agentId: AGENT, key, dpop: false });
     const token = await agent.token();
+    await agent.token({ force: true });
+    // Said once, at warning level: a project can require bound tokens, and this one will then be refused.
+    expect(warns.filter((w) => w.includes('dpop: false'))).toHaveLength(1);
     expect(decodeJwt(token).cnf).toBeUndefined();
     expect(agent.dpop).toBeUndefined();
     const res = await agent.gateway().fetch(mcp(p), { method: 'POST', body: call('billing__lookup') });
@@ -153,7 +158,7 @@ describe("DPoP: the agent's tokens are bound to this process's key", () => {
     const res = await agent.gateway().fetch(mcp(p), { method: 'POST', body: call('billing__lookup') });
     expect(res.status).toBe(200);
     expect(agent.dpop).toBeUndefined();
-    expect(warns.some((w) => w.includes('proof-of-possession algorithm'))).toBe(true);
+    expect(warns.some((w) => w.includes('proof-of-possession algorithm') && w.includes('will refuse'))).toBe(true);
   });
 });
 
