@@ -571,6 +571,14 @@ describe('an instance admitted only to be observed', () => {
     expect((failed as Error).message).toContain(
       'ask a person to open an observation window for the agent in the console, or set AUTHFI_CONFIG_VERSION and AUTHFI_CONFIG_DIGEST',
     );
+    // control: an instance that did not ask to be observed is refused the same way and told nothing about windows
+    const plain = await (
+      await connect({ ...env, AUTHFI_CONFIG_VERSION: '8' }, options)
+    )
+      .token()
+      .catch((e: unknown) => e as Error);
+    expect((plain as Error).message).toContain('audit tape');
+    expect((plain as Error).message).not.toContain('observation window');
     // a platform that names the reason gets that sentence alone
     p.t.fake.on(
       'POST',
@@ -581,13 +589,6 @@ describe('an instance admitted only to be observed', () => {
     expect(named).toMatchObject({ code: 'config_not_approved' });
     expect((named as Error).message).toContain('observation window');
     expect((named as Error).message).not.toContain('audit tape');
-    // control: an instance that did not ask to be observed is told nothing about windows
-    const plain = await (
-      await connect({ ...env, AUTHFI_CONFIG_VERSION: '8' }, options)
-    )
-      .token()
-      .catch((e: unknown) => e as Error);
-    expect((plain as Error).message).not.toContain('observation window');
   });
 
   it('is refused, readably, by every call that asks a person, and its own token still works', async () => {

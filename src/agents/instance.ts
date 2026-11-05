@@ -175,6 +175,31 @@ export interface InstanceOptions {
   readonly refreshSkewMs?: number | undefined;
 }
 
+/** The configuration an instance states: its approved one, or none when it asks to be observed; else a refusal to start. */
+function statedConfiguration(options: InstanceOptions): Configuration {
+  const { config } = options;
+  if (options.observe === true) {
+    if (config !== undefined) {
+      throw new ConfigurationError(
+        'an instance is either observed (AUTHFI_CONFIG_OBSERVE, observe: true) or runs one approved configuration (AUTHFI_CONFIG_VERSION and AUTHFI_CONFIG_DIGEST, config); not both',
+      );
+    }
+    return OBSERVE_CONFIG;
+  }
+  if (
+    config === undefined ||
+    typeof config.version !== 'number' ||
+    !Number.isInteger(config.version) ||
+    config.version < 1 ||
+    !/^sha256:[0-9a-f]+$/.test(config.digest)
+  ) {
+    throw new ConfigurationError(
+      'an instance runs one approved configuration: set AUTHFI_CONFIG_VERSION and AUTHFI_CONFIG_DIGEST (sha256:<hex>), or pass config: { version, digest }. The platform attests no instance without one. To be observed before any version is approved, set AUTHFI_CONFIG_OBSERVE=1 (or observe: true) while a person has an observation window open for the agent.',
+    );
+  }
+  return config;
+}
+
 /** Signs in by challenge, attest and the attested token request. */
 class Attestor implements InstanceSignIn {
   readonly #core: Core;
@@ -184,12 +209,12 @@ class Attestor implements InstanceSignIn {
   readonly #config: Configuration;
   #held: Attestation | undefined;
 
-  constructor(af: AuthFI, options: InstanceOptions) {
+  constructor(af: AuthFI, options: InstanceOptions, config: Configuration) {
     this.#core = coreOf(af);
     this.#issuer = af.issuer;
     this.#options = options;
     this.#skew = options.refreshSkewMs ?? 60_000;
-    this.#config = options.observe === true ? OBSERVE_CONFIG : options.config!;
+    this.#config = config;
   }
 
   get instanceId(): string | undefined {
@@ -346,30 +371,14 @@ export class InstanceAuth extends AgentAuth {
   readonly #attestor: Attestor;
 
   constructor(af: AuthFI, options: InstanceOptions) {
-    const { agentId, config, imageDigest } = options;
-    if (options.observe === true) {
-      if (config !== undefined) {
-        throw new ConfigurationError(
-          'an instance is either observed (AUTHFI_CONFIG_OBSERVE, observe: true) or runs one approved configuration (AUTHFI_CONFIG_VERSION and AUTHFI_CONFIG_DIGEST, config); not both',
-        );
-      }
-    } else if (
-      config === undefined ||
-      typeof config.version !== 'number' ||
-      !Number.isInteger(config.version) ||
-      config.version < 1 ||
-      !/^sha256:[0-9a-f]+$/.test(config.digest)
-    ) {
-      throw new ConfigurationError(
-        'an instance runs one approved configuration: set AUTHFI_CONFIG_VERSION and AUTHFI_CONFIG_DIGEST (sha256:<hex>), or pass config: { version, digest }. The platform attests no instance without one. To be observed before any version is approved, set AUTHFI_CONFIG_OBSERVE=1 (or observe: true) while a person has an observation window open for the agent.',
-      );
-    }
+    const { agentId, imageDigest } = options;
+    const stated = statedConfiguration(options);
     if (imageDigest !== undefined && !IMAGE_DIGEST.test(imageDigest)) {
       throw new ConfigurationError(
         `AUTHFI_IMAGE_DIGEST is sha256: and 64 lowercase hex digits; got ${JSON.stringify(imageDigest)}`,
       );
     }
-    const attestor = new Attestor(af, options);
+    const attestor = new Attestor(af, options, stated);
     super(af, {
       agentId,
       key: new InstanceSigner(),
