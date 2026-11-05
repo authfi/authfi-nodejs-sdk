@@ -158,7 +158,9 @@ describe("DPoP: the agent's tokens are bound to this process's key", () => {
     const res = await agent.gateway().fetch(mcp(p), { method: 'POST', body: call('billing__lookup') });
     expect(res.status).toBe(200);
     expect(agent.dpop).toBeUndefined();
-    expect(warns.some((w) => w.includes('proof-of-possession algorithm') && w.includes('will refuse'))).toBe(true);
+    expect(warns.some((w) => w.includes('proof-of-possession algorithm') && w.includes('will refuse'))).toBe(
+      true,
+    );
   });
 });
 
