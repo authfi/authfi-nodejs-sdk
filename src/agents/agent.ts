@@ -35,6 +35,7 @@ import { DelegatedToken } from './delegated.js';
 import { Gateway, type CloudAccess } from '../gateway/gateway.js';
 import { Mandate, MANDATE_DETAIL_TYPE, type MandatePending } from './mandate.js';
 import { noAssertion } from './no-assertion.js';
+import { observeOnlyRefusal } from './observe-only.js';
 import { refuseNested, runInMandate } from './scope.js';
 
 /**
@@ -48,6 +49,11 @@ export interface InstanceSignIn {
     readonly signer: DPoPSigner;
     readonly signal?: AbortSignal | undefined;
   }): Promise<TokenResponse>;
+  /**
+   * The headers that authenticate the agent at the token endpoint (the attestation and a proof of possession),
+   * made fresh each call of the returned function; the attestation itself is held while it lasts.
+   */
+  attestation(signer: DPoPSigner, signal?: AbortSignal): Promise<() => Promise<Record<string, string>>>;
 }
 
 /** How `af.agent()` is configured. */
@@ -323,25 +329,26 @@ export class AgentAuth extends BaseTokenSource {
     return this.#core.dpop();
   }
 
+  /** The instance's key, which its attestation names and its tokens are bound to, for any resource. */
+  async #instanceKey(): Promise<DPoPSigner> {
+    if (!this.#dpop) {
+      throw new ConfigurationError(
+        'an instance signs in by attestation, which binds its token to the instance key: dpop cannot be off',
+      );
+    }
+    return this.#core.dpop();
+  }
+
   /** The shared mint belongs to no caller, so it takes no caller's signal. */
   async #mint(resource: string | undefined): Promise<Minted> {
     const meta = await this.#core.metadata();
-    // An instance's token is bound to its key for any resource: the attestation names the key.
-    const signer =
-      this.#instance === undefined
-        ? await this.#keyFor(meta, resource)
-        : this.#dpop
-          ? await this.#core.dpop()
-          : undefined;
     if (this.#instance !== undefined) {
-      if (signer === undefined) {
-        throw new ConfigurationError(
-          'an instance signs in by attestation, which binds its token to the instance key: dpop cannot be off',
-        );
-      }
+      // An instance's token is bound to its key for any resource: the attestation names the key.
+      const signer = await this.#instanceKey();
       const response = await this.#instance.mint({ meta, resource, signer });
       return { response, bound: this.#boundBy(response, signer) };
     }
+    const signer = await this.#keyFor(meta, resource);
     this.#requireAgentAuth(
       meta.token_endpoint_auth_methods_supported,
       meta.token_endpoint_auth_signing_alg_values_supported,
@@ -376,6 +383,37 @@ export class AgentAuth extends BaseTokenSource {
   async #own(signal?: AbortSignal): Promise<{ token: Secret; signer: DPoPSigner | undefined }> {
     const cached = await this.#tokenFor(this.#resource, { signal });
     return { token: cached.response.accessToken, signer: cached.bound };
+  }
+
+  /**
+   * How a call to the agent's own API proves who sends it: the agent's token with a proof by the key it is bound
+   * to (`Authorization: DPoP`), or Bearer when the platform left it unbound.
+   */
+  async #ownCredential(
+    signal?: AbortSignal,
+  ): Promise<{ authorization: string; dpop: { signer: DPoPSigner; accessToken: Secret } | undefined }> {
+    const { token, signer } = await this.#own(signal);
+    return {
+      authorization: `${signer === undefined ? 'Bearer' : 'DPoP'} ${token.reveal()}`,
+      dpop: signer === undefined ? undefined : { signer, accessToken: token },
+    };
+  }
+
+  /** Posts with the agent's own token and its proof (an instance's whole client authentication). Sent once. */
+  async #postWithOwnToken(
+    url: string,
+    request: { contentType: string; body: string; signal?: AbortSignal | undefined },
+  ): Promise<HttpResponse> {
+    const credential = await this.#ownCredential(request.signal);
+    return this.#core.transport.send({
+      method: 'POST',
+      url,
+      retry: 'unsafe',
+      signal: request.signal,
+      ...(credential.dpop === undefined ? {} : { dpop: credential.dpop }),
+      headers: { authorization: credential.authorization, 'content-type': request.contentType },
+      body: request.body,
+    });
   }
 
   #requireAgentAuth(methods: readonly string[] | undefined, algs: readonly string[] | undefined): void {
@@ -473,39 +511,54 @@ export class AgentAuth extends BaseTokenSource {
         'bindingMessage is required: it is what the person reads, such as "Refund order 4411"',
       );
     }
-    this.#needsKey();
     const meta = await this.#requireGrant(GRANT.ciba, 'ciba', request.signal);
     const endpoint = meta.backchannel_authentication_endpoint;
     if (endpoint === undefined)
       throw new NotSupportedError('ciba', 'This AuthFI project does not offer CIBA');
-    this.#requireAgentAuth(
-      meta.token_endpoint_auth_methods_supported,
-      meta.token_endpoint_auth_signing_alg_values_supported,
-    );
-    const res = await this.#core.transport.send({
-      method: 'POST',
-      url: endpoint,
-      retry: 'unsafe',
-      signal: request.signal,
-      prepare: async () => {
-        const form = new URLSearchParams({
-          login_hint: request.loginHint,
-          binding_message: request.bindingMessage,
-        });
-        if (request.scope !== undefined && request.scope.length > 0)
-          form.set('scope', request.scope.join(' '));
-        if (request.expiresInSeconds !== undefined)
-          form.set('requested_expiry', String(Math.floor(request.expiresInSeconds)));
-        form.set('client_id', this.agentId);
-        form.set('client_assertion_type', 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer');
-        form.set(
-          'client_assertion',
-          (await clientAssertion(this.#signer, this.agentId, meta.token_endpoint, this.#core.clock)).reveal(),
-        );
-        return { headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: form.toString() };
-      },
+    const form = new URLSearchParams({
+      login_hint: request.loginHint,
+      binding_message: request.bindingMessage,
     });
-    if (res.status !== 200) throw oauthErrorOf(res);
+    if (request.scope !== undefined && request.scope.length > 0) form.set('scope', request.scope.join(' '));
+    if (request.expiresInSeconds !== undefined)
+      form.set('requested_expiry', String(Math.floor(request.expiresInSeconds)));
+    form.set('client_id', this.agentId);
+    let res: HttpResponse;
+    if (this.#instance !== undefined) {
+      res = await this.#postWithOwnToken(endpoint, {
+        contentType: 'application/x-www-form-urlencoded',
+        body: form.toString(),
+        signal: request.signal,
+      });
+    } else {
+      this.#requireAgentAuth(
+        meta.token_endpoint_auth_methods_supported,
+        meta.token_endpoint_auth_signing_alg_values_supported,
+      );
+      res = await this.#core.transport.send({
+        method: 'POST',
+        url: endpoint,
+        retry: 'unsafe',
+        signal: request.signal,
+        prepare: async () => {
+          const signed = new URLSearchParams(form);
+          signed.set('client_assertion_type', 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer');
+          signed.set(
+            'client_assertion',
+            (
+              await clientAssertion(this.#signer, this.agentId, meta.token_endpoint, this.#core.clock)
+            ).reveal(),
+          );
+          return {
+            headers: { 'content-type': 'application/x-www-form-urlencoded' },
+            body: signed.toString(),
+          };
+        },
+      });
+    }
+    if (res.status !== 200) {
+      throw (this.#instance === undefined ? undefined : observeOnlyRefusal(res)) ?? oauthErrorOf(res);
+    }
     const body = jsonOf(res) as { auth_req_id?: unknown; expires_in?: unknown; interval?: unknown } | null;
     if (typeof body?.auth_req_id !== 'string' || body.auth_req_id === '') {
       throw new TransportError('response_invalid', `${endpoint} answered no auth_req_id`, {
@@ -572,7 +625,10 @@ export class AgentAuth extends BaseTokenSource {
   }): Promise<Minted> {
     const clock = this.#core.clock;
     const meta = await this.#core.metadata({ signal: args.signal });
-    const signer = await this.#keyFor(meta, args.resource);
+    const instance = this.#instance;
+    // An instance redeems as it signs in: its attestation, a proof of possession and the proof of its key.
+    const signer =
+      instance === undefined ? await this.#keyFor(meta, args.resource) : await this.#instanceKey();
     const waitDeadline = clock.monotonic() + (args.timeoutMs ?? 300_000);
     const requestDeadline = args.requestDeadline;
     let interval = args.intervalMs;
@@ -587,6 +643,11 @@ export class AgentAuth extends BaseTokenSource {
       }
       await clock.sleep(interval, args.signal);
       try {
+        // Asked for on each poll: the attestation is held while it lasts and made again when it has lapsed.
+        const headers =
+          instance === undefined || signer === undefined
+            ? undefined
+            : await instance.attestation(signer, args.signal);
         const response = await requestToken(
           this.#core.transport,
           {
@@ -595,8 +656,11 @@ export class AgentAuth extends BaseTokenSource {
               grant_type: GRANT.ciba,
               auth_req_id: args.authReqId.reveal(),
               resource: args.resource,
+              ...(headers === undefined ? {} : { client_id: this.agentId }),
             },
-            auth: this.#auth(),
+            ...(headers === undefined
+              ? { auth: this.#auth() }
+              : { attempt: async () => ({ headers: await headers() }) }),
             retry: 'unsafe',
             signal: args.signal,
             dpop: signer,
@@ -946,18 +1010,10 @@ export class AgentAuth extends BaseTokenSource {
     if (typeof action !== 'string' || action.trim() === '')
       throw new ConfigurationError('action is required');
     const url = `${await this.#core.apiOrigin(options.signal)}${AGENT_API}/transaction-token`;
-    const { token, signer } = await this.#own(options.signal);
-    const res = await this.#core.transport.send({
-      method: 'POST',
-      url,
-      retry: 'unsafe',
-      signal: options.signal,
-      ...(signer === undefined ? {} : { dpop: { signer, accessToken: token } }),
-      headers: {
-        authorization: `${signer === undefined ? 'Bearer' : 'DPoP'} ${token.reveal()}`,
-        'content-type': 'application/json',
-      },
+    const res = await this.#postWithOwnToken(url, {
+      contentType: 'application/json',
       body: JSON.stringify({ action, resource: options.resource, context: options.context }),
+      signal: options.signal,
     });
     if (res.status !== 200) throw apiErrorOf(res);
     const data = dataOf(res) as { transaction_token?: unknown; txn?: unknown; expires_in?: unknown } | null;
@@ -1056,29 +1112,42 @@ export class AgentAuth extends BaseTokenSource {
   ): Promise<Approval> {
     if (typeof action !== 'string' || action.trim() === '')
       throw new ConfigurationError('action is required');
-    this.#needsKey();
     const { requestApproval } = await this.#agentConfig.get({ signal: options.signal });
-    const meta = await this.#core.metadata({ signal: options.signal });
-    const res = await this.#core.transport.send({
-      method: 'POST',
-      url: requestApproval,
-      retry: 'unsafe',
-      signal: options.signal,
-      prepare: async () => ({
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          agent_id: this.agentId,
-          client_assertion_type: 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer',
-          client_assertion: (
-            await clientAssertion(this.#signer, this.agentId, meta.token_endpoint, this.#core.clock)
-          ).reveal(),
-          requesting_action: action,
-          context: options.context,
-          timeout_seconds: options.expiresInSeconds ?? 300,
+    const asked = {
+      agent_id: this.agentId,
+      requesting_action: action,
+      context: options.context,
+      timeout_seconds: options.expiresInSeconds ?? 300,
+    };
+    let res: HttpResponse;
+    if (this.#instance !== undefined) {
+      res = await this.#postWithOwnToken(requestApproval, {
+        contentType: 'application/json',
+        body: JSON.stringify(asked),
+        signal: options.signal,
+      });
+    } else {
+      const meta = await this.#core.metadata({ signal: options.signal });
+      res = await this.#core.transport.send({
+        method: 'POST',
+        url: requestApproval,
+        retry: 'unsafe',
+        signal: options.signal,
+        prepare: async () => ({
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            ...asked,
+            client_assertion_type: 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer',
+            client_assertion: (
+              await clientAssertion(this.#signer, this.agentId, meta.token_endpoint, this.#core.clock)
+            ).reveal(),
+          }),
         }),
-      }),
-    });
-    if (res.status !== 202 && res.status !== 200) throw apiErrorOf(res);
+      });
+    }
+    if (res.status !== 202 && res.status !== 200) {
+      throw (this.#instance === undefined ? undefined : observeOnlyRefusal(res)) ?? apiErrorOf(res);
+    }
     return approvalOf(dataOf(res), requestApproval);
   }
 
@@ -1090,15 +1159,19 @@ export class AgentAuth extends BaseTokenSource {
   async approval(approvalId: string, options: { signal?: AbortSignal | undefined } = {}): Promise<Approval> {
     const { approval } = await this.#agentConfig.get({ signal: options.signal });
     const url = approval.replace('{id}', encodeURIComponent(approvalId));
-    const { token, signer } = await this.#own(options.signal);
+    const credential = await this.#ownCredential(options.signal);
     const res = await this.#core.transport.send({
       method: 'GET',
       url,
       retry: 'safe',
       signal: options.signal,
-      ...(signer === undefined ? {} : { dpop: { signer, accessToken: token } }),
-      headers: { authorization: `${signer === undefined ? 'Bearer' : 'DPoP'} ${token.reveal()}` },
+      ...(credential.dpop === undefined ? {} : { dpop: credential.dpop }),
+      headers: { authorization: credential.authorization },
     });
+    if (this.#instance !== undefined) {
+      const observed = observeOnlyRefusal(res);
+      if (observed !== undefined) throw observed;
+    }
     if (res.status === 403) {
       throw new NotSupportedError(
         'agent_approval_status',

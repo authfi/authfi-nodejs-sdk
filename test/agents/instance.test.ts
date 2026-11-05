@@ -2,7 +2,8 @@ import type * as Fs from 'node:fs/promises';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { decodeJwt } from 'jose';
+import { createHash } from 'node:crypto';
+import { decodeJwt, exportJWK, generateKeyPair, SignJWT } from 'jose';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AgentAuth } from '../../src/agents/agent.js';
 import { InstanceAuth } from '../../src/agents/instance.js';
@@ -206,7 +207,7 @@ describe('connect() signs in as an instance on a bound workload', () => {
     await expect((await connect(env, options)).token()).rejects.toThrow(/answered no nonce/);
   });
 
-  it('acts for a person by token exchange, bound to the instance key, but not by CIBA, approval or mandate', async () => {
+  it('acts for a person by token exchange, bound to the instance key, but still not by mandate', async () => {
     const { env, options, p, clock } = await setup();
     const agent = (await connect(env, options)) as InstanceAuth;
     const now = Math.floor(clock.now() / 1000);
@@ -214,16 +215,10 @@ describe('connect() signs in as an instance on a bound workload', () => {
     const subject = new Secret(await p.t.sign({ sub: 'usr_9', exp: now + 3600 }, { nowSeconds: now }));
     const delegated = await agent.exchange(subject);
     expect(delegated.dpop?.thumbprint).toBe(agent.dpop!.thumbprint);
-    for (const refused of [
-      () => agent.requestUserToken({ loginHint: 'a@b.c', bindingMessage: 'Refund' }),
-      () => agent.requestApproval('refund'),
-      () => agent.requestMandate('support.refund', { subjectToken: subject }),
-    ]) {
-      await expect(refused()).rejects.toMatchObject({
-        name: 'NotSupportedError',
-        feature: 'instance_assertion',
-      });
-    }
+    await expect(agent.requestMandate('support.refund', { subjectToken: subject })).rejects.toMatchObject({
+      name: 'NotSupportedError',
+      feature: 'instance_assertion',
+    });
     expect(String(agent)).toBe(`InstanceAuth(${AGENT})`);
   });
 });
@@ -366,5 +361,277 @@ describe('the rest of the instance sign-in', () => {
       config: CONFIG,
     });
     expect(off.instanceId).toBeUndefined();
+  });
+});
+
+const sha = (text: string): string => createHash('sha256').update(text).digest('base64url');
+const START = '/apis/regional/v1/ai/auth/backchannel-authorize';
+const REQUEST = '/apis/regional/v1/ai/auth/request-approval';
+const NO_CONFIG = (env: Record<string, string>) => {
+  const { AUTHFI_CONFIG_VERSION: _v, AUTHFI_CONFIG_DIGEST: _d, ...rest } = env;
+  return rest;
+};
+
+describe('an instance asks a person', () => {
+  it('starts CIBA with its token and a proof by its key, and redeems under its attestation', async () => {
+    const { env, options, p } = await setup();
+    const agent = (await connect(env, options)) as InstanceAuth;
+    const request = await agent.requestUserToken({ loginHint: 'a@b.c', bindingMessage: 'Refund order 4411' });
+    expect(request.intervalMs).toBe(2000);
+    const token = await agent.token();
+    const start = p.t.fake.to(`${p.issuer}${START}`).at(-1)!;
+    expect(start.headers.get('authorization')).toBe(`DPoP ${token}`);
+    expect(decodeJwt(start.headers.get('dpop')!)).toMatchObject({
+      htm: 'POST',
+      htu: `${p.issuer}${START}`,
+      ath: sha(token),
+    });
+    const form = new URLSearchParams(start.body);
+    expect(form.get('client_id')).toBe(AGENT);
+    expect(form.get('binding_message')).toBe('Refund order 4411');
+    expect(form.has('client_assertion')).toBe(false);
+    expect(form.has('client_assertion_type')).toBe(false);
+    expect(p.asked).toEqual([{ route: 'backchannel-authorize', scheme: 'DPoP', instance: agent.instanceId }]);
+
+    const delegated = await agent.awaitUserToken(request);
+    const redeem = p.t.fake.to(`${p.issuer}/oauth/token`).at(-1)!;
+    const body = new URLSearchParams(redeem.body);
+    expect(body.get('grant_type')).toBe('urn:openid:params:grant-type:ciba');
+    expect(body.get('client_id')).toBe(AGENT);
+    expect(body.has('client_assertion')).toBe(false);
+    expect(redeem.headers.get('oauth-client-attestation')).toMatch(/^eyJ/);
+    expect(redeem.headers.get('oauth-client-attestation-pop')).toMatch(/^eyJ/);
+    expect(redeem.headers.get('dpop')).toMatch(/^eyJ/);
+    expect(delegated.dpop?.thumbprint).toBe(agent.dpop!.thumbprint);
+    expect(p.attestations).toBe(1);
+    expect(p.refusals).toEqual([]);
+  });
+
+  it('waits for a person with tokenAsUser, polling until they approve', async () => {
+    const { env, options, p } = await setup();
+    p.cibaScript = ['pending', 'slow_down', 'approve'];
+    const agent = (await connect(env, options)) as InstanceAuth;
+    const delegated = await agent.tokenAsUser({ loginHint: 'a@b.c', bindingMessage: 'Refund' });
+    expect(delegated.dpop?.thumbprint).toBe(agent.dpop!.thumbprint);
+    expect(p.t.fake.to(`${p.issuer}/oauth/token`).filter((r) => r.body.includes('ciba'))).toHaveLength(3);
+    expect(p.refusals).toEqual([]);
+  });
+
+  it('asks for an approval and reads it with its token and a proof by its key, no assertion', async () => {
+    const { env, options, p } = await setup();
+    const agent = (await connect(env, options)) as InstanceAuth;
+    const opened = await agent.requestApproval('refund', { context: { order: '4411' } });
+    expect(opened).toMatchObject({ status: 'pending' });
+    const token = await agent.token();
+    const asked = p.t.fake.to(`${p.issuer}${REQUEST}`).at(-1)!;
+    expect(asked.headers.get('authorization')).toBe(`DPoP ${token}`);
+    expect(decodeJwt(asked.headers.get('dpop')!)).toMatchObject({
+      htm: 'POST',
+      htu: `${p.issuer}${REQUEST}`,
+      ath: sha(token),
+    });
+    const sent = JSON.parse(asked.body) as Record<string, unknown>;
+    expect(sent).toMatchObject({ agent_id: AGENT, requesting_action: 'refund', context: { order: '4411' } });
+    expect(sent.client_assertion).toBeUndefined();
+    expect(sent.client_assertion_type).toBeUndefined();
+
+    const done = await agent.waitForApproval(opened.id, { pollIntervalMs: 10 });
+    expect(done.status).toBe('approved');
+    const read = p.t.fake.to(`${p.issuer}/apis/regional/v1/ai/auth/approvals/apr-1`).at(-1)!;
+    expect(decodeJwt(read.headers.get('dpop')!)).toMatchObject({
+      htm: 'GET',
+      htu: `${p.issuer}/apis/regional/v1/ai/auth/approvals/apr-1`,
+      ath: sha(token),
+    });
+    expect(p.refusals).toEqual([]);
+  });
+
+  it('is refused, as the platform refuses, for a proof that is not of the key the token is bound to', async () => {
+    const { env, options, p } = await setup();
+    const agent = (await connect(env, options)) as InstanceAuth;
+    const token = await agent.token();
+    const { Secret } = await import('../../src/core/secret.js');
+    const url = `${p.issuer}${REQUEST}`;
+    const body = JSON.stringify({ agent_id: AGENT, requesting_action: 'refund' });
+    const other = await generateKeyPair('ES256', { extractable: true });
+    const jwk = await exportJWK(other.publicKey);
+    const proofByOther = (claims: Record<string, unknown>) =>
+      new SignJWT({
+        htm: 'POST',
+        htu: url,
+        ath: sha(token),
+        jti: crypto.randomUUID(),
+        iat: Math.floor(p.clock.now() / 1000),
+        ...claims,
+      })
+        .setProtectedHeader({ alg: 'ES256', typ: 'dpop+jwt', jwk })
+        .sign(other.privateKey);
+    const post = async (authorization: string, dpop?: string) =>
+      (
+        await p.fetch(url, {
+          method: 'POST',
+          headers: {
+            authorization,
+            'content-type': 'application/json',
+            ...(dpop === undefined ? {} : { dpop }),
+          },
+          body,
+        })
+      ).status;
+
+    // control: a proof by the instance's own key for this request is let through
+    expect(await post(`DPoP ${token}`, await agent.dpop!.proof('POST', url, new Secret(token)))).toBe(202);
+    // a proof by another key, however well formed, is not
+    expect(await post(`DPoP ${token}`, await proofByOther({}))).toBe(401);
+    expect(p.refusals.at(-1)).toContain('the proof is not of the key the token is bound to');
+    expect(await post(`DPoP ${token}`)).toBe(401);
+    expect(await post(`Bearer ${token}`)).toBe(401);
+    expect(p.refusals.at(-1)).toContain('token_dpop_proof_required');
+    expect(p.asked).toHaveLength(1);
+  });
+
+  it('is refused for a proof whose method, URL or access-token hash is not this request', async () => {
+    const { env, options, p } = await setup();
+    const agent = (await connect(env, options)) as InstanceAuth;
+    const token = await agent.token();
+    const { Secret } = await import('../../src/core/secret.js');
+    const url = `${p.issuer}${REQUEST}`;
+    const own = agent.dpop!;
+    const body = JSON.stringify({ agent_id: AGENT, requesting_action: 'refund' });
+    const post = async (dpop: string) =>
+      (
+        await p.fetch(url, {
+          method: 'POST',
+          headers: { authorization: `DPoP ${token}`, 'content-type': 'application/json', dpop },
+          body,
+        })
+      ).status;
+    expect(await post(await own.proof('GET', url, new Secret(token)))).toBe(401); // htm
+    expect(await post(await own.proof('POST', `${url}x`, new Secret(token)))).toBe(401); // htu
+    expect(await post(await own.proof('POST', url, new Secret(`${token}x`)))).toBe(401); // ath
+    expect(await post(await own.proof('POST', url))).toBe(401); // no ath
+    expect(await post(await own.proof('POST', url, new Secret(token)))).toBe(202);
+    expect(p.refusals.filter((r) => r.startsWith('agent:'))).toHaveLength(4);
+  });
+});
+
+describe('an instance admitted only to be observed', () => {
+  it('is never sent unapproved by omission, and an approved configuration is sent as it is', async () => {
+    const { env, options, p } = await setup();
+    p.observeWindow = true;
+    const none = NO_CONFIG(env);
+    await expect(connect(none, options)).rejects.toThrow(/AUTHFI_CONFIG_VERSION[^]*AUTHFI_CONFIG_OBSERVE=1/);
+    await expect(connect({ ...none, AUTHFI_CONFIG_OBSERVE: '0' }, options)).rejects.toThrow(
+      /AUTHFI_CONFIG_VERSION/,
+    );
+    await expect(connect({ ...none, AUTHFI_CONFIG_OBSERVE: 'maybe' }, options)).rejects.toThrow(
+      /AUTHFI_CONFIG_OBSERVE is 1/,
+    );
+    const af = AuthFI.fromEnv(env, options);
+    const evidence = (await findEvidence(env))!;
+    expect(() => new InstanceAuth(af, { agentId: AGENT, evidence })).toThrow(/observe: true/);
+    expect(() => new InstanceAuth(af, { agentId: AGENT, evidence, observe: false })).toThrow(
+      /AUTHFI_CONFIG_VERSION/,
+    );
+    await expect(connect({ ...env, AUTHFI_CONFIG_OBSERVE: '1' }, options)).rejects.toThrow(/not both/);
+    expect(p.attestations).toBe(0);
+    await (await connect(env, options)).token();
+    const sent = JSON.parse(p.t.fake.to(`${p.origin}/apis/regional/v1/ai/agents/attest`)[0]!.body);
+    expect(sent.config).toEqual(CONFIG);
+    expect(p.observed.size).toBe(0);
+  });
+
+  it('sends version 0 and an empty digest when asked, and is admitted while a window is open', async () => {
+    const { env, options, p, file } = await setup();
+    p.observeWindow = true;
+    const agent = (await connect({ ...NO_CONFIG(env), AUTHFI_CONFIG_OBSERVE: '1' }, options)) as InstanceAuth;
+    expect(agent).toBeInstanceOf(InstanceAuth);
+    const claims = decodeJwt(await agent.token());
+    const attests = () => p.t.fake.to(`${p.origin}/apis/regional/v1/ai/agents/attest`);
+    expect(JSON.parse(attests()[0]!.body).config).toEqual({ version: 0, digest: '' });
+    expect(p.observed.has(claims.instance_id as string)).toBe(true);
+    expect(p.refusals).toEqual([]);
+    // the option does what the variable does
+    await writeFile(file, sa(p.origin));
+    const af = AuthFI.fromEnv(env, options);
+    const byOption = new InstanceAuth(af, {
+      agentId: AGENT,
+      evidence: (await findEvidence(env))!,
+      observe: true,
+    });
+    await byOption.token();
+    expect(JSON.parse(attests()[1]!.body).config).toEqual({ version: 0, digest: '' });
+  });
+
+  it('says what to do when no window is open', async () => {
+    const { env, options, p } = await setup();
+    const observing = { ...NO_CONFIG(env), AUTHFI_CONFIG_OBSERVE: '1' };
+    const failed = await (await connect(observing, options)).token().catch((e: unknown) => e as Error);
+    expect(p.refusals.at(-1)).toContain('config_not_approved');
+    expect((failed as Error).message).toContain(
+      'ask a person to open an observation window for the agent in the console, or set AUTHFI_CONFIG_VERSION and AUTHFI_CONFIG_DIGEST',
+    );
+    // a platform that names the reason gets that sentence alone
+    p.t.fake.on(
+      'POST',
+      `${p.origin}/apis/regional/v1/ai/agents/attest`,
+      () => new Response(JSON.stringify({ error: 'config_not_approved' }), { status: 403 }),
+    );
+    const named = await (await connect(observing, options)).token().catch((e: unknown) => e as Error);
+    expect(named).toMatchObject({ code: 'config_not_approved' });
+    expect((named as Error).message).toContain('observation window');
+    expect((named as Error).message).not.toContain('audit tape');
+    // control: an instance that did not ask to be observed is told nothing about windows
+    const plain = await (
+      await connect({ ...env, AUTHFI_CONFIG_VERSION: '8' }, options)
+    )
+      .token()
+      .catch((e: unknown) => e as Error);
+    expect((plain as Error).message).not.toContain('observation window');
+  });
+
+  it('is refused, readably, by every call that asks a person, and its own token still works', async () => {
+    const { env, options, p } = await setup();
+    p.observeWindow = true;
+    const agent = (await connect({ ...NO_CONFIG(env), AUTHFI_CONFIG_OBSERVE: '1' }, options)) as InstanceAuth;
+    const gateway = await agent
+      .gateway()
+      .fetch(`${p.issuer}/mcp`, { method: 'POST', body: call('billing__lookup') });
+    expect(gateway.status).toBe(200);
+    for (const asks of [
+      () => agent.requestUserToken({ loginHint: 'a@b.c', bindingMessage: 'Refund' }),
+      () => agent.requestApproval('refund'),
+      () => agent.approval('apr-1'),
+    ]) {
+      const failed = await asks().catch((e: unknown) => e as Error);
+      expect(failed).toMatchObject({ name: 'NotSupportedError', feature: 'observe_only_instance' });
+      expect((failed as Error).message).toMatch(/admitted only to be observed[^]*Ask a person to approve/);
+    }
+    expect(p.refusals.filter((r) => r.endsWith(':observe_only_instance'))).toHaveLength(3);
+    expect(p.asked).toEqual([]);
+  });
+});
+
+describe('only the observe refusals are read as one', () => {
+  it('leaves every other refusal of the CIBA start as it was', async () => {
+    const { env, options, p } = await setup();
+    const agent = (await connect(env, options)) as InstanceAuth;
+    const answers: [() => Response, string][] = [
+      [() => new Response('<html>no</html>', { status: 403 }), 'response_invalid'],
+      [() => new Response('"forbidden"', { status: 403 }), 'response_invalid'],
+      [() => new Response(JSON.stringify({ error: 'access_denied' }), { status: 403 }), 'access_denied'],
+      [
+        () => new Response(JSON.stringify({ error: 'unauthorized_client' }), { status: 401 }),
+        'unauthorized_client',
+      ],
+    ];
+    for (const [answer, code] of answers) {
+      p.t.fake.on('POST', `${p.issuer}${START}`, answer);
+      const failed = await agent
+        .requestUserToken({ loginHint: 'a@b.c', bindingMessage: 'Refund' })
+        .catch((e: unknown) => e as Error);
+      expect(failed).toMatchObject({ code });
+      expect(failed).not.toMatchObject({ feature: 'observe_only_instance' });
+    }
   });
 });

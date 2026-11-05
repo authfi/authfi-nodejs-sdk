@@ -3,8 +3,10 @@
 // single-use `jti`, `ath` and server nonce; the client assertion of an agent key; an instance
 // attestation (its `typ`, signature, `cnf`, lifetime), its proof of possession and the DPoP key that must
 // equal `cnf`; a mandate's actor assertion (its `cnf.jkt` must equal the request's proof key); a bound
-// token sent as Bearer is refused. It serves the token endpoint, the gateway, the cloud door by handle and
-// the attest routes, and shares none of the older fakes' code.
+// token sent as Bearer is refused. It serves the token endpoint, the gateway, the cloud door by handle, the
+// attest routes, and the CIBA start and approval routes, which a workload-bound agent reaches with its
+// instance token and a proof by the key that token is bound to (no assertion), as the real routes do. It
+// shares none of the older fakes' code.
 
 import { createHash, randomBytes } from 'node:crypto';
 import {
@@ -29,7 +31,7 @@ export const CONFIG = { version: 7, digest: `sha256:${'a'.repeat(64)}` };
 const b64 = (b: Buffer | Uint8Array): string => Buffer.from(b).toString('base64url');
 const sha = (s: string): string => b64(createHash('sha256').update(s).digest());
 
-export type Surface = 'token' | 'gateway' | 'cloud';
+export type Surface = 'token' | 'gateway' | 'cloud' | 'agent';
 
 interface Handle {
   jkt: string;
@@ -63,6 +65,14 @@ export class FakePlatform {
   /** What the attestation's claims are changed to, for the client-side checks. */
   tamper: ((claims: Record<string, unknown>) => void) | undefined;
   ended = new Set<string>();
+  /** A person has an observation window open for the agent: an attestation that names no version is admitted. */
+  observeWindow = false;
+  /** The instances the platform attested, and the ones admitted only to be observed. */
+  readonly instances = new Set<string>();
+  readonly observed = new Set<string>();
+  /** Each CIBA start and approval request let through: the route, the scheme and the instance. */
+  readonly asked: { route: string; scheme: string; instance: string }[] = [];
+  approvalPolls = 0;
   cibaScript: ('pending' | 'slow_down' | 'approve' | 'deny' | 'expire')[] = ['approve'];
   mandateScript: ('pending' | 'approve' | 'deny' | 'expire')[] = ['approve'];
   readonly handles = new Map<string, Handle>();
@@ -243,8 +253,14 @@ export class FakePlatform {
       if (proved instanceof Response) return proved;
       jkt = proved.jkt;
     }
-    if (grant === 'client_credentials' && r.headers.has('oauth-client-attestation')) {
-      return this.attested(r, form, jkt);
+    if (r.headers.has('oauth-client-attestation')) {
+      const attested = await this.attested(r, form, jkt);
+      if (attested instanceof Response) return attested;
+      if (grant === 'client_credentials') {
+        return this.access({ instance_id: attested.instance, config_version: CONFIG.version }, jkt);
+      }
+      if (grant === 'urn:openid:params:grant-type:ciba') return this.poll(form, jkt);
+      return json({ error: 'unsupported_grant_type' }, 400);
     }
     if (grant === 'urn:ietf:params:oauth:grant-type:token-exchange') return this.exchange(form, jkt);
     if (!(await this.clientAssertion(form))) return json({ error: 'invalid_client' }, 401);
@@ -337,7 +353,11 @@ export class FakePlatform {
 
   // --- instance sign-in -------------------------------------------------------------------------
 
-  private async attested(r: Recorded, form: URLSearchParams, jkt: string | undefined): Promise<Response> {
+  private async attested(
+    r: Recorded,
+    form: URLSearchParams,
+    jkt: string | undefined,
+  ): Promise<{ instance: string | undefined } | Response> {
     const refuse = (why: string): Response => {
       this.refusals.push(`attested:${why}`);
       return json({ error: 'invalid_client', error_description: why }, 401);
@@ -375,8 +395,97 @@ export class FakePlatform {
     }
     if (jkt === undefined || jkt !== (await calculateJwkThumbprint(cnf)))
       return refuse('the DPoP key is not the attested key');
-    const instance = (claims.authfi_instance as { instance_id?: string }).instance_id;
-    return this.access({ instance_id: instance, config_version: CONFIG.version }, jkt);
+    return { instance: (claims.authfi_instance as { instance_id?: string }).instance_id };
+  }
+
+  // --- the doors a bound agent dials itself --------------------------------------------------------
+
+  /**
+   * The instance credential of a workload-bound agent on a route it dials itself: its access token, bound to
+   * the instance key, with a proof by that key for this request (method, URL and `ath`). No assertion goes with
+   * it, a bound token sent as Bearer is refused, and a refusal never says which check it was. An instance
+   * admitted only to be observed is refused 403.
+   */
+  private async instanceDoor(
+    r: Recorded,
+    route: string,
+    form: URLSearchParams | undefined,
+  ): Promise<{ instance: string } | Response> {
+    const oauth = form !== undefined;
+    const refuse = (why: string): Response => {
+      this.refusals.push(`${route}:${why}`);
+      return json({ error: oauth ? 'invalid_client' : 'unauthorized' }, 401);
+    };
+    const m = /^(Bearer|DPoP) (\S+)$/.exec(r.headers.get('authorization') ?? '');
+    if (m === null) return refuse('no credential');
+    const [, scheme, token] = m as unknown as [string, string, string];
+    let claims: Record<string, unknown>;
+    try {
+      claims = decodeJwt(token);
+    } catch {
+      return refuse('not an agent token');
+    }
+    const instance = claims.instance_id;
+    if (claims.sub !== AGENT || typeof instance !== 'string' || !this.instances.has(instance))
+      return refuse('not an instance token');
+    const jkt = (claims.cnf as { jkt?: string } | undefined)?.jkt;
+    if (jkt !== undefined) {
+      if (scheme !== 'DPoP') return refuse('token_dpop_proof_required');
+      const proved = await this.proof(r, 'agent', token);
+      if (proved instanceof Response) return proved;
+      if (proved.jkt !== jkt) return refuse('the proof is not of the key the token is bound to');
+    }
+    if (form?.has('client_assertion') === true || r.body.includes('client_assertion'))
+      return refuse('a bound agent presents one credential');
+    if (form?.has('client_id') === true && form.get('client_id') !== AGENT)
+      return refuse("client_id is not the token's agent");
+    if (this.observed.has(instance)) {
+      this.refusals.push(`${route}:observe_only_instance`);
+      return oauth
+        ? json({ error: 'unauthorized_client', error_description: 'admitted to be observed only' }, 403)
+        : json({ error: 'observe_only_instance', error_description: 'admitted to be observed only' }, 403);
+    }
+    this.asked.push({ route, scheme, instance });
+    return { instance };
+  }
+
+  private async backchannel(r: Recorded): Promise<Response> {
+    const form = new URLSearchParams(r.body);
+    if (r.headers.has('authorization')) {
+      const seen = await this.instanceDoor(r, 'backchannel-authorize', form);
+      if (seen instanceof Response) return seen;
+    } else if (!(await this.clientAssertion(form))) {
+      return json({ error: 'invalid_client' }, 401);
+    }
+    return json({ auth_req_id: 'req-1', expires_in: 120, interval: 2 });
+  }
+
+  private async requestApproval(r: Recorded): Promise<Response> {
+    const seen = await this.instanceDoor(r, 'request-approval', undefined);
+    if (seen instanceof Response) return seen;
+    const body = JSON.parse(r.body) as Record<string, unknown>;
+    if (body.agent_id !== AGENT || typeof body.requesting_action !== 'string')
+      return json({ error: 'invalid_body' }, 400);
+    return json(
+      {
+        data: {
+          approval_id: 'apr-1',
+          status: 'pending',
+          requesting_action: body.requesting_action,
+          created_at: '2026-10-20T10:00:00Z',
+          expires_at: '2026-10-20T10:05:00Z',
+        },
+      },
+      202,
+    );
+  }
+
+  private async approval(r: Recorded): Promise<Response> {
+    const seen = await this.instanceDoor(r, 'approval', undefined);
+    if (seen instanceof Response) return seen;
+    this.approvalPolls += 1;
+    const status = this.approvalPolls >= 2 ? 'approved' : 'pending';
+    return json({ data: { approval_id: 'apr-1', status, requesting_action: 'refund' } });
   }
 
   private async attest(r: Recorded): Promise<Response> {
@@ -412,8 +521,12 @@ export class FakePlatform {
     if (issuedAt === undefined || this.clock.now() - issuedAt > 60_000) return refuse('nonce');
     this.challenges.delete(String(proof.nonce));
     if (proof.agent_id !== AGENT || proof.aud !== this.issuer) return refuse('proof claims');
-    if (body.config?.version !== CONFIG.version || body.config.digest !== CONFIG.digest)
+    const observing = body.config?.version === 0 && body.config.digest === '';
+    if (observing) {
+      if (!this.observeWindow) return refuse('config_not_approved');
+    } else if (body.config?.version !== CONFIG.version || body.config.digest !== CONFIG.digest) {
       return refuse('config_not_approved');
+    }
     if (body.image_digest !== undefined && !/^sha256:[0-9a-f]{64}$/.test(body.image_digest))
       return refuse('image digest');
     const evidence = body.evidence;
@@ -460,6 +573,12 @@ export class FakePlatform {
         environment: 'np',
       },
     };
+    const instanceId = (claims.authfi_instance as { instance_id: string }).instance_id;
+    this.instances.add(instanceId);
+    if (observing) {
+      this.observed.add(instanceId);
+      (claims.authfi_instance as { config: unknown }).config = { version: 0, digest: '' };
+    }
     this.tamper?.(claims);
     const attestation = await new SignJWT(claims)
       .setProtectedHeader({ typ: 'oauth-client-attestation+jwt', alg: 'EdDSA', kid: 'attest-1' })
@@ -564,11 +683,27 @@ export class FakePlatform {
   serve(): void {
     const { fake } = this.t;
     fake.on('POST', `${this.issuer}/oauth/token`, (r) => this.token(r));
-    fake.on('POST', `${this.issuer}/apis/regional/v1/ai/auth/backchannel-authorize`, async (r) => {
-      const form = new URLSearchParams(r.body);
-      if (!(await this.clientAssertion(form))) return json({ error: 'invalid_client' }, 401);
-      return json({ auth_req_id: 'req-1', expires_in: 120, interval: 2 });
-    });
+    fake.on('POST', `${this.issuer}/apis/regional/v1/ai/auth/backchannel-authorize`, (r) =>
+      this.backchannel(r),
+    );
+    fake.on('GET', `${this.issuer}/.well-known/agent-configuration`, () =>
+      json({
+        issuer: this.issuer,
+        endpoints: {
+          request_approval: `${this.issuer}/apis/regional/v1/ai/auth/request-approval`,
+          approval: `${this.issuer}/apis/regional/v1/ai/auth/approvals/{id}`,
+          token: `${this.issuer}/apis/regional/v1/ai/auth/token`,
+        },
+      }),
+    );
+    fake.on('POST', `${this.issuer}/apis/regional/v1/ai/auth/request-approval`, (r) =>
+      this.requestApproval(r),
+    );
+    fake.on(
+      'GET',
+      (u) => u.startsWith(`${this.issuer}/apis/regional/v1/ai/auth/approvals/`),
+      (r) => this.approval(r),
+    );
     fake.on('POST', `${this.issuer}/mcp`, (r) => this.mcp(r));
     fake.on('POST', `${this.issuer}/mcp/v1/messages`, (r) => this.mcp(r));
     fake.on('POST', `${this.issuer}/mcp/v1/chat/completions`, (r) => this.mcp(r));

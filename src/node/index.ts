@@ -160,6 +160,12 @@ export interface InstanceEnv {
   /** The signed configuration the instance runs: its approved version and `sha256:<hex>` digest. */
   readonly AUTHFI_CONFIG_VERSION?: string | undefined;
   readonly AUTHFI_CONFIG_DIGEST?: string | undefined;
+  /**
+   * `1` asks to be admitted with no approved version, to be observed: the attestation names version 0 and an
+   * empty digest, which the platform admits only while a person has an observation window open for the agent.
+   * Not set together with the version and digest. Unset (the default) never runs an unapproved configuration.
+   */
+  readonly AUTHFI_CONFIG_OBSERVE?: string | undefined;
   /** The image the instance runs, `sha256:<hex>`. */
   readonly AUTHFI_IMAGE_DIGEST?: string | undefined;
 }
@@ -262,6 +268,15 @@ function configurationOf(env: InstanceEnv): Configuration | undefined {
   return { version: Number(version), digest };
 }
 
+function observeOf(env: InstanceEnv): boolean {
+  const value = env.AUTHFI_CONFIG_OBSERVE?.trim().toLowerCase() ?? '';
+  if (value === '' || value === '0' || value === 'false') return false;
+  if (value === '1' || value === 'true') return true;
+  throw new ConfigurationError(
+    `AUTHFI_CONFIG_OBSERVE is 1 to be observed, or unset; got ${JSON.stringify(env.AUTHFI_CONFIG_OBSERVE)}`,
+  );
+}
+
 const NO_EVIDENCE = `this agent shows no evidence of where it runs: on Kubernetes project a service-account token at ${K8S_TOKEN_PATH} (or name it in AUTHFI_SERVICE_ACCOUNT_TOKEN_FILE); on a device set AUTHFI_DEVICE_KEY_FILE`;
 
 /**
@@ -274,10 +289,11 @@ export async function instanceFromEnv(af: AuthFI, env: InstanceEnv = process.env
   if (agentId === '') throw new ConfigurationError('AUTHFI_AGENT_ID is not set');
   const evidence = await findEvidence(env);
   if (evidence === undefined) throw new ConfigurationError(NO_EVIDENCE);
+  const observe = observeOf(env);
   const config = configurationOf(env);
-  if (config === undefined) {
+  if (config === undefined && !observe) {
     throw new ConfigurationError(
-      'an instance runs one approved configuration: set AUTHFI_CONFIG_VERSION and AUTHFI_CONFIG_DIGEST (sha256:<hex>). The platform attests no instance without one.',
+      'an instance runs one approved configuration: set AUTHFI_CONFIG_VERSION and AUTHFI_CONFIG_DIGEST (sha256:<hex>). The platform attests no instance without one. To be observed before any version is approved, set AUTHFI_CONFIG_OBSERVE=1 while a person has an observation window open for the agent.',
     );
   }
   const image = env.AUTHFI_IMAGE_DIGEST?.trim();
@@ -286,6 +302,7 @@ export async function instanceFromEnv(af: AuthFI, env: InstanceEnv = process.env
     agentId,
     evidence,
     config,
+    observe,
     imageDigest: image === undefined || image === '' ? undefined : image,
     resource: resource === undefined || resource === '' ? undefined : resource,
   });
@@ -318,7 +335,7 @@ async function optionalOtel(): Promise<OpenTelemetryApi | undefined> {
  * - `AUTHFI_ISSUER` (and `AUTHFI_API_ORIGIN` when the APIs are on another origin), always;
  * - an agent, the default: `AUTHFI_AGENT_ID`. On a bound workload it signs in as an instance: it finds its
  *   evidence itself (the projected service-account token, or `AUTHFI_DEVICE_KEY_FILE`) and the configuration
- *   it runs (`AUTHFI_CONFIG_VERSION`, `AUTHFI_CONFIG_DIGEST`), as {@link instanceFromEnv} reads them, and holds
+ *   it runs (`AUTHFI_CONFIG_VERSION`, `AUTHFI_CONFIG_DIGEST`, or `AUTHFI_CONFIG_OBSERVE=1` to be observed), as {@link instanceFromEnv} reads them, and holds
  *   no key to keep. Otherwise, legacy, with `AUTHFI_AGENT_KEY_FILE` (or `AUTHFI_AGENT_PRIVATE_KEY` and
  *   `AUTHFI_AGENT_KID`), as {@link agentFromEnv} reads them. An agent key file named with no configuration is
  *   the legacy key, as it always was, even on a pod that has a service-account token;
@@ -346,7 +363,7 @@ export async function connect(
   );
   if (set(env.AUTHFI_AGENT_ID)) {
     const names = set(env.AUTHFI_AGENT_KEY_FILE) || set(env.AUTHFI_AGENT_PRIVATE_KEY);
-    const configured = set(env.AUTHFI_CONFIG_VERSION) || set(env.AUTHFI_CONFIG_DIGEST);
+    const configured = set(env.AUTHFI_CONFIG_VERSION) || set(env.AUTHFI_CONFIG_DIGEST) || observeOf(env);
     if ((await findEvidence(env)) !== undefined && (configured || !names)) return instanceFromEnv(af, env);
     if (!names) {
       throw new ConfigurationError(

@@ -359,13 +359,15 @@ key. `connect()` finds the evidence itself:
 | `AUTHFI_SERVICE_ACCOUNT_TOKEN_FILE` | the projected service-account token, if it is not at `/var/run/secrets/kubernetes.io/serviceaccount/token`. Project it with `audience` set to the project's origin and `expirationSeconds: 600`; it works once, so the kubelet's rotation renews it |
 | `AUTHFI_DEVICE_KEY_FILE`, `AUTHFI_DEVICE_KEY_KID` | the device key the device was bound with, for a laptop. Custody is `software` until hardware attestation is verified |
 | `AUTHFI_CONFIG_VERSION`, `AUTHFI_CONFIG_DIGEST` | the signed configuration this instance runs (`7`, `sha256:...`); the platform attests no instance without one |
+| `AUTHFI_CONFIG_OBSERVE` | `1` asks to be admitted with no approved version, to be observed (`observe: true` on `InstanceAuth`). Off by default, and not set together with the version and digest. The platform admits it only while a person has an observation window open for the agent in the console, and such an instance cannot ask a person (CIBA, an approval) |
 | `AUTHFI_IMAGE_DIGEST` | the image it runs, `sha256:<64 hex>` |
 
 The instance then runs challenge, attest and the token request (`OAuth-Client-Attestation`,
 `OAuth-Client-Attestation-PoP` and `DPoP` headers), and attests again before the attestation expires.
 `instance.instanceId` is the id the platform gave it. A key file named with no configuration is the legacy key,
-as it always was. An instance has no key to sign an assertion with, so CIBA, `requestApproval` and
-`requestMandate` are refused with the fix; token exchange works. The platform gives every failed sign-in the
+as it always was. An instance has no key to sign an assertion with: CIBA (`requestUserToken`, `tokenAsUser`) and
+`requestApproval` carry its token and a proof by its key instead, and the CIBA redeem carries its attestation, as its
+sign-in does. `requestMandate` is refused with the fix; token exchange works. The platform gives every failed sign-in the
 same 401, so an error names the causes to check and points at the `agent.attest.refused` event on the audit tape.
 
 ```ts
