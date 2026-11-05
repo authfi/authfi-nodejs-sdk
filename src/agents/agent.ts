@@ -304,12 +304,19 @@ export class AgentAuth extends BaseTokenSource {
    * and a verifier built on this SDK takes no proof.
    */
   async #keyFor(meta: ServerMetadata, resource: string | undefined): Promise<DPoPSigner | undefined> {
-    if (!this.#dpop || (resource !== undefined && !this.#isOwn(this.#af, resource))) return undefined;
+    if (resource !== undefined && !this.#isOwn(this.#af, resource)) return undefined;
+    if (!this.#dpop) {
+      this.#core.warnOnce(
+        'dpop-off',
+        "dpop: false: this agent's tokens for AuthFI are Bearer. A project that requires sender-constrained agent tokens will refuse them",
+      );
+      return undefined;
+    }
     const algs = meta.dpop_signing_alg_values_supported;
     if (Array.isArray(algs) && algs.length > 0 && !algs.includes('ES256')) {
       this.#core.warnOnce(
         'dpop-alg',
-        'the project accepts no proof-of-possession algorithm this SDK signs (ES256): agent tokens stay Bearer',
+        'the project accepts no proof-of-possession algorithm this SDK signs (ES256): agent tokens stay Bearer. A project that requires sender-constrained agent tokens will refuse them',
       );
       return undefined;
     }
