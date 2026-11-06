@@ -3,6 +3,7 @@
 // The platform stand-in enforces the gateway's model proof check (MCP_MODEL_PROOF_CHECK=enforce, EMODEL020): a model
 // call whose token is bound to nothing is refused. It also demands a DPoP nonce, as the gateway does in production.
 
+import { decodeJwt } from 'jose';
 import { describe, expect, it } from 'vitest';
 import { RunGateway } from '../../src/adapters/shared.js';
 import { Secret } from '../../src/core/secret.js';
@@ -46,7 +47,7 @@ describe('a model call proves the key', () => {
     const res = await post(fetch, `${baseURL}/v1/messages`);
 
     expect(res.status).toBe(200);
-    const sent = seen(s, '/mcp/v1/messages');
+    const sent = seen(s, '/llm/v1/messages');
     expect(sent).toHaveLength(2); // the nonce challenge, then the call with the nonce
     expect(sent.every((r) => r.scheme === 'DPoP' && r.proof?.startsWith('eyJ'))).toBe(true);
     expect(s.p.unprovenModelCalls).toEqual([]);
@@ -58,10 +59,10 @@ describe('a model call proves the key', () => {
     const run = new RunGateway({ source: s.agent, logger: { debug() {}, info() {}, warn() {}, error() {} } });
     expect(s.agent.dpop).toBeUndefined(); // nothing minted yet: the key is not known until the first token
 
-    const res = await post(run.anthropic().fetch, `${run.gateway.mcpUrl}/v1/messages`);
+    const res = await post(run.anthropic().fetch, `${run.gateway.llmUrl}/v1/messages`);
 
     expect(res.status).toBe(200);
-    expect(seen(s, '/mcp/v1/messages')).toHaveLength(2);
+    expect(seen(s, '/llm/v1/messages')).toHaveLength(2);
   });
 
   it('on the OpenAI routes, chat completions and responses', async () => {
@@ -72,7 +73,7 @@ describe('a model call proves the key', () => {
     expect((await post(fetch, `${baseURL}/chat/completions`)).status).toBe(200);
     expect((await post(fetch, `${baseURL}/responses`)).status).toBe(200);
 
-    for (const path of ['/mcp/v1/chat/completions', '/mcp/v1/responses']) {
+    for (const path of ['/llm/v1/chat/completions', '/llm/v1/responses']) {
       const sent = seen(s, path);
       expect(sent.length).toBeGreaterThan(0);
       expect(sent.every((r) => r.scheme === 'DPoP' && r.proof?.startsWith('eyJ'))).toBe(true);
@@ -92,7 +93,7 @@ describe('a model call proves the key', () => {
     expect((await post(anthropic.fetch, `${anthropic.baseURL}/messages`)).status).toBe(200);
 
     expect(s.p.unprovenModelCalls).toEqual([]);
-    for (const path of ['/mcp/v1/chat/completions', '/mcp/v1/messages']) {
+    for (const path of ['/llm/v1/chat/completions', '/llm/v1/messages']) {
       expect(seen(s, path).every((r) => r.scheme === 'DPoP' && r.proof !== null)).toBe(true);
     }
   });
@@ -109,8 +110,8 @@ describe('a model call proves the key', () => {
       expect(((await res.json()) as { error: { code: string } }).error.code).toBe('EMODEL020');
     }
 
-    expect(s.p.unprovenModelCalls).toEqual(['/mcp/v1/messages', '/mcp/v1/messages']);
-    expect(seen(s, '/mcp/v1/messages').every((r) => r.scheme === 'Bearer' && r.proof === null)).toBe(true);
+    expect(s.p.unprovenModelCalls).toEqual(['/llm/v1/messages', '/llm/v1/messages']);
+    expect(seen(s, '/llm/v1/messages').every((r) => r.scheme === 'Bearer' && r.proof === null)).toBe(true);
     expect(s.warns.filter((w) => w.includes('MCP_MODEL_PROOF_CHECK'))).toHaveLength(1);
   });
 
@@ -128,5 +129,38 @@ describe('a model call proves the key', () => {
     expect(tools.status).toBe(200);
 
     expect(s.warns.filter((w) => w.includes('MCP_MODEL_PROOF_CHECK'))).toEqual([]);
+  });
+
+  it("sends the llm token on /llm and the mcp token on /mcp, both bound to the agent's one key", async () => {
+    const s = await setup();
+    const run = new RunGateway({ source: s.agent, logger: { debug() {}, info() {}, warn() {}, error() {} } });
+    const { baseURL, fetch } = run.anthropic();
+
+    expect((await post(fetch, `${baseURL}/v1/messages`)).status).toBe(200);
+    const tools = await run.fetch(run.gateway.mcpUrl, {
+      method: 'POST',
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }),
+    });
+    expect(tools.status).toBe(200);
+
+    const claims = (path: string) =>
+      decodeJwt((s.p.t.fake.to(`${s.p.issuer}${path}`).at(-1)!.headers.get('authorization') ?? '').slice(5));
+    expect(claims('/llm/v1/messages').aud).toBe(`${s.p.issuer}/llm`);
+    expect(claims('/mcp').aud).toBe(`${s.p.issuer}/mcp`);
+    // one key, so one run id on the platform
+    expect(claims('/llm/v1/messages').cnf).toEqual(claims('/mcp').cnf);
+    expect(s.p.refusals.filter((x) => x.includes('wrong door'))).toEqual([]);
+  });
+
+  it('is refused at the door when a token for the other door is sent (the control leg)', async () => {
+    const s = await setup();
+    const mcpToken = await s.agent.headers('POST', `${s.p.issuer}/llm/v1/messages`);
+    const res = await s.p.fetch(`${s.p.issuer}/llm/v1/messages`, {
+      method: 'POST',
+      headers: mcpToken,
+      body: MESSAGES,
+    });
+    expect(res.status).toBe(401);
+    expect(s.p.refusals.at(-1)).toContain('wrong door');
   });
 });

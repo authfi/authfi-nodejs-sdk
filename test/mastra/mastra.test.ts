@@ -153,7 +153,7 @@ describe('a held call', () => {
 describe('the settings', () => {
   it('point an OpenAI-compatible model at the project and refuse AuthFI-less origins', async () => {
     const t = await setup();
-    expect(t.authfi.openai()).toMatchObject({ baseURL: `${t.as.issuer}/mcp/v1`, apiKey: 'authfi' });
+    expect(t.authfi.openai()).toMatchObject({ baseURL: `${t.as.issuer}/llm/v1`, apiKey: 'authfi' });
     await expect(t.authfi.fetch('https://example.com/mcp')).rejects.toThrow();
     expect(() => t.authfi.tools(null as never)).toThrow(/mcp.listTools/);
     expect(() => t.authfi.tools({ x: {} })).toThrow(/no execute function/);

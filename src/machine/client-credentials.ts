@@ -47,13 +47,14 @@ export class ClientCredentials extends BaseTokenSource {
   readonly #toGateway: boolean;
   #gateway: Gateway | undefined;
   #forGateway: ClientCredentials | undefined;
+  #forLlm: ClientCredentials | undefined;
   #cached: { token: Secret; renewAt: number; expiresAt: number } | undefined;
 
   /** Use `af.clientCredentials()`. */
   constructor(
     af: AuthFI,
     options: ClientCredentialsOptions,
-    internal: { quiet?: boolean; gateway?: boolean } = {},
+    internal: { quiet?: boolean; gateway?: 'mcp' | 'llm' } = {},
   ) {
     const core = coreOf(af);
     super(core.fetch);
@@ -74,9 +75,9 @@ export class ClientCredentials extends BaseTokenSource {
       );
     }
     this.#options = options;
-    this.#toGateway = internal.gateway === true;
+    this.#toGateway = internal.gateway !== undefined;
     this.clientId = options.clientId;
-    this.resource = this.#toGateway ? `${af.issuer}/mcp` : options.resource;
+    this.resource = internal.gateway === undefined ? options.resource : `${af.issuer}/${internal.gateway}`;
     this.scope = Object.freeze([...(options.scope ?? [])]);
     this.#auth = {
       method,
@@ -120,14 +121,18 @@ export class ClientCredentials extends BaseTokenSource {
   }
 
   /**
-   * The project's MCP and AI gateways with this client's token. The gateway token is its own: for
-   * the gateway as the resource (`<issuer>/mcp`), sent to AuthFI's origins only, whatever
+   * The project's MCP and LLM gateways with this client's tokens. A gateway token is its own: one for
+   * `<issuer>/mcp` and one for `<issuer>/llm` (a token is for one door), sent to AuthFI's origins only, whatever
    * `resource` this credential was made with. The gateway sees a client, not an agent: it records
    * the caller as `client-credentials`, and the calls carry no agent id.
    */
   gateway(): Gateway {
-    this.#forGateway ??= new ClientCredentials(this.#af, this.#options, { gateway: true });
-    this.#gateway ??= new Gateway(this.#core, this.#forGateway, undefined, { kind: 'client_credentials' });
+    this.#forGateway ??= new ClientCredentials(this.#af, this.#options, { gateway: 'mcp' });
+    this.#forLlm ??= new ClientCredentials(this.#af, this.#options, { gateway: 'llm' });
+    this.#gateway ??= new Gateway(this.#core, this.#forGateway, undefined, {
+      kind: 'client_credentials',
+      llm: this.#forLlm,
+    });
     return this.#gateway;
   }
 

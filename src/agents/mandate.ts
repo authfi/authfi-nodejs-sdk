@@ -163,7 +163,8 @@ export class Mandate extends BaseTokenSource {
 
   /** The gateways (tools, models, cloud credentials) with this mandate as the credential. */
   gateway(): Gateway {
-    this.#gateway ??= new Gateway(this.#core, this, this.agentId);
+    // A mandate's root names the gateway resource and is accepted at both doors: one task has one ledger.
+    this.#gateway ??= new Gateway(this.#core, this, this.agentId, { llm: this });
     return this.#gateway;
   }
 

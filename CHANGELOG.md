@@ -3,6 +3,31 @@
 All notable changes to this package. It follows [Semantic Versioning](https://semver.org): before
 1.0 a minor version may break, but only with an entry here and one minor version of deprecation.
 
+## Unreleased
+
+### Changed
+
+- **Model calls go to the LLM door, `<issuer>/llm`.** The platform moved the AI gateway off `/mcp/v1/*`:
+  Anthropic Messages, OpenAI Chat Completions and Responses are now `/llm/v1/messages`,
+  `/llm/v1/chat/completions` and `/llm/v1/responses`. `gateway.modelBaseUrl('anthropic')` is `<issuer>/llm` and
+  `modelBaseUrl('openai')` is `<issuer>/llm/v1`, so the adapters' `anthropic()` and `openai()` settings follow. A
+  base URL you wrote by hand as `<issuer>/mcp` or `<issuer>/mcp/v1` must change. `<issuer>/mcp` is the tool gateway
+  only. New: `gateway.llmUrl`.
+- **A token is for one door.** `/mcp` refuses a token minted for `<issuer>/llm`, `/llm` refuses one minted for
+  `<issuer>/mcp`, and a token naming both is refused at both. `agent.gateway()` and `clientCredentials.gateway()`
+  therefore hold two tokens, cached apart: the `/mcp` one and a second requested with `resource=<issuer>/llm`, signed
+  by the same DPoP key so the run stays one. `gateway.fetch` and every adapter send each request the token of the
+  door it goes to, never the other, and neither goes to an origin that is not AuthFI's. A mandate is the one
+  credential both doors accept. A delegated token holds one token: a model call through it is refused before it is
+  sent until it is given one for the door, `gateway.withLlmSource(token)` (exchange again with
+  `resource: gateway.llmUrl`).
+- **Cloud credentials are issued by the `cloud.credentials` tool.** The HTTP door `POST /mcp/v1/cloud/credentials`
+  is removed from the platform. `gateway.cloudCredentials()` now sends a JSON-RPC `tools/call` of `cloud.credentials`
+  to `<issuer>/mcp` (a person's approval id goes as the `_authfi_approval_id` argument), reads the handle or the hold
+  from the tool result, and is sent once, never retried. The secret is redeemed once at
+  `POST <issuer>/mcp/cloud/credentials/{credential_id}/secret`. The API of `cloud.credentials`, `cloud.secret` and
+  `cloud.fetchCredential` is unchanged; a refusal is still an `APIError` with its `ECLOUDCRED` code.
+
 ## 0.2.0
 
 ### Added

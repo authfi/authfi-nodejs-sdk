@@ -109,8 +109,8 @@ describe('RunGateway', () => {
   it('gives model settings with a placeholder key', async () => {
     const s = await setupGateway();
     const run = new RunGateway({ source: s.agent });
-    expect(run.openai()).toMatchObject({ baseURL: `${s.as.issuer}/mcp/v1`, apiKey: 'authfi' });
-    expect(run.anthropic()).toMatchObject({ baseURL: `${s.as.issuer}/mcp`, authToken: 'authfi' });
+    expect(run.openai()).toMatchObject({ baseURL: `${s.as.issuer}/llm/v1`, apiKey: 'authfi' });
+    expect(run.anthropic()).toMatchObject({ baseURL: `${s.as.issuer}/llm`, authToken: 'authfi' });
   });
 });
 
