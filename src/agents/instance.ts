@@ -50,6 +50,8 @@ export const ATTESTATION_HEADER = 'OAuth-Client-Attestation';
 export const POP_HEADER = 'OAuth-Client-Attestation-PoP';
 const INSTANCE_ID = /^inst_[0-9a-f]{32}$/;
 const IMAGE_DIGEST = /^sha256:[0-9a-f]{64}$/;
+/** What an instance states when it asks to be observed: no version and no digest. */
+const OBSERVE_CONFIG: Configuration = { version: 0, digest: '' };
 
 /**
  * What the person reading a refusal can do. The attest route gives every refusal the same 401 (it must not
@@ -79,9 +81,25 @@ export class InstanceSigner implements Signer {
   }
 }
 
-function refusalWithFix(res: HttpResponse): AuthFIError {
+/**
+ * What to do when an instance that asked to be observed (no version, no digest) is refused. The attest route's
+ * 401 does not say why, so this names the cause that opt-in makes likely: no observation window is open.
+ */
+const NOT_OBSERVABLE =
+  'This instance asked to be observed without an approved version (AUTHFI_CONFIG_OBSERVE): ask a person to open an ' +
+  'observation window for the agent in the console, or set AUTHFI_CONFIG_VERSION and AUTHFI_CONFIG_DIGEST ' +
+  '(and drop AUTHFI_CONFIG_OBSERVE).';
+
+function refusalWithFix(res: HttpResponse, observing = false): AuthFIError {
   const error = apiErrorOf(res);
-  const hint = res.status === 401 ? REFUSED : res.status === 503 ? UNAVAILABLE : undefined;
+  const named = observing && error.code === 'config_not_approved';
+  const hint = named
+    ? NOT_OBSERVABLE
+    : res.status === 401
+      ? `${observing ? `${NOT_OBSERVABLE} ` : ''}${REFUSED}`
+      : res.status === 503
+        ? UNAVAILABLE
+        : undefined;
   if (hint === undefined) return error;
   return new APIError(
     error.code,
@@ -138,13 +156,48 @@ async function attestationProblem(
 export interface InstanceOptions {
   readonly agentId: string;
   readonly evidence: Evidence;
-  /** The approved configuration this instance runs. The platform attests no instance without one. */
-  readonly config: Configuration;
+  /**
+   * The approved configuration this instance runs. The platform attests no instance without one, unless
+   * `observe` is set.
+   */
+  readonly config?: Configuration | undefined;
+  /**
+   * Ask to be admitted with no approved version, to be observed: the attestation names version 0 and an empty
+   * digest. The platform admits that only while a person has an observation window open for the agent, and
+   * refuses such an instance every request that asks a person. Off by default: an instance never runs
+   * unapproved by omission, so this is set on purpose and `config` is then left out.
+   */
+  readonly observe?: boolean | undefined;
   /** The image the instance runs, `sha256:` and 64 lowercase hex digits. */
   readonly imageDigest?: string | undefined;
   readonly resource?: string | undefined;
   /** Attest again this long before the attestation expires (default 60 000 ms). */
   readonly refreshSkewMs?: number | undefined;
+}
+
+/** The configuration an instance states: its approved one, or none when it asks to be observed; else a refusal to start. */
+function statedConfiguration(options: InstanceOptions): Configuration {
+  const { config } = options;
+  if (options.observe === true) {
+    if (config !== undefined) {
+      throw new ConfigurationError(
+        'an instance is either observed (AUTHFI_CONFIG_OBSERVE, observe: true) or runs one approved configuration (AUTHFI_CONFIG_VERSION and AUTHFI_CONFIG_DIGEST, config); not both',
+      );
+    }
+    return OBSERVE_CONFIG;
+  }
+  if (
+    config === undefined ||
+    typeof config.version !== 'number' ||
+    !Number.isInteger(config.version) ||
+    config.version < 1 ||
+    !/^sha256:[0-9a-f]+$/.test(config.digest)
+  ) {
+    throw new ConfigurationError(
+      'an instance runs one approved configuration: set AUTHFI_CONFIG_VERSION and AUTHFI_CONFIG_DIGEST (sha256:<hex>), or pass config: { version, digest }. The platform attests no instance without one. To be observed before any version is approved, set AUTHFI_CONFIG_OBSERVE=1 (or observe: true) while a person has an observation window open for the agent.',
+    );
+  }
+  return config;
 }
 
 /** Signs in by challenge, attest and the attested token request. */
@@ -153,13 +206,15 @@ class Attestor implements InstanceSignIn {
   readonly #issuer: string;
   readonly #options: InstanceOptions;
   readonly #skew: number;
+  readonly #config: Configuration;
   #held: Attestation | undefined;
 
-  constructor(af: AuthFI, options: InstanceOptions) {
+  constructor(af: AuthFI, options: InstanceOptions, config: Configuration) {
     this.#core = coreOf(af);
     this.#issuer = af.issuer;
     this.#options = options;
     this.#skew = options.refreshSkewMs ?? 60_000;
+    this.#config = config;
   }
 
   get instanceId(): string | undefined {
@@ -183,7 +238,7 @@ class Attestor implements InstanceSignIn {
       headers: { 'content-type': 'application/json' },
       body: '{}',
     });
-    if (challenge.status !== 200) throw refusalWithFix(challenge);
+    if (challenge.status !== 200) throw refusalWithFix(challenge, this.#options.observe === true);
     const nonce = (jsonOf(challenge) as { nonce?: unknown } | undefined)?.nonce;
     if (typeof nonce !== 'string' || nonce === '')
       throw new OAuthError(
@@ -191,7 +246,8 @@ class Attestor implements InstanceSignIn {
         'the attestation challenge answered no nonce',
         contextOf(challenge),
       );
-    const { agentId, evidence, config, imageDigest } = this.#options;
+    const { agentId, evidence, imageDigest } = this.#options;
+    const config = this.#config;
     const proof = await signer.signJwt(
       {
         nonce,
@@ -225,7 +281,7 @@ class Attestor implements InstanceSignIn {
         ...(imageDigest === undefined ? {} : { image_digest: imageDigest }),
       }),
     });
-    if (res.status !== 200) throw refusalWithFix(res);
+    if (res.status !== 200) throw refusalWithFix(res, this.#options.observe === true);
     const raw = (jsonOf(res) as { attestation?: unknown } | undefined)?.attestation;
     if (typeof raw !== 'string' || raw === '')
       throw new OAuthError('invalid_response', 'the attest route answered no attestation', contextOf(res));
@@ -256,8 +312,8 @@ class Attestor implements InstanceSignIn {
         'This AuthFI project does not offer the client credentials grant',
       );
     }
-    const attestation = await this.#attest(signer, signal);
     const agentId = this.#options.agentId;
+    const attestation = await this.attestation(signer, signal);
     return requestToken(
       this.#core.transport,
       {
@@ -267,24 +323,35 @@ class Attestor implements InstanceSignIn {
         retry: 'unsafe',
         signal,
         dpop: signer,
-        attempt: async () => ({
-          headers: {
-            [ATTESTATION_HEADER]: attestation.token.reveal(),
-            [POP_HEADER]: await signer.signJwt(
-              {
-                iss: agentId,
-                aud: this.#issuer,
-                jti: crypto.randomUUID(),
-                iat: Math.floor(this.#core.clock.now() / 1000),
-                exp: Math.floor(this.#core.clock.now() / 1000) + POP_SECONDS,
-              },
-              POP_TYP,
-            ),
-          },
-        }),
+        attempt: async () => ({ headers: await attestation() }),
       },
       () => this.#core.clock.now(),
     );
+  }
+
+  /**
+   * The client authentication of a workload-bound agent at the token endpoint: the attestation (made, or held
+   * while it lasts) and a fresh proof of possession by `signer`'s key per call of the returned function.
+   */
+  async attestation(
+    signer: DPoPSigner,
+    signal?: AbortSignal,
+  ): Promise<() => Promise<Record<string, string>>> {
+    const attestation = await this.#attest(signer, signal);
+    const agentId = this.#options.agentId;
+    return async () => ({
+      [ATTESTATION_HEADER]: attestation.token.reveal(),
+      [POP_HEADER]: await signer.signJwt(
+        {
+          iss: agentId,
+          aud: this.#issuer,
+          jti: crypto.randomUUID(),
+          iat: Math.floor(this.#core.clock.now() / 1000),
+          exp: Math.floor(this.#core.clock.now() / 1000) + POP_SECONDS,
+        },
+        POP_TYP,
+      ),
+    });
   }
 }
 
@@ -295,30 +362,23 @@ class Attestor implements InstanceSignIn {
  * carries `Authorization: DPoP` and a fresh proof; `headers()` does that, and the gateway and the exporters
  * call it. The attestation is renewed before it expires.
  *
- * Acting for a person by CIBA, an approval request and starting a mandate still authenticate with an agent
- * key and are refused here with the fix; token exchange works.
+ * It can ask a person (CIBA, an approval request) and act for one by token exchange: those calls carry the
+ * instance's token and a proof by its key, never an assertion. Starting a mandate still authenticates with an
+ * agent key and is refused here with the fix. An instance admitted only to be observed (`observe`) is
+ * refused by the platform on every call that asks a person.
  */
 export class InstanceAuth extends AgentAuth {
   readonly #attestor: Attestor;
 
   constructor(af: AuthFI, options: InstanceOptions) {
-    const { agentId, config, imageDigest } = options;
-    if (
-      typeof config.version !== 'number' ||
-      !Number.isInteger(config.version) ||
-      config.version < 1 ||
-      !/^sha256:[0-9a-f]+$/.test(config.digest)
-    ) {
-      throw new ConfigurationError(
-        'an instance runs one approved configuration: set AUTHFI_CONFIG_VERSION and AUTHFI_CONFIG_DIGEST (sha256:<hex>), or pass config: { version, digest }. The platform attests no instance without one.',
-      );
-    }
+    const { agentId, imageDigest } = options;
+    const stated = statedConfiguration(options);
     if (imageDigest !== undefined && !IMAGE_DIGEST.test(imageDigest)) {
       throw new ConfigurationError(
         `AUTHFI_IMAGE_DIGEST is sha256: and 64 lowercase hex digits; got ${JSON.stringify(imageDigest)}`,
       );
     }
-    const attestor = new Attestor(af, options);
+    const attestor = new Attestor(af, options, stated);
     super(af, {
       agentId,
       key: new InstanceSigner(),

@@ -7,6 +7,21 @@ All notable changes to this package. It follows [Semantic Versioning](https://se
 
 ### Added
 
+- **An agent bound to a workload can ask a person (authfi/authfi#304).** `requestUserToken`, `awaitUserToken`,
+  `tokenAsUser`, `requestApproval`, `approval` and `waitForApproval` now work for an instance, which the SDK used to
+  refuse with `instance_assertion` although the platform accepts them. The CIBA start and the approval request carry
+  `Authorization: DPoP <instance token>` and a proof by the key that token is bound to (method, URL and `ath`), and
+  no client assertion; the CIBA redeem at the token endpoint carries the instance's attestation, its proof of
+  possession and the DPoP proof, as its sign-in does. Calls under an agent key are unchanged. Starting a mandate
+  still needs an agent key and is refused for an instance with the fix.
+- **Observe mode, an explicit opt-in.** `AUTHFI_CONFIG_OBSERVE=1` (or `observe: true` on `InstanceAuth`) sends an
+  attestation that names no version (`config: { version: 0, digest: '' }`), which the platform admits while a person
+  has an observation window open for a new agent. It is never the default: with neither a configuration nor this
+  opt-in an instance still refuses to start, and a configuration and the opt-in together are a configuration error.
+  When the platform refuses it, the error says to ask a person to open an observation window for the agent in the
+  console, or to set the version and digest. An instance admitted only to be observed is refused by the platform
+  when it asks a person, and that refusal is a `NotSupportedError` (`observe_only_instance`) that says so. This is
+  only useful once the platform accepts an attestation with no version (authfi/agent-identity#185).
 - **Every gateway call names the step that made it (authfi/authfi#303).** The `traceparent` on a call to `/mcp`, a
   model route or the cloud door is now the trace id and span id of the exported span of the step running at that
   moment, one resolver (`core/step.ts`) for every place that sets the header. It is made from the active span's
