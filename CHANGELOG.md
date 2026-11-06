@@ -3,11 +3,11 @@
 All notable changes to this package. It follows [Semantic Versioning](https://semver.org): before
 1.0 a minor version may break, but only with an entry here and one minor version of deprecation.
 
-## 0.2.0 (unreleased)
+## 0.2.0
 
 ### Added
 
-- **An agent bound to a workload can ask a person (authfi/authfi#304).** `requestUserToken`, `awaitUserToken`,
+- **An agent bound to a workload can ask a person.** `requestUserToken`, `awaitUserToken`,
   `tokenAsUser`, `requestApproval`, `approval` and `waitForApproval` now work for an instance, which the SDK used to
   refuse with `instance_assertion` although the platform accepts them. The CIBA start and the approval request carry
   `Authorization: DPoP <instance token>` and a proof by the key that token is bound to (method, URL and `ath`), and
@@ -21,8 +21,8 @@ All notable changes to this package. It follows [Semantic Versioning](https://se
   When the platform refuses it, the error says to ask a person to open an observation window for the agent in the
   console, or to set the version and digest. An instance admitted only to be observed is refused by the platform
   when it asks a person, and that refusal is a `NotSupportedError` (`observe_only_instance`) that says so. This is
-  only useful once the platform accepts an attestation with no version (authfi/agent-identity#185).
-- **Every gateway call names the step that made it (authfi/authfi#303).** The `traceparent` on a call to `/mcp`, a
+  only useful once the platform accepts an attestation with no version.
+- **Every gateway call names the step that made it.** The `traceparent` on a call to `/mcp`, a
   model route or the cloud door is now the trace id and span id of the exported span of the step running at that
   moment, one resolver (`core/step.ts`) for every place that sets the header. It is made from the active span's
   own ids, so it no longer depends on a registered propagator. `registerAuthFITelemetry` registers an
@@ -34,13 +34,13 @@ All notable changes to this package. It follows [Semantic Versioning](https://se
   and unsampled, as before.
 - **Model calls through the AI gateway are tested to prove the key.** The gateway's `fetch` (and so every
   adapter's `openai()` / `anthropic()` settings) sends `Authorization: DPoP` with a proof on the Anthropic,
-  Chat Completions and Responses routes, against a gateway stand-in that refuses an unproven model call
-  (`MCP_MODEL_PROOF_CHECK=enforce`, `EMODEL020`). A model call that goes with a Bearer token and no proof is said
-  once in the log, because the gateway refuses it once the check is enforced, unless the workload is caged.
+  Chat Completions and Responses routes, against a gateway stand-in that refuses an unproven model call.
+  A model call that goes with a Bearer token and no proof is said once in the log, because the gateway refuses it
+  once it enforces proofs on model calls, unless the workload is caged.
 - **A run's first gateway call now answers the server's DPoP nonce.** The key a token is bound to is known only
   once the token is minted, and the gateway `fetch` read it before the first mint: with a nonce required, the
   first call of a run was reported as a refused token (`GatewayTokenRefused`). It mints first.
-- **Agent identity, ported from the Python SDK (#52, #53).**
+- **Agent identity, ported from the Python SDK.**
   - **DPoP on every gateway call.** An agent's tokens for AuthFI are bound to a per-process key (RFC 9449);
     `agent.fetch`, `headers()`, the gateways, the cloud door and the trace export carry a proof per request and
     answer the server's nonce once. CIBA and token exchange are bound to the same key, and a delegated token
@@ -67,7 +67,7 @@ All notable changes to this package. It follows [Semantic Versioning](https://se
   `openai-agents`, `mastra`): the outlook `io.authfi/governance` is read from the tool's `_meta`,
   falling back to the annotation for older gateways (`Gateway.governanceOf`, `Gateway.offerable`).
   Advisory only: the gateway still decides every call, and a call to a hidden tool is refused.
-- **Agent tokens are proven, and withdrawn agents are refused** (ported from 0.1 #30 and #31): DPoP
+- **Agent tokens are proven, and withdrawn agents are refused** (ported from the 0.1 line): DPoP
   proofs (RFC 9449), the AuthFI certificate chain of the signing key, `agentTokens` modes,
   `publicUrl`, `trustForwarded`, `replayGuard`, `nonceKey`, `rootPins`/`rootCerts`, and
   `@authfi/sdk/signals` (receiver, revocation store, `registerStream`). `verify()` refuses an agent's
@@ -90,8 +90,8 @@ All notable changes to this package. It follows [Semantic Versioning](https://se
   redirects, capped answers, and a warning when the platform deprecates a URL.
 - **`Secret`**, which never prints, serialises or clones its value, and `isSecret(value)`, which
   recognises one from either build (ESM or CommonJS) where `instanceof` cannot.
-- **Typed errors** under `AuthFIError`, with `isAuthFIError(e, kind)`, carrying the kernel's token
-  refusal codes (generated from the AuthFI kernel at v0.58.0).
+- **Typed errors** under `AuthFIError`, with `isAuthFIError(e, kind)`, carrying the platform's token
+  refusal codes.
 - **Plain `http` is refused** except to loopback: in a discovery document (`jwks_uri` and every
   `*_endpoint`) and on every request the transport sends, so a hostile or misconfigured document
   cannot make the SDK send a credential in the clear.
@@ -112,7 +112,7 @@ All notable changes to this package. It follows [Semantic Versioning](https://se
 - **A strict verifier**, `af.verifier({ audience, expectedTenantId })`: `typ at+jwt`, the algorithm
   pinned to the issuer's key (`RS256`, `ES256`, `EdDSA`), `iss`, a required audience that is never
   AuthFI's own, `exp`/`nbf`/`iat` with leeway, `sub`, the tenant pin, bound tokens and actor chains.
-  Refusals carry the kernel's codes. One `AccessToken` shape for every kind of token, with
+  Refusals carry the platform's codes. One `AccessToken` shape for every kind of token, with
   `principal`, `actor` and `tokenKind`. `verifyRequest` takes a Fetch `Request` or its parts.
 - `MultiIssuerVerifier`, pinning each trusted issuer to its tenant; it accepts a `TokenVerifier`
   from either build (`isTokenVerifier`).
@@ -166,13 +166,11 @@ All notable changes to this package. It follows [Semantic Versioning](https://se
 - `pipeline.yml`: lint, the tests on Node 22, 24 and 26 and in the edge runtime with coverage gates,
   and a build checked by publint, attw and a browser bundle; one required check, `ci`. No secrets
   in any pull-request job, every action pinned by commit.
-- `live.yml` (main and on demand, protected environment) and `weekly.yml` (platform drift and the
-  kernel codes against its newest tag).
 - `SECURITY.md`.
 
 ### Changed
 
-- **An access token is read from `client_id` and `scope` only**, as the design says; `azp` and `scp`
+- **An access token is read from `client_id` and `scope` only**, as the specification says; `azp` and `scp`
   are not stand-ins for them. A typed `agent:` or `app:` subject keeps its own kind when the token
   names an actor, and a token is expired from `exp` plus the leeway, in every SDK.
 - **Verification is strict.** A missing `audience` is a `ConfigurationError`, not "accept any".

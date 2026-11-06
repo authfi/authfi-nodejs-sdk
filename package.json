@@ -1,6 +1,6 @@
 {
   "name": "@authfi/sdk",
-  "version": "0.2.0-dev.0",
+  "version": "0.2.0",
   "description": "The AuthFI SDK for Node.js, edge runtimes and browsers: verify tokens, machine clients, AI agents and people signing in, on one core.",
   "license": "Apache-2.0",
   "repository": {
