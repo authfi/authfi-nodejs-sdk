@@ -39,8 +39,8 @@ interface Handle {
   spent: boolean;
 }
 
-/** The AI gateway's model routes. */
-const MODEL_ROUTE = /^\/mcp\/v1\/(messages|chat\/completions|responses)$/;
+/** The LLM door's model routes. */
+const MODEL_ROUTE = /^\/llm\/v1\/(messages|chat\/completions|responses)$/;
 
 export class FakePlatform {
   readonly seen = new Set<string>();
@@ -76,6 +76,8 @@ export class FakePlatform {
   cibaScript: ('pending' | 'slow_down' | 'approve' | 'deny' | 'expire')[] = ['approve'];
   mandateScript: ('pending' | 'approve' | 'deny' | 'expire')[] = ['approve'];
   readonly handles = new Map<string, Handle>();
+  /** The arguments of each `cloud.credentials` tool call. */
+  readonly cloudCalls: Record<string, unknown>[] = [];
   readonly calls: { name: string; mandate: string | undefined; authorization: string | null }[] = [];
   devices = new Map<string, JWK>();
   private readonly challenges = new Map<string, number>();
@@ -184,6 +186,8 @@ export class FakePlatform {
     } catch {
       return unauthorized('not a token');
     }
+    const wrong = this.wrongDoor(claims, r.url);
+    if (wrong !== undefined) return unauthorized(wrong);
     const cnf = claims.cnf as { jkt?: string } | undefined;
     if (cnf?.jkt === undefined) {
       if (scheme !== 'Bearer') return unauthorized('an unbound token is Bearer');
@@ -194,6 +198,22 @@ export class FakePlatform {
     if (proved instanceof Response) return proved;
     if (proved.jkt !== cnf.jkt) return unauthorized('the proof is not of the key the token is bound to');
     return { claims, jkt: proved.jkt, token };
+  }
+
+  /**
+   * The platform's wrong-door rule: a token is for one door. `/llm` takes only a token naming `<issuer>/llm`; `/mcp`
+   * refuses one that names it. A verified mandate root is the one token both doors take.
+   */
+  private wrongDoor(claims: Record<string, unknown>, url: string): string | undefined {
+    if (claims.mandate_id !== undefined) return undefined;
+    const path = new URL(url).pathname;
+    const aud = ([] as unknown[]).concat(claims.aud ?? []);
+    const llm = aud.includes(`${this.issuer}/llm`);
+    const mcp = aud.includes(`${this.issuer}/mcp`);
+    if (path === '/llm' || path.startsWith('/llm/')) {
+      return llm && !mcp ? undefined : 'wrong door: the LLM door takes only a token for /llm';
+    }
+    return llm ? 'wrong door: a token for /llm is refused at /mcp' : undefined;
   }
 
   // --- tokens ------------------------------------------------------------------------------
@@ -618,6 +638,9 @@ export class FakePlatform {
             },
           },
         });
+      if (name === 'cloud.credentials' || name === 'cloud__credentials') {
+        return this.cloudTool(rpc.id, seen, rpc.params?.arguments ?? {});
+      }
       if (mandate !== undefined) {
         if (this.ended.has(mandate)) return refused('EMDT004', 'the mandate has ended');
         const tools = seen.claims.mandate_tools as string[];
@@ -634,27 +657,51 @@ export class FakePlatform {
     return json({ jsonrpc: '2.0', id: rpc.id, result: { tools: [] } });
   }
 
-  private async cloud(r: Recorded): Promise<Response> {
-    const seen = await this.door(r, 'cloud');
-    if (seen instanceof Response) return seen;
-    const id = `cred_${this.handles.size + 1}`;
-    this.handles.set(id, {
+  /** `cloud.credentials` as the gateway serves it: a handle, a hold, or a refusal, all as a tool result. */
+  private cloudTool(
+    id: number | undefined,
+    seen: { jkt: string | undefined },
+    args: Record<string, unknown>,
+  ): Response {
+    this.cloudCalls.push(args);
+    const result = (r: Record<string, unknown>): Response => json({ jsonrpc: '2.0', id, result: r });
+    const approval = args._authfi_approval_id;
+    if (args.role === 'held' && approval === undefined) {
+      return result({
+        isError: true,
+        content: [
+          {
+            type: 'text',
+            text: 'Waiting for approval apr-1 (approval_required). A person must approve this action in the AuthFI console. Retry this call with an argument "_authfi_approval_id": "apr-1" once it is approved.',
+          },
+        ],
+      });
+    }
+    if (args.role === 'forbidden') {
+      return result({
+        isError: true,
+        content: [{ type: 'text', text: 'Refused (ECLOUDCRED003): not granted.' }],
+        _meta: { 'io.authfi/refusal': { code: 'ECLOUDCRED003', reason: 'the role is not granted' } },
+      });
+    }
+    const handleId = `cred_${this.handles.size + 1}`;
+    this.handles.set(handleId, {
       jkt: seen.jkt ?? '',
       expires: this.clock.now() + 900_000,
       spent: false,
     });
-    return json(
-      {
-        data: {
-          credential_id: id,
-          account: 'acct',
-          role: 'reader',
-          expires_at: new Date(this.clock.now() + 900_000).toISOString(),
-          scope: 'cloud.credentials',
-        },
-      },
-      201,
-    );
+    const handle = {
+      credential_id: handleId,
+      account: 'acct',
+      role: 'reader',
+      expires_at: new Date(this.clock.now() + 900_000).toISOString(),
+      scope: 'cloud.credentials',
+    };
+    return result({
+      content: [{ type: 'text', text: JSON.stringify(handle) }],
+      structuredContent: handle,
+      isError: false,
+    });
   }
 
   private async secret(r: Recorded): Promise<Response> {
@@ -705,13 +752,12 @@ export class FakePlatform {
       (r) => this.approval(r),
     );
     fake.on('POST', `${this.issuer}/mcp`, (r) => this.mcp(r));
-    fake.on('POST', `${this.issuer}/mcp/v1/messages`, (r) => this.mcp(r));
-    fake.on('POST', `${this.issuer}/mcp/v1/chat/completions`, (r) => this.mcp(r));
-    fake.on('POST', `${this.issuer}/mcp/v1/responses`, (r) => this.mcp(r));
-    fake.on('POST', `${this.origin}/mcp/v1/cloud/credentials`, (r) => this.cloud(r));
+    fake.on('POST', `${this.issuer}/llm/v1/messages`, (r) => this.mcp(r));
+    fake.on('POST', `${this.issuer}/llm/v1/chat/completions`, (r) => this.mcp(r));
+    fake.on('POST', `${this.issuer}/llm/v1/responses`, (r) => this.mcp(r));
     fake.on(
       'POST',
-      (u) => /\/mcp\/v1\/cloud\/credentials\/[^/]+\/secret$/.test(u),
+      (u) => /\/mcp\/cloud\/credentials\/[^/]+\/secret$/.test(u),
       (r) => this.secret(r),
     );
     fake.on('POST', `${this.origin}/apis/regional/v1/ai/agents/attest/challenge`, () => {

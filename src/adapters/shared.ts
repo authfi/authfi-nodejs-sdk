@@ -130,7 +130,7 @@ export class RunGateway {
 
   /**
    * Settings for an OpenAI-compatible client (`new OpenAI(...)`, `@langchain/openai`'s
-   * `configuration`): the AI gateway's model route. `apiKey` is a placeholder; the real credential
+   * `configuration`): the LLM door's model route. `apiKey` is a placeholder; the real credential
    * replaces the `Authorization` header on every request.
    */
   openai(): { baseURL: string; apiKey: string; fetch: typeof fetch } {

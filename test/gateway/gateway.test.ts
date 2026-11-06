@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { decodeJwt } from 'jose';
 import { describe, expect, it } from 'vitest';
 import { AgentKey } from '../../src/agents/agent-key.js';
 import { AuthFI } from '../../src/core/project.js';
@@ -111,9 +112,10 @@ describe('reading a tool result', () => {
       }),
     ).toBe('never_allowed');
     expect(gateway.governanceOf({})).toBeUndefined();
-    expect(gateway.modelBaseUrl('anthropic')).toBe(`${as.issuer}/mcp`);
-    expect(gateway.modelBaseUrl('openai')).toBe(`${as.issuer}/mcp/v1`);
+    expect(gateway.modelBaseUrl('anthropic')).toBe(`${as.issuer}/llm`);
+    expect(gateway.modelBaseUrl('openai')).toBe(`${as.issuer}/llm/v1`);
     expect(gateway.mcpUrl).toBe(`${as.issuer}/mcp`);
+    expect(gateway.llmUrl).toBe(`${as.issuer}/llm`);
     expect(APPROVAL_ARGUMENT).toBe('_authfi_approval_id');
     expect(String(gateway)).toBe(`Gateway(${as.issuer}/mcp as ${AGENT_ID})`);
   });
@@ -157,27 +159,40 @@ describe('the gateway fetch', () => {
 });
 
 describe('cloud credentials', () => {
-  const url = (issuer: string) => `${issuer}/mcp/v1/cloud/credentials`;
-
-  it('issues a handle that carries no secret, and the secret is fetched once by its handle', async () => {
-    const { gateway, as, fake } = await setup();
-    fake.on('POST', url(as.issuer), (r) => {
-      expect(JSON.parse(r.body)).toEqual({ account: 'acct', role: 'reader', duration_seconds: 600 });
-      expect(r.headers.get('authorization')?.startsWith('Bearer ')).toBe(true);
-      return json(
-        {
-          data: {
-            credential_id: 'c1',
-            account: 'acct',
-            role: 'reader',
-            expires_at: '2026-10-20T12:00:00Z',
-            scope: 'cloud.credentials',
-          },
-        },
-        201,
-      );
+  const mcp = (issuer: string) => `${issuer}/mcp`;
+  const redeem = (issuer: string, id: string) => `${issuer}/mcp/cloud/credentials/${id}/secret`;
+  const rpc = (result: unknown) => json({ jsonrpc: '2.0', id: 1, result });
+  const handle = (id: string, extra: Record<string, unknown> = {}) => {
+    const h = {
+      credential_id: id,
+      account: 'acct',
+      role: 'reader',
+      expires_at: '2026-10-20T12:00:00Z',
+      ...extra,
+    };
+    return rpc({
+      content: [{ type: 'text', text: JSON.stringify(h) }],
+      structuredContent: h,
+      isError: false,
     });
-    fake.on('POST', `${url(as.issuer)}/c1/secret`, () =>
+  };
+
+  it('issues a handle by tools/call of cloud.credentials on /mcp, and redeems the secret once at the /mcp path', async () => {
+    const { gateway, as, fake } = await setup();
+    fake.on('POST', mcp(as.issuer), (r) => {
+      expect(JSON.parse(r.body)).toEqual({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: {
+          name: 'cloud.credentials',
+          arguments: { account: 'acct', role: 'reader', duration_seconds: 600 },
+        },
+      });
+      expect(r.headers.get('authorization')?.startsWith('Bearer ')).toBe(true);
+      return handle('c1', { scope: 'cloud.credentials' });
+    });
+    fake.on('POST', redeem(as.issuer, 'c1'), () =>
       json(
         {
           data: {
@@ -208,85 +223,200 @@ describe('cloud credentials', () => {
     expect(credential.secretAccessKey?.reveal()).toBe('sk');
     expect(JSON.stringify(credential)).not.toContain('"sk"');
     expect(credential.expiresAt?.toISOString()).toBe('2026-10-20T12:00:00.000Z');
+    expect(fake.to(redeem(as.issuer, 'c1'))).toHaveLength(1);
+    // the removed HTTP door is never called
+    expect(fake.requests.filter((r) => r.url.includes('/mcp/v1/'))).toEqual([]);
   });
 
-  it('answers approval_required, and passes the approval id on the retry', async () => {
+  it('reads the handle from the result text when the gateway sends no structuredContent', async () => {
     const { gateway, as, fake } = await setup();
-    fake.on('POST', url(as.issuer), (r) =>
-      JSON.parse(r.body).approval_id === 'apr-1'
-        ? json(
-            {
-              data: { credential_id: 'c2', account: 'a', role: 'admin', expires_at: '2026-10-20T12:15:00Z' },
-            },
-            201,
-          )
-        : json({ data: { status: 'approval_required', approval_id: 'apr-1', message: 'm' } }, 202),
+    fake.on('POST', mcp(as.issuer), () =>
+      rpc({ content: [{ type: 'text', text: JSON.stringify({ credential_id: 'c5' }) }] }),
     );
-    fake.on('POST', `${url(as.issuer)}/c2/secret`, () =>
+    const out = await gateway.cloudCredentials({ account: 'a', role: 'r' });
+    expect(out.kind === 'issued' && out.handle.credentialId).toBe('c5');
+  });
+
+  it('answers approval_required from the hold result, and passes the approval id as the tool argument on the retry', async () => {
+    const { gateway, as, fake } = await setup();
+    const held = JSON.parse(
+      readFileSync(new URL('../support/hold-result.json', import.meta.url), 'utf8'),
+    ) as { content: { text: string }[] };
+    const holdId = '7f1c2a9e-5d1b-4f3a-9a77-2b0c8e1d4f00';
+    fake.on('POST', mcp(as.issuer), (r) =>
+      (JSON.parse(r.body).params.arguments as Record<string, unknown>)[APPROVAL_ARGUMENT] === holdId
+        ? handle('c2', { role: 'admin' })
+        : rpc(held),
+    );
+    fake.on('POST', redeem(as.issuer, 'c2'), () =>
       json({ data: { provider: 'gcp', credential_id: 'c2', access_token: 'gat', expires_in: 900 } }),
     );
     expect(await gateway.cloudCredentials({ account: 'a', role: 'admin' })).toEqual({
       kind: 'approval_required',
-      approvalId: 'apr-1',
+      approvalId: holdId,
     });
-    const out = await gateway.cloudCredentials({ account: 'a', role: 'admin', approvalId: 'apr-1' });
+    const out = await gateway.cloudCredentials({ account: 'a', role: 'admin', approvalId: holdId });
     expect(out.kind === 'issued' && out.handle.credentialId).toBe('c2');
-    const both = await gateway.cloud.fetchCredential({ account: 'a', role: 'admin', approvalId: 'apr-1' });
+    const both = await gateway.cloud.fetchCredential({ account: 'a', role: 'admin', approvalId: holdId });
     expect(both.kind === 'issued' && both.credential.accessToken?.reveal()).toBe('gat');
     expect(both.kind === 'issued' && both.credential.expiresAt).toBeInstanceOf(Date);
   });
 
-  it('treats only 201 and 202 as an answer: a 200 carrying a credential is refused', async () => {
+  it('is a refusal (APIError with the ECLOUDCRED code) when the tool result carries one', async () => {
     const { gateway, as, fake } = await setup();
-    fake.on('POST', url(as.issuer), () =>
-      json(
-        { data: { provider: 'aws', credential_id: 'c1', access_key_id: 'AKIA', secret_access_key: 'sk' } },
-        200,
-      ),
+    fake.on('POST', mcp(as.issuer), () =>
+      rpc({
+        isError: true,
+        content: [{ type: 'text', text: 'Refused (ECLOUDCRED003): not granted.' }],
+        _meta: { 'io.authfi/refusal': { code: 'ECLOUDCRED003', reason: 'the role is not granted' } },
+      }),
     );
     await expect(gateway.cloudCredentials({ account: 'a', role: 'r' })).rejects.toMatchObject({
-      code: 'response_invalid',
+      name: 'APIError',
+      code: 'ECLOUDCRED003',
     });
   });
 
   it('refuses a duration the platform would refuse, naming its 900 s limit, before sending anything', async () => {
     const { gateway, as, fake } = await setup();
-    fake.on('POST', url(as.issuer), () => json({ data: { credential_id: 'c1' } }, 201));
+    fake.on('POST', mcp(as.issuer), () => handle('c1'));
     for (const bad of [901, 43_200, 0, -5, 1.5, Number.NaN]) {
       await expect(
         gateway.cloudCredentials({ account: 'a', role: 'r', expiresInSeconds: bad }),
       ).rejects.toThrow(/expiresInSeconds.*1 to 900/);
     }
-    expect(fake.to(url(as.issuer))).toHaveLength(0);
+    expect(fake.to(mcp(as.issuer))).toHaveLength(0);
     const ok = await gateway.cloudCredentials({ account: 'a', role: 'r', expiresInSeconds: 900 });
     expect(ok.kind).toBe('issued');
   });
 
-  it('maps refusals: the token refused, a coded refusal, and malformed answers', async () => {
+  it('sends the issue call once: a gateway failure after it was sent is not retried', async () => {
+    const key = await AgentKey.generate();
+    const as = await FakeAS.create(key);
+    const af = new AuthFI({ issuer: as.issuer, fetch: as.t.fake.fetch, retries: 3 });
+    const gateway = af.agent({ agentId: AGENT_ID, key }).gateway();
+    as.t.fake.on('POST', mcp(as.issuer), () => json({ error: 'server_error' }, 503));
+    await expect(gateway.cloudCredentials({ account: 'a', role: 'r' })).rejects.toBeInstanceOf(Error);
+    expect(as.t.fake.to(mcp(as.issuer))).toHaveLength(1);
+  });
+
+  it('maps failures: the token refused, a JSON-RPC error, and malformed answers', async () => {
     const { gateway, as, fake } = await setup();
-    fake.on('POST', url(as.issuer), () => json({ error: 'unauthorized' }, 401));
+    fake.on('POST', mcp(as.issuer), () => json({ error: 'unauthorized' }, 401));
     await expect(gateway.cloudCredentials({ account: 'a', role: 'r' })).rejects.toMatchObject({
       name: 'GatewayTokenRefused',
     });
-    fake.on('POST', url(as.issuer), () =>
-      json({ error: 'ECLOUD004', error_description: 'role not granted' }, 403),
+    fake.on('POST', mcp(as.issuer), () =>
+      json({ jsonrpc: '2.0', id: 1, error: { code: -32000, message: 'tool call failed' } }),
     );
     await expect(gateway.cloudCredentials({ account: 'a', role: 'r' })).rejects.toMatchObject({
       name: 'APIError',
-      code: 'ECLOUD004',
+      code: 'jsonrpc_-32000',
     });
-    fake.on('POST', url(as.issuer), () => json({ data: {} }, 202));
+    fake.on('POST', mcp(as.issuer), () => json({ jsonrpc: '2.0', id: 1 }));
     await expect(gateway.cloudCredentials({ account: 'a', role: 'r' })).rejects.toMatchObject({
       code: 'response_invalid',
     });
-    fake.on('POST', url(as.issuer), () => json({ data: {} }, 201));
+    fake.on('POST', mcp(as.issuer), () => rpc({ content: [{ type: 'text', text: 'not a handle' }] }));
     await expect(gateway.cloudCredentials({ account: 'a', role: 'r' })).rejects.toMatchObject({
       code: 'response_invalid',
+    });
+    fake.on('POST', mcp(as.issuer), () => rpc({ content: [{ type: 'text', text: '42' }] }));
+    await expect(gateway.cloudCredentials({ account: 'a', role: 'r' })).rejects.toMatchObject({
+      code: 'response_invalid',
+    });
+    fake.on('POST', mcp(as.issuer), () => json({ jsonrpc: '2.0', id: 1, error: { code: -32603 } }));
+    await expect(gateway.cloudCredentials({ account: 'a', role: 'r' })).rejects.toMatchObject({
+      code: 'jsonrpc_-32603',
+    });
+    fake.on('POST', mcp(as.issuer), () =>
+      rpc({ isError: true, content: [], _meta: { 'io.authfi/refusal': { reason: 'no' } } }),
+    );
+    await expect(gateway.cloudCredentials({ account: 'a', role: 'r' })).rejects.toMatchObject({
+      code: 'refused',
     });
     await expect(gateway.cloudCredentials({ account: '', role: 'r' })).rejects.toThrow('account and role');
-    fake.on('POST', url(as.issuer), () => json({ data: { credential_id: 'c9' } }, 201));
+    fake.on('POST', mcp(as.issuer), () => rpc({ structuredContent: { credential_id: 'c9' } }));
     const bare = await gateway.cloudCredentials({ account: 'a', role: 'r' });
     expect(bare.kind === 'issued' && bare.handle.expiresAt).toBeUndefined();
+  });
+});
+
+describe('the two doors', () => {
+  const aud = (authorization: string | null): unknown => decodeJwt((authorization ?? '').slice(7)).aud;
+
+  it('asks for a second token with resource <issuer>/llm for a model call, and sends each door only its own', async () => {
+    const { gateway, as, fake } = await setup();
+    fake.on('POST', `${as.issuer}/mcp`, () => json({ jsonrpc: '2.0', id: 1, result: {} }));
+    fake.on('POST', `${as.issuer}/llm/v1/messages`, () => json({ type: 'message' }));
+    for (let i = 0; i < 2; i++) {
+      await gateway.fetch(`${as.issuer}/mcp`, { method: 'POST', body: '{}' });
+      await gateway.fetch(`${as.issuer}/llm/v1/messages`, { method: 'POST', body: '{}' });
+    }
+    const mints = fake.to(`${as.issuer}/oauth/token`).map((r) => new URLSearchParams(r.body));
+    // one token per door, each minted once and cached apart
+    expect(mints.map((f) => f.get('resource'))).toEqual([null, `${as.issuer}/llm`]);
+    const toMcp = fake.to(`${as.issuer}/mcp`).map((r) => aud(r.headers.get('authorization')));
+    const toLlm = fake.to(`${as.issuer}/llm/v1/messages`).map((r) => aud(r.headers.get('authorization')));
+    expect(toMcp).toEqual([`${as.issuer}/mcp`, `${as.issuer}/mcp`]);
+    expect(toLlm).toEqual([`${as.issuer}/llm`, `${as.issuer}/llm`]);
+  });
+
+  it('sends the llm token on every model route and the mcp token on the cloud call', async () => {
+    const { gateway, as, fake } = await setup();
+    const routes = ['messages', 'chat/completions', 'responses'];
+    for (const route of routes) fake.on('POST', `${as.issuer}/llm/v1/${route}`, () => json({}));
+    fake.on('POST', `${as.issuer}/mcp`, () =>
+      json({ jsonrpc: '2.0', id: 1, result: { structuredContent: { credential_id: 'c1' } } }),
+    );
+    for (const route of routes)
+      await gateway.fetch(`${gateway.llmUrl}/v1/${route}`, { method: 'POST', body: '{}' });
+    await gateway.cloudCredentials({ account: 'a', role: 'r' });
+    for (const route of routes)
+      expect(aud(fake.to(`${as.issuer}/llm/v1/${route}`)[0]!.headers.get('authorization'))).toBe(
+        `${as.issuer}/llm`,
+      );
+    expect(aud(fake.to(`${as.issuer}/mcp`)[0]!.headers.get('authorization'))).toBe(`${as.issuer}/mcp`);
+  });
+
+  it('keeps the llm token on a gateway made for a run, with the run id on its calls', async () => {
+    const { gateway, as, fake } = await setup();
+    fake.on('POST', `${as.issuer}/llm/v1/responses`, () => json({}));
+    const run = gateway.forRun('run-xyz');
+    await run.fetch(`${run.llmUrl}/v1/responses`, { method: 'POST', body: '{}' });
+    const sent = fake.to(`${as.issuer}/llm/v1/responses`)[0]!;
+    expect(aud(sent.headers.get('authorization'))).toBe(`${as.issuer}/llm`);
+    expect(sent.headers.get('x-request-id')).toBe('run-xyz.1');
+  });
+
+  it('refuses a model call before sending it when the credential has no token for the llm door', async () => {
+    const { agent, as, fake } = await setup();
+    const delegated = await agent.exchange(new Secret(await as.t.sign()));
+    fake.on('POST', `${as.issuer}/llm/v1/messages`, () => json({}));
+    await expect(
+      delegated.gateway().fetch(`${as.issuer}/llm/v1/messages`, { method: 'POST', body: '{}' }),
+    ).rejects.toThrow(/LLM door/);
+    expect(fake.to(`${as.issuer}/llm/v1/messages`)).toHaveLength(0);
+    // given its own token for the door, the call goes with that token
+    const llm = await agent.exchange(new Secret(await as.t.sign()), { resource: `${as.issuer}/llm` });
+    const res = await delegated
+      .gateway()
+      .withLlmSource(llm)
+      .fetch(`${as.issuer}/llm/v1/messages`, { method: 'POST', body: '{}' });
+    expect(res.status).toBe(200);
+    expect(aud(fake.to(`${as.issuer}/llm/v1/messages`)[0]!.headers.get('authorization'))).toEqual([
+      `${as.issuer}/llm`,
+    ]);
+  });
+
+  it("keeps AuthFI's credential for AuthFI's doors: a customer API gets no token and none is minted", async () => {
+    const { gateway, as, fake } = await setup();
+    fake.on('POST', 'https://api.customer.example/llm/v1/messages', () => json({}));
+    await expect(
+      gateway.fetch('https://api.customer.example/llm/v1/messages', { method: 'POST', body: '{}' }),
+    ).rejects.toThrow('refusing to send');
+    expect(fake.to('https://api.customer.example/llm/v1/messages')).toHaveLength(0);
+    expect(fake.to(`${as.issuer}/oauth/token`)).toHaveLength(0);
   });
 });
 

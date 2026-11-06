@@ -187,9 +187,9 @@ describe('a held call', () => {
 describe('the clients the adapter builds', () => {
   it('point a model provider at the project, with a placeholder key replaced by the credential', async () => {
     const t = await setup();
-    expect(t.authfi.openai()).toMatchObject({ baseURL: `${t.as.issuer}/mcp/v1`, apiKey: 'authfi' });
-    expect(t.authfi.anthropic()).toMatchObject({ baseURL: `${t.as.issuer}/mcp`, authToken: 'authfi' });
-    const res = await t.authfi.anthropic().fetch(`${t.as.issuer}/mcp/v1/messages`, {
+    expect(t.authfi.openai()).toMatchObject({ baseURL: `${t.as.issuer}/llm/v1`, apiKey: 'authfi' });
+    expect(t.authfi.anthropic()).toMatchObject({ baseURL: `${t.as.issuer}/llm`, authToken: 'authfi' });
+    const res = await t.authfi.anthropic().fetch(`${t.as.issuer}/llm/v1/messages`, {
       method: 'POST',
       body: JSON.stringify({ model: 'm', messages: [{ role: 'user', content: 'hi' }] }),
       headers: { 'x-api-key': 'authfi', 'content-type': 'application/json' },

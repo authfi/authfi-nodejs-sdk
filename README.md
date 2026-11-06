@@ -328,7 +328,8 @@ is the same as data for code that plans around it.
 `gateway.cloud.credentials({ account, role })` (also `agent.cloud`, `mandate.cloud`) returns a **handle**
 (`credentialId`, `account`, `role`, `expiresAt`, `scope`) and never a secret, so it is safe in a tool result a
 model reads. The runtime that calls the cloud fetches the secret with `cloud.secret(handle)`: once, with the
-same key, and not after it expires (`POST /mcp/v1/cloud/credentials/{credential_id}/secret`).
+same key, and not after it expires (`POST <issuer>/mcp/cloud/credentials/{credential_id}/secret`). The handle
+is issued by a `tools/call` of `cloud.credentials` on `<issuer>/mcp`, the same governed tool a model would call.
 `cloud.fetchCredential(request)` does both for code that is not a tool.
 
 ## Connect from the environment
@@ -341,7 +342,7 @@ gateways and the Vercel AI adapter take as `source`:
   `AUTHFI_AGENT_PRIVATE_KEY` and `AUTHFI_AGENT_KID`), exactly as `agentFromEnv` reads them; `connect()` says
   so once;
 - else a machine client: `AUTHFI_CLIENT_ID` with `AUTHFI_CLIENT_SECRET`. Its token is minted for the
-  gateway (`<issuer>/mcp`) and reaches the gateways as a client, with no agent id; the gateway records the
+  gateway (`<issuer>/mcp`, and a second one for `<issuer>/llm`) and reaches the gateways as a client, with no agent id; the gateway records the
   caller as `client-credentials`.
 
 A missing variable is a `ConfigurationError` that names it. When `@opentelemetry/api` is installed it is
@@ -412,14 +413,18 @@ const telemetry = registerAuthFITelemetry({ source: await connect(), global: fal
 
 ## The gateways
 
-`agent.gateway()`, `delegatedToken.gateway()` or `clientCredentials.gateway()` is the project's MCP gateway and AI gateway for
-that credential.
+`agent.gateway()`, `delegatedToken.gateway()` or `clientCredentials.gateway()` is the project's MCP gateway (`<issuer>/mcp`: tools and cloud
+credentials) and LLM gateway (`<issuer>/llm`: model calls) for that credential. A token is for one door: a token
+minted for `/mcp` is refused on `/llm/v1` and the reverse, so the gateway asks for a second token with
+`resource=<issuer>/llm` for model calls, bound to the same key, and sends each door only its own. A delegated
+token holds one token: exchange again with `resource: gateway.llmUrl` and pass it to `gateway.withLlmSource()`.
 
 | | |
 |---|---|
 | `gateway.mcpUrl` | `<issuer>/mcp` |
+| `gateway.llmUrl` | `<issuer>/llm` |
 | `gateway.forRun(runId?)` | the same credential for one run: each call's `X-Request-Id` is `<runId>.<n>` (the run id also goes on spans as `authfi.run_id`); `gateway.serverRunId` is the run AuthFI derived, from `AuthFI-Run-Id` |
-| `gateway.modelBaseUrl('anthropic' \| 'openai')` | the base URL for a provider SDK |
+| `gateway.modelBaseUrl('anthropic' \| 'openai')` | the base URL for a provider SDK: `<issuer>/llm` (the Anthropic SDKs add `/v1/messages`) or `<issuer>/llm/v1` |
 | `gateway.fetch` | the credential per request, `X-Request-Id` and `traceparent`, AuthFI's origins only, no redirects; a 401 is `GatewayTokenRefused` |
 | `gateway.readResult(result)` | a `ToolOutcome`: `allowed`, `refused` (with `code`, `reason`, `requiredScope`) or `approval_required` (with `approvalId`) |
 | `gateway.scopeOf(tool)` | the grant object of a tool, from `tools/list` |
@@ -554,7 +559,7 @@ Two things to know:
 | [`examples/agent-for-a-person-voice`](examples/agent-for-a-person-voice) | Acting for a caller with no browser (CIBA) |
 | [`examples/agent-for-a-signed-in-user`](examples/agent-for-a-signed-in-user) | Acting for a person signed in to your app (token exchange) |
 | [`examples/action-gate`](examples/action-gate) | Freezing a high-risk action before running it |
-| [`examples/agent-model-gateway`](examples/agent-model-gateway) | Model calls through the AI gateway, the token kept out of traces |
+| [`examples/agent-model-gateway`](examples/agent-model-gateway) | Model calls through the LLM gateway, the token kept out of traces |
 | [`examples/approvals-vercel-ai`](examples/approvals-vercel-ai) | A Vercel AI SDK agent that pauses on an approval and resumes on AuthFI's decision |
 
 ## Secrets
