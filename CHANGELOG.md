@@ -7,6 +7,10 @@ All notable changes to this package. It follows [Semantic Versioning](https://se
 
 ### Added
 
+- **B3 checks.** Tests that hold the SDK to the DPoP rules the platform turns on in November: a token renewed after
+  the server's nonce rotated is challenged once at the token endpoint and answered once; a refusal never sends the next
+  request as Bearer; a nonce retry is a new proof; a proof names the URL without its query. `test/live/b3-np.test.ts`
+  runs the same refusals against a probe project on np (skipped unless `AUTHFI_B3_ISSUER` names one).
 - **An agent bound to a workload can ask a person.** `requestUserToken`, `awaitUserToken`,
   `tokenAsUser`, `requestApproval`, `approval` and `waitForApproval` now work for an instance, which the SDK used to
   refuse with `instance_assertion` although the platform accepts them. The CIBA start and the approval request carry
