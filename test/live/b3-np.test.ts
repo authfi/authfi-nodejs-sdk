@@ -9,9 +9,9 @@
 // Each refusal is paired with a control that is admitted, so a refusal is the rule and not a dead endpoint:
 //   mint      the agent's token is bound to its run key
 //   proved    tools/list with the proof is admitted (control)
-//   bearer    the same bound token sent as Bearer is refused
-//   noproof   `Authorization: DPoP` with no proof is refused
-//   replay    a proof sent twice: the first is admitted (200), the second refused
+//   bearer    the same bound token sent as Bearer is refused (a nonce challenge does not count)
+//   noproof   `Authorization: DPoP` with no proof is refused (a nonce challenge does not count)
+//   replay    a proof sent twice: the first is admitted (200), the second refused (not by a nonce challenge)
 //   htu, htm, ath   a proof for another URL, method or token is refused; it carries the nonce the origin asked for and
 //             is made again after a challenge, so only the broken property can refuse it, and a refusal that is a nonce
 //             challenge fails the leg
@@ -120,17 +120,25 @@ describe.skipIf(!live)('live on np: B3 from the SDK', () => {
       noproof: dpop(undefined),
     })) {
       const r = await post(headers);
-      leg(name, '401', String(r.status), r.status === 401, await reasonOf(r));
+      const why = await reasonOf(r);
+      leg(
+        name,
+        '401, not for a nonce',
+        String(r.status),
+        r.status === 401 && !why.includes('use_dpop_nonce'),
+        why,
+      );
     }
     const replayed = await proof();
     const first = await post(dpop(replayed));
     const second = await post(dpop(replayed));
+    const replayWhy = await reasonOf(second);
     leg(
       'replay',
-      '200 then 401',
+      '200 then 401, not for a nonce',
       `${first.status} then ${second.status}`,
-      first.status === 200 && second.status === 401,
-      await reasonOf(second),
+      first.status === 200 && second.status === 401 && !replayWhy.includes('use_dpop_nonce'),
+      replayWhy,
     );
     const wrongToken = new Secret(token.slice(0, -2) + (token.endsWith('AA') ? 'BB' : 'AA'));
     for (const [name, make] of Object.entries({
