@@ -27,17 +27,20 @@ const REQ = 'req_01';
 const sign = (secret, timestamp, body) =>
   `sha256=${createHmac('sha256', secret).update(`${timestamp}.${body}`, 'utf8').digest('hex')}`;
 
+// The platform marshals a Go map, so the real body has its keys in alphabetical order; the vectors do too.
 function event({ id, requestId, type = 'user.created', subject = 'u2' }) {
-  const body = { id };
-  if (requestId !== undefined) body.request_id = requestId;
-  body.event = type;
-  body.timestamp = '2026-10-20T11:59:58Z';
-  body.data = {
-    actor: 'user:u1',
-    subject: `user:${subject}`,
-    resource_type: 'user',
-    resource_id: subject,
+  const body = {
+    data: {
+      actor: 'user:u1',
+      resource_id: subject,
+      resource_type: 'user',
+      subject: `user:${subject}`,
+    },
+    event: type,
+    id,
   };
+  if (requestId !== undefined) body.request_id = requestId;
+  body.timestamp = '2026-10-20T11:59:58Z';
   return JSON.stringify(body);
 }
 
@@ -86,8 +89,8 @@ const withSignature = (d, signature) => ({
 });
 
 const roleBody =
-  `{"id":"${ID(2)}","request_id":"${REQ}","event":"role.assigned","timestamp":"2026-10-20T11:59:58Z",` +
-  '"data":{"subject":"user:ü-é","resource_type":"role","resource_id":"r1"}}';
+  '{"data":{"resource_id":"r1","resource_type":"role","subject":"user:ü-é"},' +
+  `"event":"role.assigned","id":"${ID(2)}","request_id":"${REQ}","timestamp":"2026-10-20T11:59:58Z"}`;
 
 const good = delivery({});
 const cases = [
@@ -142,6 +145,14 @@ const cases = [
   ),
   refused('signed body is not JSON', delivery({ body: 'not json' }), 'webhook_body_invalid'),
   refused('signed body is not an event', delivery({ body: '{"hello":"world"}' }), 'webhook_body_invalid'),
+  // The old shape, where the request id stood in for the event id: a verifier must not fall back to it.
+  refused(
+    'signed body has a request id but no event id',
+    delivery({
+      body: '{"data":{},"event":"user.created","request_id":"req_01","timestamp":"2026-10-20T11:59:58Z"}',
+    }),
+    'webhook_body_invalid',
+  ),
   // One request that caused two events: same request_id, different event ids (comms#124).
   ok(
     'bulk request, first event',

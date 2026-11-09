@@ -62,6 +62,12 @@ export function runWebhookVectors(): void {
     const bulk = ok.filter((c) => c.request_id === 'req_bulk_01');
     expect(bulk).toHaveLength(2);
     expect(bulk[0]?.id).not.toBe(bulk[1]?.id);
+    // A replay is the same event again: the same event id, a new delivery id.
+    const first = ok.find((c) => c.name === 'fresh delivery');
+    const replay = ok.find((c) => c.name === 'replay of an event');
+    expect(first).toBeDefined();
+    expect(replay?.id).toBe(first?.id);
+    expect(replay?.delivery_id).not.toBe(first?.delivery_id);
   });
 
   it('lists the same events as the vectors', () => {
