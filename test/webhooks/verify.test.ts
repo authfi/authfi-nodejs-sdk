@@ -40,6 +40,35 @@ describe('conformance vectors', () => {
   runWebhookVectors();
 });
 
+describe('verifyWebhook ids', () => {
+  const payload = (id: string, requestId?: string): string =>
+    JSON.stringify({
+      id,
+      ...(requestId === undefined ? {} : { request_id: requestId }),
+      event: 'login.failed',
+      timestamp: '2026-10-20T11:59:59Z',
+      data: {},
+    });
+
+  it('parses request_id into requestId, and leaves it undefined when absent', async () => {
+    const withId = payload('018f0000-0000-7000-8000-000000000001', 'req_9');
+    const without = payload('018f0000-0000-7000-8000-000000000001');
+    const a = await verifyWebhook({ ...base, body: withId, headers: signed(withId) });
+    const b = await verifyWebhook({ ...base, body: without, headers: signed(without) });
+    expect(a.requestId).toBe('req_9');
+    expect(b.requestId).toBeUndefined();
+  });
+
+  it('keeps events that share a request_id apart by their own id', async () => {
+    const one = payload('018f0000-0000-7000-8000-000000000001', 'req_9');
+    const two = payload('018f0000-0000-7000-8000-000000000002', 'req_9');
+    const a = await verifyWebhook({ ...base, body: one, headers: signed(one) });
+    const b = await verifyWebhook({ ...base, body: two, headers: signed(two) });
+    expect(a.requestId).toBe(b.requestId);
+    expect(a.id).not.toBe(b.id);
+  });
+});
+
 describe('verifyWebhook', () => {
   it('accepts what an independent HMAC signs, from a header record, Headers or bytes', async () => {
     const headers = signed(BODY);
