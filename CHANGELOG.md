@@ -9,6 +9,9 @@ All notable changes to this package. It follows [Semantic Versioning](https://se
 
 - **`event.requestId`** on a webhook event: the id of the request that caused it, when the platform sent one.
   Several events can share it.
+- **Webhook vectors** carry the event id (UUIDv7) in `id` and the request id in `request_id`, with cases for
+  two events sharing a request, a replayed event and an event without a request id. They are written by
+  `scripts/gen-webhook-vectors.mjs` (`npm run check:webhook-vectors` checks the file).
 
 ### Changed
 

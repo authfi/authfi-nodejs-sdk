@@ -42,6 +42,8 @@ jobs:
         run: node scripts/gen-codes.mjs --check
       - name: Check the conformance vectors against their checksum
         run: node scripts/gen-vectors.mjs --check
+      - name: Check the webhook vectors were not edited by hand
+        run: npm run check:webhook-vectors
 
   test:
     name: test (node ${{ matrix.node }})
