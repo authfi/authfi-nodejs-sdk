@@ -64,8 +64,21 @@ describe('verifyWebhook ids', () => {
     const two = payload('018f0000-0000-7000-8000-000000000002', 'req_9');
     const a = await verifyWebhook({ ...base, body: one, headers: signed(one) });
     const b = await verifyWebhook({ ...base, body: two, headers: signed(two) });
-    expect(a.requestId).toBe(b.requestId);
+    expect(a.requestId).toBe('req_9');
+    expect(b.requestId).toBe('req_9');
     expect(a.id).not.toBe(b.id);
+  });
+
+  it('ignores a request_id that is not a string', async () => {
+    const body = JSON.stringify({
+      id: '018f0000-0000-7000-8000-000000000001',
+      request_id: 7,
+      event: 'login.failed',
+      timestamp: '2026-10-20T11:59:59Z',
+      data: {},
+    });
+    const event = await verifyWebhook({ ...base, body, headers: signed(body) });
+    expect(event.requestId).toBeUndefined();
   });
 });
 

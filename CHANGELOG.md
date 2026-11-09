@@ -7,9 +7,12 @@ All notable changes to this package. It follows [Semantic Versioning](https://se
 
 ### Added
 
-- **Webhook events carry `requestId`.** `event.id` is the event's own id, the same on every delivery of the event, so
-  de-duplicate on it. `event.requestId` is the id of the request that caused the event, when the platform sent one;
-  several events can share it.
+- **`event.requestId`** on a webhook event: the id of the request that caused it, when the platform sent one.
+  Several events can share it.
+
+### Changed
+
+- **`event.id`** is the event's own id, the same on every delivery of the event: de-duplicate on it.
 
 ## 0.2.0
 
