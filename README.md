@@ -489,7 +489,9 @@ app.post('/hooks/authfi', express.raw({ type: 'application/json' }), async (req,
 });
 ```
 
-`WEBHOOK_EVENTS` lists the event names. The delivery id (`event.deliveryId`) is not signed: use it to
+`WEBHOOK_EVENTS` lists the event names. `event.id` is the event's own id, the same on every delivery of the event:
+de-duplicate on it. `event.requestId` is the id of the request that caused the event, when the platform sent one;
+several events can share it. The delivery id (`event.deliveryId`) is not signed: use it to
 drop repeats, never to decide what to trust. `toleranceSeconds` narrows or widens the window.
 
 ## Administer the project

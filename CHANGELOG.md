@@ -3,6 +3,17 @@
 All notable changes to this package. It follows [Semantic Versioning](https://semver.org): before
 1.0 a minor version may break, but only with an entry here and one minor version of deprecation.
 
+## Unreleased
+
+### Added
+
+- **`event.requestId`** on a webhook event: the id of the request that caused it, when the platform sent one.
+  Several events can share it.
+
+### Changed
+
+- **`event.id`** is the event's own id, the same on every delivery of the event: de-duplicate on it.
+
 ## 0.2.0
 
 ### Added
