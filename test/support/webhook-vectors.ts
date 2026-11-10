@@ -16,6 +16,9 @@ interface Case {
   expect: string;
   type?: string;
   resource_id?: string;
+  id?: string;
+  request_id?: string | null;
+  delivery_id?: string;
 }
 
 export function runWebhookVectors(): void {
@@ -36,7 +39,9 @@ export function runWebhookVectors(): void {
         const event = await run;
         expect(event.type).toBe(c.type);
         expect(event.data.resourceId).toBe(c.resource_id);
-        expect(event.deliveryId).toBe('del_1');
+        expect(event.id).toBe(c.id);
+        expect(event.requestId).toBe(c.request_id ?? undefined);
+        expect(event.deliveryId).toBe(c.delivery_id);
         return;
       }
       const err = await run.then(
@@ -47,6 +52,23 @@ export function runWebhookVectors(): void {
       expect((err as { code: string }).code).toBe(c.expect);
     });
   }
+
+  it('keeps the event id apart from the request id', () => {
+    const ok = (doc.cases as Case[]).filter((c) => c.expect === 'ok');
+    for (const c of ok) {
+      expect(c.id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+      expect(c.id).not.toBe(c.request_id);
+    }
+    const bulk = ok.filter((c) => c.request_id === 'req_bulk_01');
+    expect(bulk).toHaveLength(2);
+    expect(bulk[0]?.id).not.toBe(bulk[1]?.id);
+    // A replay is the same event again: the same event id, a new delivery id.
+    const first = ok.find((c) => c.name === 'fresh delivery');
+    const replay = ok.find((c) => c.name === 'replay of an event');
+    expect(first).toBeDefined();
+    expect(replay?.id).toBe(first?.id);
+    expect(replay?.delivery_id).not.toBe(first?.delivery_id);
+  });
 
   it('lists the same events as the vectors', () => {
     expect([...WEBHOOK_EVENTS]).toEqual(doc.events);
