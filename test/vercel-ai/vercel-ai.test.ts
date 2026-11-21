@@ -78,7 +78,7 @@ async function untilHold(t: Setup) {
 describe('the clients the adapter builds', () => {
   it('point the model provider and the MCP client at the project, with Bearer, no API key, and request ids', async () => {
     const t = await setup({ runId: 'run-1' });
-    expect(t.authfi.anthropic().baseURL).toBe(`${t.as.issuer}/mcp/v1`);
+    expect(t.authfi.anthropic().baseURL).toBe(`${t.as.issuer}/llm/v1`);
     expect(t.authfi.mcpTransport()).toMatchObject({
       type: 'http',
       url: `${t.as.issuer}/mcp`,

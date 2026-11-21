@@ -10,10 +10,11 @@ describe('cloud credentials by handle: no secret reaches a model', () => {
     expect(text).toContain('cred_1');
     expect(text).not.toMatch(/secret|AKIA|session/i);
     expect(out.handle).toMatchObject({ account: 'acct', role: 'reader', scope: 'cloud.credentials' });
-    // the door took the request as DPoP
-    expect(p.t.fake.to(`${p.issuer}/mcp/v1/cloud/credentials`)[0]!.headers.get('authorization')).toMatch(
-      /^DPoP /,
-    );
+    // the MCP door took the tools/call as DPoP, and the old HTTP door was never used
+    const issue = p.t.fake.to(`${p.issuer}/mcp`).find((r) => r.body.includes('cloud.credentials'))!;
+    expect(issue.headers.get('authorization')).toMatch(/^DPoP /);
+    expect(p.cloudCalls).toEqual([{ account: 'acct', role: 'reader', duration_seconds: 300 }]);
+    expect(p.t.fake.requests.filter((r) => r.url.includes('/mcp/v1/'))).toEqual([]);
     const credential = await agent.cloud.secret(out.handle);
     expect(credential.secretAccessKey?.reveal()).toBe('the-secret-key');
     expect(credential.sessionToken?.reveal()).toBe('the-session-token');
@@ -55,7 +56,7 @@ describe('cloud credentials by handle: no secret reaches a model', () => {
   it('is refused when the token is Bearer for a project that bound it: the door takes no unproven bound token', async () => {
     const { agent, p } = await platform();
     const token = await agent.token();
-    const res = await p.fetch(`${p.issuer}/mcp/v1/cloud/credentials/cred_1/secret`, {
+    const res = await p.fetch(`${p.issuer}/mcp/cloud/credentials/cred_1/secret`, {
       method: 'POST',
       headers: { authorization: `Bearer ${token}` },
       body: '{}',
@@ -68,14 +69,18 @@ describe('cloud credentials by handle: no secret reaches a model', () => {
     const { agent, p } = await platform();
     const both = await agent.cloud.fetchCredential({ account: 'a', role: 'r' });
     expect(both.kind === 'issued' && both.credential.accessKeyId).toBe('AKIAFAKEFAKEFAKE1234');
-    p.t.fake.on(
-      'POST',
-      `${p.issuer}/mcp/v1/cloud/credentials`,
-      () => new Response(JSON.stringify({ data: { approval_id: 'apr-1' } }), { status: 202 }),
-    );
-    expect(await agent.cloud.fetchCredential({ account: 'a', role: 'r' })).toEqual({
-      kind: 'approval_required',
-      approvalId: 'apr-1',
+    const held = await agent.cloud.fetchCredential({ account: 'a', role: 'held' });
+    expect(held).toEqual({ kind: 'approval_required', approvalId: 'apr-1' });
+    const retried = await agent.cloud.fetchCredential({ account: 'a', role: 'held', approvalId: 'apr-1' });
+    expect(retried.kind).toBe('issued');
+    expect(p.cloudCalls.at(-1)).toMatchObject({ role: 'held', _authfi_approval_id: 'apr-1' });
+  });
+
+  it('is refused with the ECLOUDCRED code the tool result names', async () => {
+    const { agent } = await platform();
+    await expect(agent.cloud.credentials({ account: 'a', role: 'forbidden' })).rejects.toMatchObject({
+      name: 'APIError',
+      code: 'ECLOUDCRED003',
     });
   });
 

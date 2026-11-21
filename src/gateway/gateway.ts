@@ -1,11 +1,11 @@
-import { ConfigurationError, GatewayTokenRefused, TransportError } from '../core/errors.js';
+import { APIError, ConfigurationError, GatewayTokenRefused, TransportError } from '../core/errors.js';
 import { isValidRequestId, isValidRunId, newRunId, requestId as newRequestId } from '../core/ids.js';
 import { apiErrorOf, dataOf } from '../core/oauth.js';
 import type { DPoPSigner } from '../core/dpop.js';
 import type { Core } from '../core/project.js';
 import { Secret } from '../core/secret.js';
 import { learnNonce, requireAllowedOrigin, type TokenSource } from '../core/token-source.js';
-import { contextOf, type OpenTelemetryApi } from '../core/transport.js';
+import { contextOf, jsonOf, type OpenTelemetryApi } from '../core/transport.js';
 import { SDK_VERSION } from '../core/version.js';
 import { recordDecision, type DecisionNames } from './decision-span.js';
 
@@ -156,10 +156,12 @@ export type ToolOutcome =
 /** The response header on which the gateway returns the run it derived from the token. */
 const RUN_HEADER = 'AuthFI-Run-Id';
 
-/** The cloud credential door, under the model routes. */
-const CLOUD_PATH = '/mcp/v1/cloud/credentials';
-/** The AI gateway's model routes: Anthropic Messages, OpenAI Chat Completions and Responses. */
-const MODEL_PATH = /^\/mcp\/v1\/(messages|chat\/completions|responses)\/?$/;
+/** The gateway's own tool that issues a cloud credential handle (the MCP door, `<issuer>/mcp`). */
+const CLOUD_TOOL = 'cloud.credentials';
+/** Where a handle's secret is redeemed, under the MCP door: `<issuer>/mcp` + this, with the handle in the path. */
+const CLOUD_SECRET_PATH = '/cloud/credentials';
+/** The LLM door's model routes: Anthropic Messages, OpenAI Chat Completions and Responses. */
+const MODEL_PATH = /^\/llm\/v1\/(messages|chat\/completions|responses)\/?$/;
 
 /** The longest credential the platform issues, in seconds. */
 const MAX_CLOUD_SECONDS = 900;
@@ -203,18 +205,34 @@ function textOf(result: ToolResult): string {
     .join('\n');
 }
 
+/** The handle in a `cloud.credentials` result: its `structuredContent`, else the JSON in its text. */
+function handleOf(result: ToolResult): Record<string, unknown> | undefined {
+  const structured = result.structuredContent;
+  if (typeof structured === 'object' && structured !== null) return structured as Record<string, unknown>;
+  try {
+    const parsed: unknown = JSON.parse(textOf(result));
+    return typeof parsed === 'object' && parsed !== null ? (parsed as Record<string, unknown>) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function str(value: unknown): string | undefined {
   return typeof value === 'string' && value !== '' ? value : undefined;
 }
 
 /**
- * The project's gateways for one credential: the MCP gateway (`<issuer>/mcp`) and the AI gateway's
- * model routes. Made by `agent.gateway()` or `delegatedToken.gateway()`.
+ * The project's two doors for one credential: the MCP door (`<issuer>/mcp`, tools and cloud credentials) and the
+ * LLM door (`<issuer>/llm`, model calls). A token is for one door: one minted for `/mcp` is refused on `/llm/v1`
+ * and the reverse, so the gateway holds a source for each and sends a request only the token of the door it
+ * goes to. Made by `agent.gateway()` or `delegatedToken.gateway()`.
  */
 export class Gateway {
   #cloud: CloudAccess | undefined;
   /** The MCP gateway endpoint, `<issuer>/mcp`. */
   readonly mcpUrl: string;
+  /** The LLM door, `<issuer>/llm`: the resource a model token is minted for, and the base URL of the Anthropic SDKs. */
+  readonly llmUrl: string;
   /** The agent the credential belongs to (its own, or the actor of a delegated token). */
   readonly agentId: string | undefined;
   /**
@@ -231,6 +249,7 @@ export class Gateway {
   #calls = 0;
   readonly #core: Core;
   readonly #source: TokenSource;
+  readonly #llm: TokenSource | undefined;
   readonly #origins: () => Promise<readonly string[]>;
 
   /** Use `agent.gateway()` or `delegatedToken.gateway()`. */
@@ -238,16 +257,23 @@ export class Gateway {
     core: Core,
     source: TokenSource,
     agentId: string | undefined,
-    options: { kind?: 'agent' | 'client_credentials'; runId?: string | undefined } = {},
+    options: {
+      kind?: 'agent' | 'client_credentials';
+      runId?: string | undefined;
+      /** The credential for the LLM door, minted for `<issuer>/llm`. Without it a model call is refused before it is sent. */
+      llm?: TokenSource | undefined;
+    } = {},
   ) {
     if (options.runId !== undefined && !isValidRunId(options.runId))
       throw new ConfigurationError('runId must be 1-96 of A-Z a-z 0-9 . _ : - (it prefixes X-Request-Id)');
     this.#core = core;
     this.#source = source;
+    this.#llm = options.llm;
     this.agentId = agentId;
     this.kind = options.kind ?? 'agent';
     this.runId = options.runId;
     this.mcpUrl = `${core.issuer}/mcp`;
+    this.llmUrl = `${core.issuer}/llm`;
     this.otlpTracesUrl = `${new URL(core.issuer).origin}/otlp/v1/traces`;
     this.#origins = () => core.ownOrigins();
   }
@@ -258,7 +284,20 @@ export class Gateway {
    * Without `runId` a fresh one is made.
    */
   forRun(runId: string = newRunId()): Gateway {
-    return new Gateway(this.#core, this.#source, this.agentId, { kind: this.kind, runId });
+    return new Gateway(this.#core, this.#source, this.agentId, { kind: this.kind, runId, llm: this.#llm });
+  }
+
+  /**
+   * The same gateway with `source` as the credential for model calls: a token minted for `llmUrl`
+   * (`agent.forResource(gateway.llmUrl)`, or a delegated token exchanged with that `resource`). It is never used for
+   * `/mcp`, and the `/mcp` credential is never used for `/llm`.
+   */
+  withLlmSource(source: TokenSource): Gateway {
+    return new Gateway(this.#core, this.#source, this.agentId, {
+      kind: this.kind,
+      runId: this.runId,
+      llm: source,
+    });
   }
 
   /** The `@opentelemetry/api` the project was given, which names the step a call is made from. */
@@ -275,11 +314,25 @@ export class Gateway {
   }
 
   /**
-   * The base URL to give a model provider's SDK: `<issuer>/mcp` for the Anthropic SDKs (they add
-   * `/v1/messages`), `<issuer>/mcp/v1` for OpenAI-compatible clients.
+   * The base URL to give a model provider's SDK: `<issuer>/llm` for the Anthropic SDKs (they add
+   * `/v1/messages`), `<issuer>/llm/v1` for OpenAI-compatible clients.
    */
   modelBaseUrl(api: 'anthropic' | 'openai'): string {
-    return api === 'anthropic' ? this.mcpUrl : `${this.mcpUrl}/v1`;
+    return api === 'anthropic' ? this.llmUrl : `${this.llmUrl}/v1`;
+  }
+
+  /** The credential for the door `url` is at: the LLM door's own, or the MCP one. Never the other door's. */
+  #sourceFor(url: string): TokenSource {
+    const u = new URL(url);
+    const at = `${u.origin}${u.pathname}`;
+    if (at !== this.llmUrl && !at.startsWith(`${this.llmUrl}/`)) return this.#source;
+    if (this.#llm === undefined) {
+      throw new ConfigurationError(
+        `${url} is on the LLM door, which takes a token minted for ${this.llmUrl}, and this credential has only the ` +
+          `${this.mcpUrl} one: the door refuses it. Use gateway.withLlmSource(<a token for ${this.llmUrl}>)`,
+      );
+    }
+    return this.#llm;
   }
 
   /** The grant object of a tool from `tools/list` (`mcp:<upstream>.<tool>`), or undefined without AuthFI's `_meta`. */
@@ -363,16 +416,17 @@ export class Gateway {
   readonly fetch: typeof fetch = async (input, init) => {
     const request = new Request(input, init);
     requireAllowedOrigin(request.url, await this.#origins());
+    const source = this.#sourceFor(request.url);
     // The key a token is bound to is known once the token is minted, so mint first: on a run's first call the
     // source has no key yet, and the server's nonce challenge would be passed on as a refused token.
-    await this.#source.token({ signal: request.signal });
-    const bound = this.#source.dpop;
+    await source.token({ signal: request.signal });
+    const bound = source.dpop;
     // A key-bound token is answered once more when the server asks for its nonce.
     const again = bound === undefined ? undefined : request.clone();
-    let sent = await this.#send(request);
-    const key = this.#source.dpop;
+    let sent = await this.#send(request, source);
+    const key = source.dpop;
     if (key !== undefined && again !== undefined && (await learnNonce(key, request.url, sent.res))) {
-      sent = await this.#send(again);
+      sent = await this.#send(again, source);
     }
     const { res, headers } = sent;
     const answeredRun = res.headers.get(RUN_HEADER);
@@ -399,14 +453,13 @@ export class Gateway {
     if (!MODEL_PATH.test(new URL(url).pathname) || headers.has('dpop')) return;
     this.#core.warnOnce(
       'model-call-unproven',
-      `a model call to ${this.mcpUrl} carries a Bearer token and no DPoP proof; the AI gateway refuses such a call once its proof check (MCP_MODEL_PROOF_CHECK) is enforced, unless the workload is caged. Use a credential bound to this process's key (an agent with dpop on, or an attested instance).`,
+      `a model call to ${this.llmUrl} carries a Bearer token and no DPoP proof; the AI gateway refuses such a call once its proof check (MCP_MODEL_PROOF_CHECK) is enforced, unless the workload is caged. Use a credential bound to this process's key (an agent with dpop on, or an attested instance).`,
     );
   }
 
-  async #send(request: Request): Promise<{ res: Response; headers: Headers }> {
+  async #send(request: Request, source: TokenSource): Promise<{ res: Response; headers: Headers }> {
     const headers = new Headers(request.headers);
-    for (const [k, v] of Object.entries(await this.#source.headers(request.method, request.url)))
-      headers.set(k, v);
+    for (const [k, v] of Object.entries(await source.headers(request.method, request.url))) headers.set(k, v);
     const given = headers.get('x-request-id');
     if (given === null || !isValidRequestId(given))
       headers.set(
@@ -429,7 +482,7 @@ export class Gateway {
     return this.#cloud;
   }
 
-  /** The credential and the key it is bound to, for a request this class sends through the transport. */
+  /** The MCP credential and the key it is bound to, for a request this class sends through the transport. */
   async #authed(url: string): Promise<{
     headers: Record<string, string>;
     dpop: { signer: DPoPSigner; accessToken: Secret } | undefined;
@@ -444,10 +497,10 @@ export class Gateway {
   }
 
   /**
-   * Fetches a cloud credential's secret, once (`POST /mcp/v1/cloud/credentials/{credential_id}/secret`).
-   * Only the instance the handle was issued to can do it, proven by the token's key: a handle read by
-   * anyone else is no use. A second fetch is refused (`ECLOUDCRED014`), and so is one after the credential
-   * expired. This is for the runtime that calls the cloud, never for a tool result a model reads.
+   * Fetches a cloud credential's secret, once (`POST <issuer>/mcp/cloud/credentials/{credential_id}/secret`, on the
+   * MCP door, so with the MCP token). Only the instance the handle was issued to can do it, proven by the token's
+   * key: a handle read by anyone else is no use. A second fetch is refused (`ECLOUDCRED014`), and so is one after
+   * the credential expired. This is for the runtime that calls the cloud, never for a tool result a model reads.
    */
   async cloudSecret(
     credentialId: string,
@@ -455,7 +508,7 @@ export class Gateway {
   ): Promise<CloudCredential> {
     if (typeof credentialId !== 'string' || credentialId.trim() === '')
       throw new ConfigurationError('credentialId is required: the handle the gateway issued');
-    const url = `${await this.#core.apiOrigin(options.signal)}${CLOUD_PATH}/${encodeURIComponent(credentialId)}/secret`;
+    const url = `${this.mcpUrl}${CLOUD_SECRET_PATH}/${encodeURIComponent(credentialId)}/secret`;
     const { headers, dpop } = await this.#authed(url);
     const res = await this.#core.transport.send({
       method: 'POST',
@@ -495,11 +548,12 @@ export class Gateway {
   }
 
   /**
-   * Asks the gateway for a short-lived cloud credential for a role (`POST /mcp/v1/cloud/credentials`). The
-   * answer is a handle (`credentialId`, `account`, `role`, `expiresAt`, `scope`), never the secret: fetch
-   * that with {@link Gateway.cloudSecret}. A role that needs a person's approval answers
-   * `approval_required` with an approval id; call again with `approvalId` once they decided. A refusal is
-   * an `APIError` with the gateway's code.
+   * Asks the gateway for a short-lived cloud credential: a JSON-RPC `tools/call` of `cloud.credentials` on
+   * `<issuer>/mcp`, the same governed tool a model would call. The answer is a handle (`credentialId`, `account`,
+   * `role`, `expiresAt`, `scope`), never the secret: fetch that with {@link Gateway.cloudSecret}. A role that needs
+   * a person's approval answers `approval_required` with an approval id; call again with `approvalId` once they
+   * decided. A refusal is an `APIError` with the gateway's code. The call is sent once and never retried: a retry
+   * after it was sent could issue a second credential.
    */
   async cloudCredentials(request: {
     account: string;
@@ -516,50 +570,56 @@ export class Gateway {
         `expiresInSeconds must be a whole number of seconds from 1 to ${MAX_CLOUD_SECONDS}, the platform's limit`,
       );
     }
-    const url = `${await this.#core.apiOrigin(request.signal)}${CLOUD_PATH}`;
+    const url = this.mcpUrl;
     const { headers, dpop } = await this.#authed(url);
     const res = await this.#core.transport.send({
       method: 'POST',
       url,
       retry: 'unsafe',
       signal: request.signal,
-      headers: { ...headers, 'content-type': 'application/json' },
+      headers: { ...headers, 'content-type': 'application/json', accept: 'application/json' },
       body: JSON.stringify({
-        account: request.account,
-        role: request.role,
-        duration_seconds: request.expiresInSeconds ?? 900,
-        session_policy: request.sessionPolicy,
-        approval_id: request.approvalId,
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: {
+          name: CLOUD_TOOL,
+          arguments: {
+            account: request.account,
+            role: request.role,
+            duration_seconds: request.expiresInSeconds ?? MAX_CLOUD_SECONDS,
+            session_policy: request.sessionPolicy,
+            [APPROVAL_ARGUMENT]: request.approvalId,
+          },
+        },
       }),
       ...(dpop === undefined ? {} : { dpop }),
     });
     if (res.status === 401) throw new GatewayTokenRefused('the gateway refused the token', contextOf(res));
-    if (res.status === 202) {
-      const data = dataOf(res) as { approval_id?: unknown } | null;
-      const approvalId = str(data?.approval_id);
-      if (approvalId === undefined)
-        throw new TransportError('response_invalid', `${url} answered 202 with no approval id`, {
-          ...contextOf(res),
-          retryable: false,
-        });
-      return { kind: 'approval_required', approvalId };
+    if (res.status !== 200) throw apiErrorOf(res);
+    const rpc = jsonOf(res) as
+      { result?: unknown; error?: { code?: unknown; message?: unknown } } | undefined;
+    if (rpc?.error !== undefined) {
+      throw new APIError(
+        `jsonrpc_${String(rpc.error.code)}`,
+        typeof rpc.error.message === 'string' ? rpc.error.message : undefined,
+        contextOf(res),
+      );
     }
-    if (res.status !== 201) {
-      if (res.status >= 200 && res.status < 300) {
-        throw new TransportError(
-          'response_invalid',
-          `${url} answered ${res.status}; only 201 or 202 mean a credential was issued`,
-          {
-            ...contextOf(res),
-            retryable: false,
-          },
-        );
-      }
-      throw apiErrorOf(res);
+    if (typeof rpc?.result !== 'object' || rpc.result === null)
+      throw new TransportError('response_invalid', `${url} answered no tool result`, {
+        ...contextOf(res),
+        retryable: false,
+      });
+    const outcome = this.#read(rpc.result);
+    if (outcome.kind === 'approval_required')
+      return { kind: 'approval_required', approvalId: outcome.approvalId };
+    if (outcome.kind === 'refused') {
+      throw new APIError(outcome.code ?? outcome.error ?? 'refused', outcome.reason, contextOf(res));
     }
-    const c = dataOf(res) as Record<string, unknown> | null;
+    const c = handleOf(outcome.result);
     const credentialId = str(c?.credential_id);
-    if (c === null || credentialId === undefined)
+    if (c === undefined || credentialId === undefined)
       throw new TransportError('response_invalid', `${url} answered no credential handle`, {
         ...contextOf(res),
         retryable: false,

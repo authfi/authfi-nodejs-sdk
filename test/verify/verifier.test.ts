@@ -248,6 +248,8 @@ describe('the audience', () => {
     [ISSUER],
     [`${ISSUER}/mcp`],
     [`${ISSUER}/mcp/v1`],
+    [`${ISSUER}/llm`],
+    [`${ISSUER}/llm/v1`],
     ['https://api.acme.example/x'],
     ['authfi-console'],
     ['authfi-workspace'],

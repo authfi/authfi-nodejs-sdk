@@ -1212,9 +1212,15 @@ export class AgentAuth extends BaseTokenSource {
     }
   }
 
-  /** The project's MCP and AI gateways, with this agent's own token. */
+  /**
+   * The project's MCP and LLM doors, with this agent's own tokens: the `<issuer>/mcp` one for tools and cloud
+   * credentials, and a second for `<issuer>/llm` (one resource per token), cached apart and bound to the same key
+   * so the run stays one.
+   */
   gateway(): Gateway {
-    this.#gateway ??= new Gateway(this.#core, this, this.agentId);
+    this.#gateway ??= new Gateway(this.#core, this, this.agentId, {
+      llm: this.forResource(`${this.#af.issuer}/llm`),
+    });
     return this.#gateway;
   }
 

@@ -561,7 +561,7 @@ export class TokenVerifier implements Verifier {
 
 /**
  * Refuses an audience that is AuthFI's own: the issuer, the API origin, any URL under either (the
- * gateway's `<issuer>/mcp` among them), or a first-party client. Accepting one would let a token
+ * gateway's `<issuer>/mcp` and `<issuer>/llm` among them), or a first-party client. Accepting one would let a token
  * minted for the gateway, or for the console, be replayed at your API.
  */
 function refuseOwnAudience(audience: string, own: readonly string[]): void {

@@ -178,7 +178,7 @@ describe('a held call', () => {
 describe('the clients the adapter builds', () => {
   it('point an OpenAI client at the project, with a placeholder key replaced by the credential', async () => {
     const t = await setup(STRUCTURE);
-    expect(t.authfi.openai()).toMatchObject({ baseURL: `${t.as.issuer}/mcp/v1`, apiKey: 'authfi' });
+    expect(t.authfi.openai()).toMatchObject({ baseURL: `${t.as.issuer}/llm/v1`, apiKey: 'authfi' });
     expect(t.authfi.mcpServerOptions('x')).toMatchObject({ name: 'x', url: `${t.as.issuer}/mcp` });
   });
 

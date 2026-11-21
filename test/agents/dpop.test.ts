@@ -35,7 +35,7 @@ describe("DPoP: the agent's tokens are bound to this process's key", () => {
 
   it('headers() gives a fresh proof for the method and URL asked for', async () => {
     const { agent, p } = await platform();
-    const url = `${p.issuer}/mcp/v1/messages`;
+    const url = `${p.issuer}/llm/v1/messages`;
     const h = await agent.headers('POST', url);
     expect(h.authorization).toMatch(/^DPoP eyJ/);
     const claims = decodeJwt(h.dpop!);
@@ -62,7 +62,7 @@ describe("DPoP: the agent's tokens are bound to this process's key", () => {
     expect(p.refusals.at(-1)).toContain('jti replayed');
 
     // a proof for another URL
-    const other = await agent.headers('POST', `${p.issuer}/mcp/v1/messages`);
+    const other = await agent.headers('POST', `${p.issuer}/llm/v1/messages`);
     expect((await send(other)).status).toBe(401);
     expect(p.refusals.at(-1)).toContain('htu');
 
@@ -89,9 +89,14 @@ describe("DPoP: the agent's tokens are bound to this process's key", () => {
     const res = await agent.gateway().fetch(mcp(p), { method: 'POST', body: call('billing__lookup') });
     expect(res.status).toBe(200);
     expect(p.t.fake.to(mcp(p))).toHaveLength(2);
+    // the issue call is a tools/call on /mcp: when the server moves its nonce on, it answers the new one once
+    p.nonce = { ...p.nonce, gateway: 'gn2' };
     const out = await agent.gateway().cloudCredentials({ account: 'acct', role: 'reader' });
     expect(out.kind).toBe('issued');
-    expect(p.t.fake.to(`${p.issuer}/mcp/v1/cloud/credentials`)).toHaveLength(2);
+    expect(p.t.fake.to(mcp(p)).filter((r) => r.body.includes('cloud.credentials'))).toHaveLength(2);
+    // the redeem is on the MCP door too, with its own nonce
+    if (out.kind === 'issued') await agent.gateway().cloudSecret(out.handle.credentialId);
+    expect(p.t.fake.to(`${p.issuer}/mcp/cloud/credentials/cred_1/secret`)).toHaveLength(2);
     expect(af).toBeDefined();
   });
 

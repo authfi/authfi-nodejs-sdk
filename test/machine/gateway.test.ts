@@ -45,6 +45,18 @@ describe('a client-credentials token as a gateway source', () => {
     expect(warns).toHaveLength(before);
   });
 
+  it('mints a second token with resource <issuer>/llm for a model call, and keeps each door to its own', async () => {
+    const { t, m2m } = await setup();
+    t.fake.on('POST', `${ISSUER}/llm/v1/messages`, () => json({ type: 'message' }));
+    const gateway = m2m.gateway();
+    await gateway.fetch(gateway.mcpUrl, { method: 'POST', body: '{}' });
+    await gateway.fetch(`${gateway.modelBaseUrl('anthropic')}/v1/messages`, { method: 'POST', body: '{}' });
+    const mints = t.fake.to(`${ISSUER}/oauth/token`).map((r) => new URLSearchParams(r.body).get('resource'));
+    expect(mints).toEqual([`${ISSUER}/mcp`, `${ISSUER}/llm`]);
+    expect(t.fake.to(`${ISSUER}/mcp`)[0]!.headers.get('authorization')).toBe('Bearer at-1');
+    expect(t.fake.to(`${ISSUER}/llm/v1/messages`)[0]!.headers.get('authorization')).toBe('Bearer at-2');
+  });
+
   it('does not change the credential for other APIs, and the gateway is one object', async () => {
     const { m2m } = await setup();
     expect(m2m.gateway()).toBe(m2m.gateway());

@@ -127,7 +127,10 @@ export class DelegatedToken extends BaseTokenSource {
     return res.accessToken.reveal();
   }
 
-  /** The project's MCP and AI gateways, acting for the person with this token. */
+  /**
+   * The project's MCP and LLM gateways, acting for the person with this token. The token goes to the door it was
+   * minted for; give model calls a token for `<issuer>/llm` with `gateway.withLlmSource()`.
+   */
   gateway(): Gateway {
     this.#gateway ??= new Gateway(this.#core, this, this.actor?.id);
     return this.#gateway;

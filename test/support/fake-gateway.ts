@@ -93,7 +93,7 @@ export class FakeGateway {
 
   constructor(readonly as: FakeAS) {
     as.t.fake.on('POST', `${as.issuer}/mcp`, (r) => this.#mcp(r));
-    as.t.fake.on('POST', `${as.issuer}/mcp/v1/messages`, (r) => this.#model(r));
+    as.t.fake.on('POST', `${as.issuer}/llm/v1/messages`, (r) => this.#model(r));
     as.t.fake.on('GET', `${as.issuer}/mcp`, () => new Response(null, { status: 405 }));
     as.t.fake.on('DELETE', `${as.issuer}/mcp`, () => new Response(null, { status: 405 }));
   }
@@ -129,11 +129,16 @@ export class FakeGateway {
     return JSON.stringify(this.modelRequests.map((r) => r.body));
   }
 
-  #authorized(h: Headers): boolean {
+  /** The platform's wrong-door rule: a token names one door, and `/llm` takes only a token naming `/llm`. */
+  #authorized(h: Headers, door: 'mcp' | 'llm'): boolean {
     const auth = h.get('authorization') ?? '';
     if (!auth.startsWith('Bearer ') || this.revoked) return false;
     try {
       const claims = decodeJwt(auth.slice(7));
+      const aud = ([] as unknown[]).concat(claims.aud ?? []);
+      const llm = aud.includes(`${this.as.issuer}/llm`);
+      const mcp = aud.includes(`${this.as.issuer}/mcp`);
+      if (door === 'llm' ? !llm || mcp : llm) return false;
       return claims.iss === this.as.issuer && (claims.exp ?? 0) > Date.now() / 1000;
     } catch {
       return false;
@@ -161,7 +166,7 @@ export class FakeGateway {
       apiKey: r.headers.get('x-api-key'),
     });
     const echo = this.#echo(r);
-    if (!this.#authorized(r.headers)) {
+    if (!this.#authorized(r.headers, 'mcp')) {
       return json({ error: 'invalid_token' }, 401, {
         'www-authenticate': 'Bearer error="invalid_token"',
         ...echo,
@@ -260,7 +265,7 @@ export class FakeGateway {
       traceparent: r.headers.get('traceparent'),
     });
     const echo = this.#echo(r);
-    if (!this.#authorized(r.headers))
+    if (!this.#authorized(r.headers, 'llm'))
       return json(
         { type: 'error', error: { type: 'authentication_error', message: 'invalid token' } },
         401,
