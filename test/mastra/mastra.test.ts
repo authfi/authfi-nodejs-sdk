@@ -9,7 +9,8 @@ import { MCPClient } from '@mastra/mcp';
 import { simulateReadableStream } from 'ai';
 import { MockLanguageModelV4 } from 'ai/test';
 import { describe, expect, it } from 'vitest';
-import { createMastra, HOLD_MESSAGE } from '../../src/mastra/index.js';
+import { ApprovalPollRefused, GatewayTokenRefused } from '../../src/core/errors.js';
+import { createMastra, HOLD_MESSAGE, type MastraOptions } from '../../src/mastra/index.js';
 import { setupGateway } from '../support/adapter-setup.js';
 import { CONTENTS, QUESTION, STRUCTURE } from '../support/fake-gateway.js';
 
@@ -19,13 +20,14 @@ interface MastraTool {
   requireApproval?: boolean;
 }
 
-async function setup() {
+async function setup(options: Partial<MastraOptions> = {}) {
   const s = await setupGateway();
   const authfi = createMastra({
     source: s.agent,
     pollIntervalMs: 100,
     logger: s.logger,
     runId: 'run-1',
+    ...options,
   });
   const mcp = new MCPClient({ id: `t-${Math.random()}`, servers: { authfi: authfi.mcpServer() } });
   const tools = authfi.tools(await mcp.listTools()) as Record<string, MastraTool>;
@@ -246,5 +248,99 @@ describe('in a Mastra agent', () => {
     expect(t.gw.executed).toHaveLength(0);
     expect(t.gw.approvals.size).toBe(1);
     await t.mcp.disconnect();
+  });
+});
+
+describe('waiting for AuthFI inside the tool', () => {
+  it('continues by itself when AuthFI approves: no approval is asked of the app, the call runs once', async () => {
+    const t = await setup({ waitInTool: true });
+    setTimeout(() => t.gw.decide(t.gw.pending()[0]!, 'approved'), 300);
+    const s = await step(t, CONTENTS);
+    expect(s.approval).toBe(false);
+    expect(said(await s.run())).toContain('1 Overview');
+    expect(t.gw.executed).toHaveLength(1);
+    expect(t.gw.approvals.size).toBe(1);
+    await t.mcp.disconnect();
+  });
+
+  it('answers the refusal when AuthFI denies, and "waiting" when nobody decides in time', async () => {
+    const t = await setup({ waitInTool: true, approvalTimeoutMs: 450 });
+    const s = await step(t, CONTENTS);
+    expect(said(await s.run())).toBe(HOLD_MESSAGE);
+    const t2 = await setup({ waitInTool: true });
+    setTimeout(() => t2.gw.decide(t2.gw.pending()[0]!, 'denied'), 300);
+    const d = await step(t2, CONTENTS);
+    expect(said(await d.run())).toContain('Refused');
+    expect(t.gw.executed.length + t2.gw.executed.length).toBe(0);
+    await t.mcp.disconnect();
+    await t2.mcp.disconnect();
+  });
+
+  it('polls the approval route with the agent own token and asks the gateway only to release the call', async () => {
+    const t = await setup({ waitInTool: true, approvalPoll: true });
+    setTimeout(() => t.gw.decide(t.gw.pending()[0]!, 'approved'), 450);
+    const s = await step(t, CONTENTS);
+    expect(said(await s.run())).toContain('1 Overview');
+    expect(t.as.approvalPolls).toBeGreaterThanOrEqual(3);
+    expect(t.gw.toolCalls()).toHaveLength(2);
+    await t.mcp.disconnect();
+  });
+});
+
+describe('a revoked agent while a person is being waited on', () => {
+  it('ends the wait at once with GatewayTokenRefused, or ApprovalPollRefused when the approval route is polled', async () => {
+    const t = await setup({ approvalTimeoutMs: 60_000 });
+    await step(t, CONTENTS);
+    t.gw.revoked = true;
+    await expect(t.authfi.awaitApprovals()).rejects.toBeInstanceOf(GatewayTokenRefused);
+    const p = await setup({ approvalTimeoutMs: 60_000, approvalPoll: true });
+    await step(p, CONTENTS);
+    p.gw.revoked = true;
+    await expect(p.authfi.awaitApprovals()).rejects.toBeInstanceOf(ApprovalPollRefused);
+    await t.mcp.disconnect();
+    await p.mcp.disconnect();
+  });
+});
+
+describe('a restarted process', () => {
+  async function restarted(t: Setup) {
+    const authfi = createMastra({ source: t.agent, pollIntervalMs: 100, logger: t.logger, runId: 'run-2' });
+    const mcp = new MCPClient({ id: `t-${Math.random()}`, servers: { authfi: authfi.mcpServer() } });
+    const tools = authfi.tools(await mcp.listTools()) as Record<string, MastraTool>;
+    // What the app kept beside Mastra's suspended run, through JSON as a database would.
+    authfi.restorePending(JSON.parse(JSON.stringify(t.authfi.pendingApprovals())) as never);
+    return { authfi, tools, mcp };
+  }
+
+  it('resumes the suspended call with the approval id and opens no second approval', async () => {
+    const t = await setup();
+    await step(t, CONTENTS);
+    const approvalId = t.gw.pending()[0]!;
+    const next = await restarted(t);
+    t.gw.decide(approvalId, 'approved');
+    expect([...(await next.authfi.awaitApprovals()).values()]).toEqual(['approved']);
+    const resumed = await next.tools[name(CONTENTS)]!.needsApprovalFn!(ARGS, { toolCallId: 'call_1' });
+    expect(resumed).toBe(false);
+    const r = await next.tools[name(CONTENTS)]!.execute(ARGS, { toolCallId: 'call_1' });
+    expect(said(r)).toContain('1 Overview');
+    expect(t.gw.approvals.size).toBe(1);
+    expect(t.gw.executed).toHaveLength(1);
+    expect(t.gw.toolCalls().at(-1)!.args).toMatchObject({ _authfi_approval_id: approvalId });
+    await t.mcp.disconnect();
+    await next.mcp.disconnect();
+  });
+
+  it('is told, structurally, to raise the call again when the gateway binds the approval to another run', async () => {
+    const t = await setup();
+    await step(t, CONTENTS);
+    const next = await restarted(t);
+    t.gw.decide(t.gw.pending()[0]!, 'approved');
+    t.gw.otherRun = true;
+    expect([...(await next.authfi.awaitApprovals()).values()]).toEqual(['raise_again']);
+    const r = await next.tools[name(CONTENTS)]!.execute(ARGS, { toolCallId: 'call_1' });
+    expect(said(r)).toContain('Raise the call again');
+    expect(t.gw.executed).toHaveLength(0);
+    await t.mcp.disconnect();
+    await next.mcp.disconnect();
   });
 });

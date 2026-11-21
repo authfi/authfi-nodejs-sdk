@@ -22,6 +22,7 @@ import {
   RunGateway,
   type AdapterOptions,
   type Decision,
+  type PendingApproval,
 } from '../adapters/shared.js';
 import { APPROVAL_ARGUMENT, HOLD_MESSAGE, type ToolResult } from '../gateway/gateway.js';
 
@@ -126,6 +127,11 @@ export class MastraAdapter {
         const seen = this.#guard.entry(id) !== undefined;
         const entry = await this.#guard.begin(id, name, input, ctx?.abortSignal, ctx);
         if (entry.status !== 'pending') return false;
+        if (this.#run.waitInTool) {
+          // Waits here for AuthFI's decision and lets the tool answer it: the run is not suspended for the app.
+          await this.#guard.settle(id, ctx?.abortSignal);
+          return false;
+        }
         return seen ? (await this.#guard.decision(id, ctx?.abortSignal)) === 'pending' : true;
       };
       const wrapped = async (input: unknown, ctx?: MastraContextLike): Promise<unknown> => {
@@ -148,8 +154,17 @@ export class MastraAdapter {
   }
 
   /** The calls that wait on a person's approval in AuthFI. */
-  pendingApprovals(): { id: string; tool: string; approvalId: string }[] {
+  pendingApprovals(): PendingApproval[] {
     return this.#guard.pending();
+  }
+
+  /**
+   * Remembers calls a person was asked about by another process, from what {@link MastraAdapter.pendingApprovals} returned
+   * there and the app kept beside the framework's saved state, so a resumed run asks about the same approval and
+   * opens no second one.
+   */
+  restorePending(pending: readonly PendingApproval[]): void {
+    this.#guard.restore(pending);
   }
 
   /**

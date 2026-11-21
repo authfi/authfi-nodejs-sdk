@@ -13,6 +13,25 @@ All notable changes to this package. It follows [Semantic Versioning](https://se
   two events sharing a request, a replayed event and an event without a request id. They are written by
   `scripts/gen-webhook-vectors.mjs` (`npm run check:webhook-vectors` checks the file).
 
+- **`waitInTool` on the four adapters.** The tool waits for AuthFI's decision itself (bounded by
+  `approvalTimeoutMs`) and the run continues with no pause for the app: Mastra and OpenAI Agents answer `needsApproval`
+  with false after the wait, Vercel AI answers `not-applicable`, LangChain skips `interrupt()`. Approved, the call is
+  made once with the approval; denied or expired, the model reads the refusal; undecided at the timeout, it reads
+  "waiting", never a run.
+- **`approvalPoll` on the four adapters.** A held call's approval is read on `GET /v1/ai/auth/approvals/{id}` with the
+  agent's own token (DPoP where bound), and the gateway is asked once, when the person has decided, to release or
+  refuse the call. `source` must be an `AgentAuth`; a delegated token is a `ConfigurationError`. A 401, 403 or 404
+  ends the wait at once with the new `ApprovalPollRefused` (`status`, `approvalId`).
+- **Restart and resume.** `pendingApprovals()` now carries each call's `input`, and `restorePending()` (OpenAI Agents,
+  Mastra) remembers calls from another process so the resumed run asks about the same approval. LangChain puts
+  `callId` and `input` in the interrupt value and `adoptInterrupts()` reads them back from the checkpoint, so the id
+  lives only in LangGraph's state.
+- **Another run's approval.** When the project binds approvals to the run, the gateway refuses a restarted process with
+  "approval was raised by another run of this agent". It is now a refusal with `why: 'approval_other_run'` and a next
+  step to raise the call again, and `awaitApprovals` reports it as the new decision `raise_again`.
+- **`langchain.toolNode(tools)`** ends the run with `GatewayTokenRefused` (or `ApprovalPollRefused`) when AuthFI refuses
+  the agent's token, as the other three adapters do; `adapter.ended` names the error for `createAgent`.
+
 ### Fixed
 
 - **A call that needs the person to connect an account** (the gateway's `io.authfi/auth` answer) was read as an

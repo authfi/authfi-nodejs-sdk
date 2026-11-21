@@ -26,6 +26,7 @@ import {
   textOf,
   type AdapterOptions,
   type Decision,
+  type PendingApproval,
 } from '../adapters/shared.js';
 import { APPROVAL_ARGUMENT, HOLD_MESSAGE, type ToolResult } from '../gateway/gateway.js';
 
@@ -56,6 +57,8 @@ export interface RunStateLike {
 
 const DENIED_MESSAGE = 'A person did not approve this action in AuthFI.';
 const PENDING_MESSAGE = 'This action has not been approved in AuthFI yet.';
+const RAISE_AGAIN_MESSAGE =
+  "The person's approval belongs to another run and cannot be used here. Ask for the call again.";
 
 /**
  * The adapter for one agent run on the OpenAI Agents SDK for JavaScript. Build one per run with
@@ -127,6 +130,11 @@ export class OpenAIAgentsAdapter {
             const seen = this.#guard.entry(id) !== undefined;
             const entry = await this.#guard.begin(id, key, input);
             if (entry.status !== 'pending') return false;
+            if (this.#run.waitInTool) {
+              // Waits here for AuthFI's decision and lets the tool answer it: no interruption for the app to resume.
+              await this.#guard.settle(id);
+              return false;
+            }
             return seen ? (await this.#guard.decision(id)) === 'pending' : true;
           },
           execute: async (
@@ -144,8 +152,17 @@ export class OpenAIAgentsAdapter {
   }
 
   /** The calls that wait on a person's approval in AuthFI. */
-  pendingApprovals(): { id: string; tool: string; approvalId: string }[] {
+  pendingApprovals(): PendingApproval[] {
     return this.#guard.pending();
+  }
+
+  /**
+   * Remembers calls a person was asked about by another process, from what {@link OpenAIAgentsAdapter.pendingApprovals} returned
+   * there and the app kept beside the framework's saved state, so a resumed run asks about the same approval and
+   * opens no second one.
+   */
+  restorePending(pending: readonly PendingApproval[]): void {
+    this.#guard.restore(pending);
   }
 
   /**
@@ -171,7 +188,14 @@ export class OpenAIAgentsAdapter {
       const decision = id === undefined ? undefined : decisions.get(id);
       if (decision === 'approved') state.approve(item as never);
       else
-        state.reject(item as never, { message: decision === 'pending' ? PENDING_MESSAGE : DENIED_MESSAGE });
+        state.reject(item as never, {
+          message:
+            decision === 'pending'
+              ? PENDING_MESSAGE
+              : decision === 'raise_again'
+                ? RAISE_AGAIN_MESSAGE
+                : DENIED_MESSAGE,
+        });
     }
     return decisions;
   }

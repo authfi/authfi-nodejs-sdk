@@ -17,6 +17,7 @@ export type { OpenTelemetryApi } from './core/transport.js';
 export { KERNEL_CODES_REF, KERNEL_TOKEN_CODES, type KernelTokenCode } from './core/codes.js';
 export {
   APIError,
+  ApprovalPollRefused,
   AuthFIError,
   ConfigurationError,
   ConsentDenied,

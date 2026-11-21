@@ -16,6 +16,7 @@ import { generateText, registerTelemetry, stepCountIs, type ModelMessage, type T
 import { beforeAll, describe, expect, it } from 'vitest';
 import { AgentKey } from '../../src/agents/agent-key.js';
 import { AuthFI } from '../../src/core/project.js';
+import { ApprovalPollRefused, GatewayTokenRefused } from '../../src/core/errors.js';
 import { Secret } from '../../src/core/secret.js';
 import { createVercelAI, HOLD_MESSAGE, type VercelAIOptions } from '../../src/vercel-ai/index.js';
 import { AGENT_ID, FakeAS } from '../support/fake-as.js';
@@ -449,5 +450,68 @@ describe('settings', () => {
     expect(t.authfi.remembered).toBe(2);
     expect(await t.authfi.approvalFor(STRUCTURE)({ repoName: 'x' }, {})).toEqual({ type: 'not-applicable' });
     expect(() => t.authfi.tools({ x: {} } as never)).toThrow('no execute function');
+  });
+});
+
+describe('waiting for AuthFI inside the tool', () => {
+  const ask = [{ role: 'user', content: 'Read the wiki of pallets/itsdangerous.' }] as ModelMessage[];
+
+  it('continues by itself when AuthFI approves: no approval request for the app, the call made once', async () => {
+    const t = await setup({ waitInTool: true });
+    setTimeout(() => t.gw.decide(t.gw.pending()[0]!, 'approved'), 300);
+    const result = await generate(t, CONTENTS, [...ask]);
+    expect(t.authfi.pendingApprovals(result)).toHaveLength(0);
+    expect(t.gw.executed).toHaveLength(1);
+    expect(t.gw.approvals.size).toBe(1);
+    expect(t.gw.everythingTheModelSaw()).not.toContain('Waiting for approval');
+  });
+
+  it('tells the model the refusal when AuthFI denies, and "waiting" when nobody decides in time', async () => {
+    const t = await setup({ waitInTool: true });
+    setTimeout(() => t.gw.decide(t.gw.pending()[0]!, 'denied'), 300);
+    await generate(t, CONTENTS, [...ask]);
+    expect(t.gw.lastToolResult()).toContain('Refused');
+    const slow = await setup({ waitInTool: true, approvalTimeoutMs: 450 });
+    await generate(slow, CONTENTS, [...ask]);
+    expect(slow.gw.lastToolResult()).toBe(HOLD_MESSAGE);
+    expect(t.gw.executed.length + slow.gw.executed.length).toBe(0);
+  });
+
+  it('polls the approval route with the agent own token and asks the gateway only to release the call', async () => {
+    const t = await setup({ waitInTool: true, approvalPoll: true });
+    setTimeout(() => t.gw.decide(t.gw.pending()[0]!, 'approved'), 450);
+    await generate(t, CONTENTS, [...ask]);
+    expect(t.as.approvalPolls).toBeGreaterThanOrEqual(3);
+    expect(t.gw.toolCalls()).toHaveLength(2);
+    expect(t.gw.executed).toHaveLength(1);
+  });
+});
+
+describe('a person being waited on', () => {
+  it('ends the wait at once when the agent is revoked: GatewayTokenRefused, or ApprovalPollRefused on the approval route', async () => {
+    const t = await setup({ approvalTimeoutMs: 60_000 });
+    const held = await untilHold(t);
+    t.gw.revoked = true;
+    await expect(t.authfi.awaitApprovals(held.result)).rejects.toBeInstanceOf(GatewayTokenRefused);
+    const p = await setup({ approvalTimeoutMs: 60_000, approvalPoll: true });
+    const heldP = await untilHold(p);
+    p.gw.revoked = true;
+    await expect(p.authfi.awaitApprovals(heldP.result)).rejects.toBeInstanceOf(ApprovalPollRefused);
+  });
+
+  it('is told, structurally, to ask again when another process raised the approval and the project binds it to the run', async () => {
+    const t = await setup();
+    const { result, messages } = await untilHold(t);
+    t.gw.decide(t.gw.pending()[0]!, 'approved');
+    t.gw.otherRun = true;
+    const other = createVercelAI({ source: t.agent, approvalSecret: SECRET, pollIntervalMs: 100 });
+    const otherTools = other.tools(
+      await (await createMCPClient({ transport: other.mcpTransport() })).tools(),
+    );
+    const answer = await other.awaitApprovals(result);
+    expect(answer.content[0]).toMatchObject({ approved: false });
+    expect(answer.content[0]?.reason).toMatch(/another run.*Ask for the call again/);
+    await generate({ ...t, tools: otherTools }, CONTENTS, [...messages, answer], other);
+    expect(t.gw.executed).toHaveLength(0);
   });
 });

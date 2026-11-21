@@ -6,6 +6,7 @@ import {
   Agent,
   MCPServerStreamableHttp,
   run,
+  RunState,
   setTracingDisabled,
   Usage,
   type Model,
@@ -13,7 +14,8 @@ import {
   type ModelResponse,
 } from '@openai/agents';
 import { beforeAll, describe, expect, it } from 'vitest';
-import { createOpenAIAgents, HOLD_MESSAGE } from '../../src/openai-agents/index.js';
+import { ApprovalPollRefused, ConfigurationError, GatewayTokenRefused } from '../../src/core/errors.js';
+import { createOpenAIAgents, HOLD_MESSAGE, type OpenAIAgentsOptions } from '../../src/openai-agents/index.js';
 import { setupGateway } from '../support/adapter-setup.js';
 import { CONTENTS, QUESTION, STRUCTURE } from '../support/fake-gateway.js';
 
@@ -67,19 +69,24 @@ class ScriptedModel implements Model {
   }
 }
 
-async function setup(tool: string, args: Record<string, unknown> = { repoName: 'pallets/itsdangerous' }) {
+async function setup(
+  tool: string,
+  args: Record<string, unknown> = { repoName: 'pallets/itsdangerous' },
+  options: Partial<OpenAIAgentsOptions> = {},
+) {
   const s = await setupGateway();
   const authfi = createOpenAIAgents({
     source: s.agent,
     pollIntervalMs: 100,
     logger: s.logger,
     runId: 'run-1',
+    ...options,
   });
   const server = new MCPServerStreamableHttp(authfi.mcpServerOptions());
   await server.connect();
   const model = new ScriptedModel(tool, args);
   const agent = new Agent({ name: 'a', instructions: 'x', model, tools: await authfi.tools(server) });
-  return { ...s, authfi, server, model, agent };
+  return { ...s, auth: s.agent, authfi, server, model, agent };
 }
 type Setup = Awaited<ReturnType<typeof setup>>;
 
@@ -187,5 +194,141 @@ describe('the clients the adapter builds', () => {
     await expect(t.authfi.tools({ listTools: () => Promise.resolve([]) })).rejects.toThrow(
       /connected MCPServerStreamableHttp/,
     );
+  });
+});
+
+describe('waiting for AuthFI inside the tool', () => {
+  it('continues by itself when AuthFI approves: no interruption, the call made once with the approval', async () => {
+    const t = await setup(CONTENTS, undefined, { waitInTool: true });
+    setTimeout(() => t.gw.decide(t.gw.pending()[0]!, 'approved'), 300);
+    const result = await run(t.agent, 'go');
+    expect(result.interruptions ?? []).toHaveLength(0);
+    expect(String(result.finalOutput)).toContain('1 Overview');
+    expect(t.gw.executed).toHaveLength(1);
+    expect(t.gw.approvals.size).toBe(1);
+    expect(t.model.sawByModel.join()).not.toContain('Waiting for approval');
+  });
+
+  it('tells the model plainly, and runs nothing, when AuthFI denies', async () => {
+    const t = await setup(CONTENTS, undefined, { waitInTool: true });
+    setTimeout(() => t.gw.decide(t.gw.pending()[0]!, 'denied'), 300);
+    const result = await run(t.agent, 'go');
+    expect(String(result.finalOutput)).toContain('Refused');
+    expect(t.gw.executed).toHaveLength(0);
+  });
+
+  it('answers "waiting", never a run, when nobody decides before the timeout', async () => {
+    const t = await setup(CONTENTS, undefined, { waitInTool: true, approvalTimeoutMs: 450 });
+    const result = await run(t.agent, 'go');
+    expect(String(result.finalOutput)).toContain('waiting for a person');
+    expect(t.gw.executed).toHaveLength(0);
+  });
+});
+
+describe('polling the approval route with the agent own token', () => {
+  it('asks the gateway twice, not once per interval, and releases the call once approved', async () => {
+    const t = await setup(CONTENTS, undefined, { waitInTool: true, approvalPoll: true });
+    setTimeout(() => t.gw.decide(t.gw.pending()[0]!, 'approved'), 450);
+    const result = await run(t.agent, 'go');
+    expect(String(result.finalOutput)).toContain('1 Overview');
+    expect(t.as.approvalPolls).toBeGreaterThanOrEqual(3);
+    expect(t.gw.toolCalls()).toHaveLength(2); // the hold, then the release
+    expect(t.gw.executed).toHaveLength(1);
+  });
+
+  it('is refused for a token held for a person', async () => {
+    const s = await setupGateway();
+    expect(() =>
+      createOpenAIAgents({ source: { gateway: () => s.agent.gateway() }, approvalPoll: true }),
+    ).toThrow(ConfigurationError);
+  });
+
+  it.each([
+    ['forbidden', 403],
+    ['unknown', 404],
+  ] as const)('ends at once with a distinct error when the route answers %s', async (kind, status) => {
+    const t = await setup(CONTENTS, undefined, { approvalPoll: true, approvalTimeoutMs: 60_000 });
+    const held = await untilHold(t);
+    if (kind === 'forbidden') t.gw.approvalRoute = 'forbidden';
+    else t.gw.approvals.clear();
+    const began = Date.now();
+    await expect(t.authfi.awaitApprovals(held.state)).rejects.toMatchObject({
+      name: 'ApprovalPollRefused',
+      status,
+    });
+    expect(Date.now() - began).toBeLessThan(2000);
+  });
+
+  it('ends at once when the agent is revoked while the approval is polled (401)', async () => {
+    const t = await setup(CONTENTS, undefined, { approvalPoll: true, approvalTimeoutMs: 60_000 });
+    const held = await untilHold(t);
+    t.gw.revoked = true;
+    await expect(t.authfi.awaitApprovals(held.state)).rejects.toBeInstanceOf(ApprovalPollRefused);
+  });
+});
+
+describe('a revoked agent while a person is being waited on', () => {
+  it('ends the wait at once with GatewayTokenRefused, not at the timeout', async () => {
+    const t = await setup(CONTENTS, undefined, { approvalTimeoutMs: 60_000 });
+    const held = await untilHold(t);
+    t.gw.revoked = true;
+    const began = Date.now();
+    await expect(t.authfi.awaitApprovals(held.state)).rejects.toBeInstanceOf(GatewayTokenRefused);
+    expect(Date.now() - began).toBeLessThan(2000);
+    expect(t.gw.executed).toHaveLength(0);
+  });
+});
+
+describe('a restarted process', () => {
+  async function restarted(t: Setup, state: string, pending: unknown) {
+    const authfi = createOpenAIAgents({
+      source: t.auth,
+      pollIntervalMs: 100,
+      logger: t.logger,
+      runId: 'run-2',
+    });
+    const server = new MCPServerStreamableHttp(authfi.mcpServerOptions());
+    await server.connect();
+    const agent = new Agent({
+      name: 'a',
+      instructions: 'x',
+      model: t.model,
+      tools: await authfi.tools(server),
+    });
+    // What the app kept beside the saved RunState, through JSON as a database would.
+    authfi.restorePending(JSON.parse(JSON.stringify(pending)) as never);
+    return { authfi, agent, state: await RunState.fromString(agent, state) };
+  }
+
+  it('resumes the saved run with the approval id and opens no second approval; the id is never in the model input', async () => {
+    const t = await setup(CONTENTS);
+    const held = await untilHold(t);
+    const saved = held.state.toString();
+    const pending = t.authfi.pendingApprovals();
+    const approvalId = pending[0]!.approvalId;
+    const next = await restarted(t, saved, pending);
+    t.gw.decide(approvalId, 'approved');
+    expect([...(await next.authfi.awaitApprovals(next.state)).values()]).toEqual(['approved']);
+    const done = await run(next.agent, next.state);
+    expect(String(done.finalOutput)).toContain('1 Overview');
+    expect(t.gw.approvals.size).toBe(1);
+    expect(t.gw.executed).toHaveLength(1);
+    expect(t.gw.toolCalls().at(-1)!.args).toMatchObject({ _authfi_approval_id: approvalId });
+    expect(t.model.sawByModel.join()).not.toContain(approvalId);
+    expect(saved).not.toContain(approvalId);
+  });
+
+  it('is told, structurally, to raise the call again when the gateway binds the approval to another run', async () => {
+    const t = await setup(CONTENTS);
+    const held = await untilHold(t);
+    const saved = held.state.toString();
+    const pending = t.authfi.pendingApprovals();
+    const next = await restarted(t, saved, pending);
+    t.gw.decide(pending[0]!.approvalId, 'approved');
+    t.gw.otherRun = true;
+    expect([...(await next.authfi.awaitApprovals(next.state)).values()]).toEqual(['raise_again']);
+    const done = await run(next.agent, next.state);
+    expect(t.gw.executed).toHaveLength(0);
+    expect(String(done.finalOutput)).toMatch(/another run|Raise the call again/);
   });
 });

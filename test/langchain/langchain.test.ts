@@ -7,29 +7,39 @@ import { Command, END, MemorySaver, MessagesAnnotation, START, StateGraph } from
 import { ToolNode } from '@langchain/langgraph/prebuilt';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import { describe, expect, it, vi } from 'vitest';
-import { createLangChain, HOLD_MESSAGE, type ApprovalInterrupt } from '../../src/langchain/index.js';
+import { GatewayTokenRefused } from '../../src/core/errors.js';
+import {
+  createLangChain,
+  HOLD_MESSAGE,
+  type ApprovalInterrupt,
+  type LangChainOptions,
+} from '../../src/langchain/index.js';
 import { setupGateway } from '../support/adapter-setup.js';
 import { CONTENTS, QUESTION, STRUCTURE } from '../support/fake-gateway.js';
 
-async function setup(options: { runId?: string } = {}) {
+async function setup(
+  options: Partial<LangChainOptions> & { toolNode?: boolean } = {},
+  saver = new MemorySaver(),
+) {
   const s = await setupGateway();
   const authfi = createLangChain({
     source: s.agent,
     pollIntervalMs: 100,
     logger: s.logger,
-    runId: options.runId ?? 'run-1',
+    runId: 'run-1',
+    ...options,
   });
   const client = new Client({ name: 'test', version: '1.0.0' });
   await client.connect(new StreamableHTTPClientTransport(new URL(authfi.mcpUrl), authfi.transportOptions()));
   const tools = await authfi.tools(client);
   const graph = new StateGraph(MessagesAnnotation)
-    .addNode('tools', new ToolNode(tools))
+    .addNode('tools', options.toolNode === true ? authfi.toolNode(tools) : new ToolNode(tools))
     .addEdge(START, 'tools')
     .addEdge('tools', END)
-    .compile({ checkpointer: new MemorySaver() });
+    .compile({ checkpointer: saver });
   let n = 0;
   const config = () => ({ configurable: { thread_id: `t${String(++n)}` } });
-  return { ...s, authfi, client, tools, graph, config };
+  return { ...s, authfi, client, tools, graph, config, saver };
 }
 type Setup = Awaited<ReturnType<typeof setup>>;
 
@@ -204,5 +214,105 @@ describe('the clients the adapter builds', () => {
   it('refuse to send the credential outside AuthFI', async () => {
     const t = await setup();
     await expect(t.authfi.fetch('https://example.com/mcp')).rejects.toThrow();
+  });
+});
+
+describe('waiting for AuthFI inside the tool', () => {
+  it('continues by itself when AuthFI approves: no interrupt, one approval, one run', async () => {
+    const t = await setup({ waitInTool: true });
+    setTimeout(() => t.gw.decide(t.gw.pending()[0]!, 'approved'), 300);
+    const out = await t.graph.invoke({ messages: [call(CONTENTS)] }, t.config());
+    expect((out as { __interrupt__?: unknown }).__interrupt__).toBeUndefined();
+    expect(text(out.messages.at(-1))).toContain('1 Overview');
+    expect(t.gw.executed).toHaveLength(1);
+    expect(t.gw.approvals.size).toBe(1);
+  });
+
+  it('answers the model the refusal when AuthFI denies, and "waiting" when nobody decides in time', async () => {
+    const t = await setup({ waitInTool: true });
+    setTimeout(() => t.gw.decide(t.gw.pending()[0]!, 'denied'), 300);
+    const out = await t.graph.invoke({ messages: [call(CONTENTS)] }, t.config());
+    expect(text(out.messages.at(-1))).toContain('Refused');
+    const slow = await setup({ waitInTool: true, approvalTimeoutMs: 450 });
+    const waiting = await slow.graph.invoke({ messages: [call(CONTENTS)] }, slow.config());
+    expect(text(waiting.messages.at(-1))).toBe(HOLD_MESSAGE);
+    expect(t.gw.executed.length + slow.gw.executed.length).toBe(0);
+  });
+
+  it('polls the approval route with the agent own token and asks the gateway only to release the call', async () => {
+    const t = await setup({ waitInTool: true, approvalPoll: true });
+    setTimeout(() => t.gw.decide(t.gw.pending()[0]!, 'approved'), 450);
+    const out = await t.graph.invoke({ messages: [call(CONTENTS)] }, t.config());
+    expect(text(out.messages.at(-1))).toContain('1 Overview');
+    expect(t.as.approvalPolls).toBeGreaterThanOrEqual(3);
+    expect(t.gw.toolCalls()).toHaveLength(2);
+  });
+});
+
+describe('a revoked agent', () => {
+  it('ends the run through authfi.toolNode, where a plain ToolNode would hand the model an error', async () => {
+    const t = await setup({ toolNode: true });
+    t.gw.revoked = true;
+    await expect(t.graph.invoke({ messages: [call(STRUCTURE)] }, t.config())).rejects.toBeInstanceOf(
+      GatewayTokenRefused,
+    );
+    expect(t.authfi.ended).toBeInstanceOf(GatewayTokenRefused);
+    expect(t.gw.executed).toHaveLength(0);
+  });
+
+  it('lets the model read every other tool error through authfi.toolNode', async () => {
+    const t = await setup({ toolNode: true });
+    const out = await t.graph.invoke({ messages: [call(QUESTION)] }, t.config());
+    expect(text(out.messages.at(-1))).toContain('Refused');
+    expect(t.authfi.ended).toBeUndefined();
+  });
+
+  it('ends the wait for a person at once, not at the timeout, when revoked mid-wait', async () => {
+    const t = await setup({ approvalTimeoutMs: 60_000 });
+    await untilHold(t);
+    t.gw.revoked = true;
+    const began = Date.now();
+    await expect(t.authfi.awaitApprovals()).rejects.toBeInstanceOf(GatewayTokenRefused);
+    expect(Date.now() - began).toBeLessThan(2000);
+  });
+});
+
+describe('a restarted process', () => {
+  async function restart(t: Setup) {
+    // A new adapter, MCP client and compiled graph over the same durable checkpointer.
+    const next = await setup({ runId: 'run-2' }, t.saver);
+    const state = await next.graph.getState({ configurable: { thread_id: 't1' } });
+    next.authfi.adoptInterrupts(state.tasks.flatMap((task) => task.interrupts.map((i) => i.value)));
+    return next;
+  }
+
+  it('resumes from the checkpoint with the approval id and opens no second approval; the id is not in the messages', async () => {
+    const t = await setup();
+    const { config, interrupt } = await untilHold(t);
+    const next = await restart(t);
+    // Same gateway, as one platform serves both processes.
+    next.gw.approvals.clear();
+    for (const [id, a] of t.gw.approvals) next.gw.approvals.set(id, a);
+    t.gw.decide(interrupt.approvalId, 'approved');
+    expect([...(await next.authfi.awaitApprovals()).values()]).toEqual(['approved']);
+    const out = await next.graph.invoke(new Command({ resume: true }), config);
+    expect(text(out.messages.at(-1))).toContain('1 Overview');
+    expect(next.gw.executed).toHaveLength(1);
+    expect(next.gw.toolCalls().at(-1)!.args).toMatchObject({ _authfi_approval_id: interrupt.approvalId });
+    expect(JSON.stringify(out.messages)).not.toContain(interrupt.approvalId);
+  });
+
+  it('is told, structurally, to raise the call again when the gateway binds the approval to another run', async () => {
+    const t = await setup();
+    const { config, interrupt } = await untilHold(t);
+    const next = await restart(t);
+    next.gw.approvals.clear();
+    for (const [id, a] of t.gw.approvals) next.gw.approvals.set(id, a);
+    t.gw.decide(interrupt.approvalId, 'approved');
+    next.gw.otherRun = true;
+    expect([...(await next.authfi.awaitApprovals()).values()]).toEqual(['raise_again']);
+    const out = await next.graph.invoke(new Command({ resume: true }), config);
+    expect(text(out.messages.at(-1))).toContain('Raise the call again');
+    expect(next.gw.executed).toHaveLength(0);
   });
 });

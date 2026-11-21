@@ -89,6 +89,17 @@ export const MANDATE_GUIDANCE: Readonly<Record<string, { why: string; nextStep: 
   },
 });
 
+/**
+ * What the gateway says when an approval is presented by another run than the one that raised it (the
+ * project's `resume_binding` is `run`, the default): a restarted process is another run.
+ */
+export const APPROVAL_OTHER_RUN = 'approval was raised by another run of this agent';
+const APPROVAL_OTHER_RUN_GUIDANCE = {
+  why: 'approval_other_run',
+  nextStep:
+    "The person's approval belongs to the run that raised it and cannot be used here. Raise the call again: a new approval will be asked for.",
+} as const;
+
 /** The refusal as data an agent can plan around: `refused`, `why`, `code`, `reason`, `nextStep`. */
 export function refusalData(outcome: {
   readonly code: string | undefined;
@@ -342,7 +353,12 @@ export class Gateway {
     if (typeof meta === 'object' && meta !== null) {
       const m = meta as Record<string, unknown>;
       const code = str(m.code);
-      const guidance = code === undefined ? undefined : MANDATE_GUIDANCE[code];
+      const otherRun = (str(m.reason) ?? textOf(r)).includes(APPROVAL_OTHER_RUN);
+      const guidance = otherRun
+        ? APPROVAL_OTHER_RUN_GUIDANCE
+        : code === undefined
+          ? undefined
+          : MANDATE_GUIDANCE[code];
       const refusal = {
         reason: str(m.reason) ?? textOf(r),
         code,

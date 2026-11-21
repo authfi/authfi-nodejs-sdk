@@ -61,6 +61,8 @@ const REASON_PREFIX = 'AuthFI approval ';
 const REASON = /^AuthFI approval ([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)$/;
 const DENIED_REASON = 'A person did not approve this action in AuthFI.';
 const PENDING_REASON = 'This action has not been approved in AuthFI yet.';
+const RAISE_AGAIN_REASON =
+  "The person's approval belongs to another run and cannot be used here. Ask for the call again.";
 
 type ToolExecute = (input: unknown, options: Record<string, unknown>) => Promise<unknown>;
 
@@ -205,6 +207,11 @@ export class VercelAIAdapter {
       if (known === undefined) {
         // First evaluation: AuthFI decides when the call reaches the gateway, so it is made now, once.
         const fresh = await this.#asking(id, () => this.#guard.begin(id, key, raw));
+        if (fresh.status === 'pending' && fresh.approvalId !== undefined && this.#run.waitInTool) {
+          // Waits here for AuthFI's decision; the tool then answers it (the call, a refusal, or "waiting").
+          await this.#guard.settle(id);
+          return { type: 'not-applicable' };
+        }
         if (fresh.status === 'pending' && fresh.approvalId !== undefined)
           return { type: 'user-approval', reason: await this.#reasonFor(id, key, fresh.approvalId) };
         return { type: 'not-applicable' }; // allowed or refused: execute returns the answer AuthFI gave
@@ -214,6 +221,7 @@ export class VercelAIAdapter {
       if (decision === 'approved') return { type: 'approved' };
       if (decision === 'pending') return { type: 'denied', reason: PENDING_REASON };
       this.#guard.forget(id);
+      if (decision === 'raise_again') return { type: 'denied', reason: RAISE_AGAIN_REASON };
       return { type: 'denied', reason: DENIED_REASON };
     };
   }
@@ -349,14 +357,21 @@ export class VercelAIAdapter {
     const content = parts.map((part) => {
       const { toolCallId } = part.toolCall;
       const decision = decisions.get(toolCallId) ?? 'denied';
-      if (decision === 'denied') this.#guard.forget(toolCallId);
+      if (decision === 'denied' || decision === 'raise_again') this.#guard.forget(toolCallId);
       return {
         type: 'tool-approval-response' as const,
         approvalId: part.approvalId,
         approved: decision === 'approved',
         ...(decision === 'approved'
           ? {}
-          : { reason: decision === 'pending' ? PENDING_REASON : DENIED_REASON }),
+          : {
+              reason:
+                decision === 'pending'
+                  ? PENDING_REASON
+                  : decision === 'raise_again'
+                    ? RAISE_AGAIN_REASON
+                    : DENIED_REASON,
+            }),
       };
     });
     return { role: 'tool', content };

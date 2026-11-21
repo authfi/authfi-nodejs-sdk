@@ -68,6 +68,10 @@ interface ModelBody {
 
 export class FakeGateway {
   revoked = false;
+  /** Answer every retry that carries an approval id as the gateway does for another run (resume_binding run). */
+  otherRun = false;
+  /** What GET approvals/{id} answers instead of the real status: 'forbidden' (403). */
+  approvalRoute: 'forbidden' | undefined;
   readonly approvals = new Map<
     string,
     { tool: ToolName; digest: string; status: 'pending' | 'approved' | 'denied' | 'used' }
@@ -92,6 +96,12 @@ export class FakeGateway {
   modelScript: ((body: ModelBody) => { content: unknown[]; stop_reason: string }) | undefined;
 
   constructor(readonly as: FakeAS) {
+    as.approvalLookup = (id) => {
+      if (this.revoked) return 'revoked';
+      if (this.approvalRoute === 'forbidden') return 'forbidden';
+      const a = this.approvals.get(id);
+      return a === undefined ? 'unknown' : a.status === 'used' ? 'approved' : a.status;
+    };
     as.t.fake.on('POST', `${as.issuer}/mcp`, (r) => this.#mcp(r));
     as.t.fake.on('POST', `${as.issuer}/mcp/v1/messages`, (r) => this.#model(r));
     as.t.fake.on('GET', `${as.issuer}/mcp`, () => new Response(null, { status: 405 }));
@@ -239,6 +249,10 @@ export class FakeGateway {
       this.approvals.set(id, { tool, digest, status: 'pending' });
       return hold(id, 'approval_required');
     }
+    if (this.otherRun)
+      return refused('approval_run', 'approval was raised by another run of this agent', {
+        approval_id: approvalId,
+      });
     const a = this.approvals.get(approvalId);
     if (a?.tool !== tool) return refused('approval_unknown', 'approval not found');
     if (a.digest !== digest) return refused('approval_mismatch', 'approval was raised for other arguments');
