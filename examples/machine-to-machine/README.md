@@ -4,7 +4,7 @@ A job that calls an API as a machine client (OAuth client credentials).
 
 ```bash
 cp .env.example .env
-npm install github:authfi/authfi-nodejs-sdk#<ref>
+npm install @authfi/sdk
 node --env-file=.env --import tsx job.ts
 ```
 

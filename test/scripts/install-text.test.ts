@@ -24,15 +24,15 @@ afterEach(() => {
 });
 
 describe('install text', () => {
-  it('this repository tells people to install from git only', () => {
+  it('this repository tells people to install @authfi/sdk from the registry', () => {
     expect(() => execFileSync(process.execPath, [scriptPath], { encoding: 'utf8' })).not.toThrow();
   });
 
   it.each([
-    ['README.md', 'npm install @authfi/sdk\n'],
-    ['examples/a/README.md', 'npm i @authfi/sdk express\n'],
-    ['docs/x.md', 'pnpm add @authfi/sdk\n'],
-    ['src/m.ts', "throw new Error('run: yarn add @authfi/sdk');\n"],
+    ['README.md', 'npm install authfi-sdk\n'],
+    ['examples/a/README.md', 'npm i authfi/sdk express\n'],
+    ['docs/x.md', 'pnpm add @authfi-sdk/core\n'],
+    ['src/m.ts', "throw new Error('run: yarn add authfi-sdk');\n"],
     ['README.md', 'npm install https://github.com/authfi/authfi-nodejs-sdk/releases/download/v1/a.tgz\n'],
   ])('refuses %s containing %j', (name, text) => {
     const r = check({ [name]: text });
@@ -40,7 +40,12 @@ describe('install text', () => {
     expect(r.stderr).toContain(name);
   });
 
-  it('accepts the git install', () => {
-    expect(check({ 'README.md': 'npm install github:authfi/authfi-nodejs-sdk#v0.2.0 ai\n' }).status).toBe(0);
+  it.each([
+    'npm install @authfi/sdk\n',
+    'npm i @authfi/sdk express\n',
+    'pnpm add @authfi/sdk\n',
+    'npm install github:authfi/authfi-nodejs-sdk#v0.2.0 ai\n',
+  ])('accepts %j', (text) => {
+    expect(check({ 'README.md': text }).status).toBe(0);
   });
 });

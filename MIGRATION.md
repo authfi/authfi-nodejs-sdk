@@ -6,10 +6,10 @@ to write instead.
 
 ## Install
 
-The package is TypeScript now and builds on install. Replace the codeload tarball URL with the git install (the machine needs `git`):
+The package is TypeScript, built and published to npm. Replace the codeload tarball URL with the registry install:
 
 ```bash
-npm install github:authfi/authfi-nodejs-sdk#<tag-or-commit>
+npm install @authfi/sdk
 ```
 
 ## Node.js

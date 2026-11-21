@@ -5,7 +5,7 @@ is the service-provider side: it reads the project's metadata, sends the browser
 returned assertion into the same user model the OpenID Connect sign-in gives.
 
 ```bash
-npm install github:authfi/authfi-nodejs-sdk#main @node-saml/node-saml @xmldom/xmldom
+npm install @authfi/sdk @node-saml/node-saml @xmldom/xmldom
 ```
 
 Both are optional peers of the SDK; install them only for SAML. Register the app in your project first: its
