@@ -481,6 +481,15 @@ export function statusFor(decision: string, reason?: string, code?: string): Tas
 export function statusForOutcome(outcome: ToolOutcome): TaskStatus {
   if (outcome.kind === 'allowed') return statusFor('allow');
   if (outcome.kind === 'approval_required') return statusFor('needs_approval');
+  if (outcome.authRequired !== undefined) {
+    const link = outcome.authRequired.connectUrl;
+    return statusFor(
+      'auth_required',
+      link === undefined || outcome.reason.includes(link)
+        ? outcome.reason
+        : `${outcome.reason} Connect it at ${link}`,
+    );
+  }
   const code = outcome.code ?? outcome.error;
   return statusFor('deny', outcome.reason === '' ? code : outcome.reason, code);
 }

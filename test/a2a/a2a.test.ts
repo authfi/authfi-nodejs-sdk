@@ -577,6 +577,21 @@ describe('AuthFI decisions as A2A task states', () => {
       });
     expect(refused('EMDT005', 'outside')).toMatchObject({ state: REJECTED, text: 'outside' });
     expect(refused('connection_required').state).toBe(AUTH_REQUIRED);
+    // The gateway's own "connect the account" answer is AUTH_REQUIRED whatever its code, and carries the link.
+    const connect = statusForOutcome({
+      kind: 'refused',
+      result: {},
+      reason: 'not connected',
+      code: 'EVAULT001',
+      error: undefined,
+      requiredScope: undefined,
+      why: 'auth_required',
+      nextStep: undefined,
+      modelText: '',
+      authRequired: { provider: 'github', connectUrl: 'https://connect.example/github' },
+    });
+    expect(connect.state).toBe(AUTH_REQUIRED);
+    expect(connect.text).toContain('https://connect.example/github');
   });
 
   it('writes the status object a response carries', () => {
