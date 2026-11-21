@@ -7,15 +7,21 @@
  * @packageDocumentation
  */
 
-import { ConfigurationError } from '../core/errors.js';
+import { APIError, ApprovalPollRefused, ConfigurationError, NotSupportedError } from '../core/errors.js';
 import { randomBytes } from '../core/bytes.js';
 import { consoleLogger, type Logger } from '../core/logger.js';
 import type { OpenTelemetryApi } from '../core/transport.js';
 import { APPROVAL_ARGUMENT, HOLD_MESSAGE, type Gateway, type ToolResult } from '../gateway/gateway.js';
+import type { Approval } from '../agents/agent.js';
 
 /** A credential with gateways: an `AgentAuth`, a `DelegatedToken`, and in release 1 a mandate. */
 export interface GatewaySource {
   gateway(): Gateway;
+}
+
+/** What reads an approval's state with the agent's own token: an `AgentAuth`. */
+export interface ApprovalSource {
+  approval(approvalId: string, options?: { signal?: AbortSignal | undefined }): Promise<Approval>;
 }
 
 /** The OpenTelemetry API, for the request id on the active span. */
@@ -35,6 +41,19 @@ export interface AdapterOptions {
   readonly pollIntervalMs?: number | undefined;
   /** How long waiting for a decision lasts (default 15 minutes). */
   readonly approvalTimeoutMs?: number | undefined;
+  /**
+   * Ask AuthFI where a held call's approval stands (`GET /v1/ai/auth/approvals/{id}`, with the agent's OWN access
+   * token) instead of sending the call to the gateway each interval; the gateway is asked once, when the approval
+   * is no longer pending, to release or refuse the call. Needs `source` to be an `AgentAuth`: a token held for a
+   * person is refused on that route. A 401, 403 or 404 ends the wait at once with {@link ApprovalPollRefused}.
+   */
+  readonly approvalPoll?: boolean | undefined;
+  /**
+   * Wait for a held call's decision inside the tool, where the framework lets a tool take as long as it needs, and
+   * continue by itself: no pause for the app to resume. Bounded by `approvalTimeoutMs`; undecided at the timeout
+   * the model is told the call is waiting, never that it ran.
+   */
+  readonly waitInTool?: boolean | undefined;
   /** How many tool calls the adapter remembers, oldest dropped first (default 10 000). */
   readonly memoSize?: number | undefined;
   /** The `@opentelemetry/api` module, to stamp the request id on the active span. */
@@ -82,6 +101,8 @@ export class RunGateway {
   readonly pollMs: number;
   readonly timeoutMs: number;
   readonly memoSize: number;
+  readonly waitInTool: boolean;
+  readonly #approvals: ApprovalSource | undefined;
   readonly #otel: SpanApi | undefined;
   #calls = 0;
 
@@ -98,6 +119,15 @@ export class RunGateway {
     const timeoutMs = options.approvalTimeoutMs ?? 15 * 60_000;
     if (!(pollMs >= 100) || !(timeoutMs > 0))
       throw new ConfigurationError('pollIntervalMs must be at least 100 and approvalTimeoutMs positive');
+    if (options.approvalPoll === true) {
+      const own = options.source as Partial<ApprovalSource>;
+      if (typeof own.approval !== 'function')
+        throw new ConfigurationError(
+          "approvalPoll needs source to be the agent itself (an AgentAuth): AuthFI answers an approval's state to the agent's own token, never to one held for a person",
+        );
+      this.#approvals = own as ApprovalSource;
+    }
+    this.waitInTool = options.waitInTool === true;
     this.gateway = options.source.gateway();
     this.runId = runId;
     this.pollMs = pollMs;
@@ -105,6 +135,36 @@ export class RunGateway {
     this.memoSize = options.memoSize ?? 10_000;
     this.logger = options.logger ?? consoleLogger;
     this.#otel = options.otel;
+  }
+
+  /** Whether holds are polled on the approval route rather than on the gateway. */
+  get polls(): boolean {
+    return this.#approvals !== undefined;
+  }
+
+  /**
+   * Where an approval stands, read with the agent's own token. A 401, 403 or 404 is {@link ApprovalPollRefused}: the
+   * answer will not change, so nothing waits on it.
+   */
+  async approvalStatus(approvalId: string, signal?: AbortSignal): Promise<string> {
+    if (this.#approvals === undefined) throw new ConfigurationError('approvalPoll is not on');
+    try {
+      return (await this.#approvals.approval(approvalId, { signal })).status;
+    } catch (e) {
+      const status = e instanceof APIError || e instanceof NotSupportedError ? e.status : undefined;
+      if (e instanceof NotSupportedError || status === 401 || status === 403 || status === 404) {
+        this.logger.warn('AuthFI would not say where an approval stands; the wait ends', {
+          approval: approvalId,
+          status,
+        });
+        throw new ApprovalPollRefused(
+          approvalId,
+          `AuthFI refused to read approval ${approvalId} for this agent (HTTP ${String(status ?? 'n/a')}): waiting longer cannot help`,
+          { status, requestId: (e as APIError).requestId, cause: e },
+        );
+      }
+      throw e;
+    }
   }
 
   /** Attributes to stamp on the framework's spans: `authfi.agent_id` and `authfi.run_id`. */
@@ -150,6 +210,8 @@ export interface HoldEntry {
   readonly key: string;
   readonly input: unknown;
   status: Status;
+  /** The approval belongs to another run than this process's. Set once, with the refusal. */
+  raiseAgain: boolean;
   approvalId: string | undefined;
   result: ToolResult | undefined;
   /** What the framework gave the call, handed back when it is sent again with its approval id. */
@@ -165,7 +227,20 @@ export type SendCall = (
 ) => Promise<ToolResult>;
 
 /** What AuthFI has decided about a call a person had to approve. */
-export type Decision = 'approved' | 'denied' | 'pending';
+/**
+ * `raise_again`: the gateway would not release the call to this process because another run raised the approval
+ * (the project binds approvals to the run); the app asks for the call again.
+ */
+export type Decision = 'approved' | 'denied' | 'pending' | 'raise_again';
+
+/** A call that waits on a person, as {@link HoldGuard.pending} lists it. */
+export interface PendingApproval {
+  readonly id: string;
+  readonly tool: string;
+  readonly approvalId: string;
+  /** The tool's arguments, as the call was first made, so a new process can ask again with the approval id. */
+  readonly input: unknown;
+}
 
 function withoutApprovalArgument(input: unknown, logger: Logger, key: string): unknown {
   if (typeof input !== 'object' || input === null || !(APPROVAL_ARGUMENT in input)) return input;
@@ -218,6 +293,7 @@ export class HoldGuard {
       outcome.kind === 'refused' && outcome.nextStep !== undefined
         ? { ...result, content: [{ type: 'text', text: outcome.modelText }] }
         : result;
+    entry.raiseAgain = outcome.kind === 'refused' && outcome.why === 'approval_other_run';
     if (outcome.kind === 'refused') entry.status = approving ? 'denied' : 'refused';
     else entry.status = approving ? 'approved' : 'allowed';
   }
@@ -260,6 +336,7 @@ export class HoldGuard {
       key,
       input: withoutApprovalArgument(raw, this.#run.logger, key),
       status: 'allowed',
+      raiseAgain: false,
       approvalId: undefined,
       result: undefined,
       context,
@@ -278,6 +355,7 @@ export class HoldGuard {
       key,
       input: withoutApprovalArgument(raw, this.#run.logger, key),
       status: 'pending',
+      raiseAgain: false,
       approvalId,
       result: undefined,
       context,
@@ -300,8 +378,15 @@ export class HoldGuard {
   async decision(id: string, signal?: AbortSignal): Promise<Decision | 'unknown'> {
     const entry = this.#memo.get(id);
     if (entry === undefined) return 'unknown';
-    if (entry.status === 'pending') await this.#recheck(entry, signal);
+    if (entry.status === 'pending') {
+      // With approvalPoll the gateway is asked only once the person has decided, to release or refuse the call.
+      if (this.#run.polls && entry.approvalId !== undefined) {
+        if ((await this.#run.approvalStatus(entry.approvalId, signal)) === 'pending') return 'pending';
+      }
+      await this.#recheck(entry, signal);
+    }
     if (entry.status === 'pending') return 'pending';
+    if (entry.raiseAgain) return 'raise_again';
     return entry.status === 'approved' || entry.status === 'allowed' ? 'approved' : 'denied';
   }
 
@@ -324,13 +409,36 @@ export class HoldGuard {
     return entry.status === 'pending' || entry.result === undefined ? WAITING : entry.result;
   }
 
-  /** The ids of calls that wait on a person. */
-  pending(): { id: string; tool: string; approvalId: string }[] {
+  /**
+   * The calls that wait on a person, with what is needed to remember them in another process: see
+   * {@link HoldGuard.restore}.
+   */
+  pending(): PendingApproval[] {
     return [...this.#memo.entries()]
       .filter((e): e is [string, HoldEntry & { approvalId: string }] => {
         return e[1].status === 'pending' && e[1].approvalId !== undefined;
       })
-      .map(([id, e]) => ({ id, tool: e.key, approvalId: e.approvalId }));
+      .map(([id, e]) => ({ id, tool: e.key, approvalId: e.approvalId, input: e.input }));
+  }
+
+  /**
+   * Remembers calls a person was asked about by another process (what {@link HoldGuard.pending} returned there,
+   * kept by the app beside the framework's own saved state), so the resumed run asks the gateway about the same
+   * approval instead of opening a second one. A call already known here is left as it is.
+   */
+  restore(pending: readonly PendingApproval[]): void {
+    for (const p of pending) {
+      if (this.#memo.has(p.id)) continue;
+      this.adopt(p.id, p.tool, p.input, p.approvalId);
+    }
+  }
+
+  /**
+   * Waits inside a tool for AuthFI's decision on call `id`, bounded by the approval timeout. Undecided at the
+   * timeout is `pending`, never approved.
+   */
+  async settle(id: string, signal?: AbortSignal): Promise<Decision> {
+    return (await this.wait([id], { signal })).get(id) ?? 'denied';
   }
 
   /**

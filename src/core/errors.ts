@@ -41,6 +41,7 @@ export type SdkErrorCode =
   | 'insufficient_permission'
   | 'insufficient_scope'
   | 'gateway_token_refused'
+  | 'approval_poll_refused'
   | 'callback_iss_missing'
   | 'callback_iss_mismatch'
   | 'callback_state_mismatch'
@@ -301,6 +302,21 @@ export class GatewayTokenRefused extends AuthFIError {
   override readonly name: string = 'GatewayTokenRefused';
   constructor(message: string, context: ErrorContext = {}) {
     super('gateway_token_refused', message, context);
+  }
+}
+
+/**
+ * AuthFI refused to tell the agent where an approval stands: its own token was refused (401), it may not read
+ * approvals (403), or the approval is not known to it (404). Waiting longer cannot help, so the wait ends at once
+ * instead of running to its timeout.
+ */
+export class ApprovalPollRefused extends AuthFIError {
+  override readonly name: string = 'ApprovalPollRefused';
+  /** The approval that was being read. */
+  readonly approvalId: string;
+  constructor(approvalId: string, message: string, context: ErrorContext = {}) {
+    super('approval_poll_refused', message, context);
+    this.approvalId = approvalId;
   }
 }
 

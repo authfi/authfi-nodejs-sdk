@@ -24,6 +24,11 @@ export class FakeAS {
   /** Answer for GET approvals/{id}: 403 (the platform today) or a status. */
   approvalStatus: 'forbidden' | 'pending' | 'approved' = 'forbidden';
   approvalPolls = 0;
+  /**
+   * When set, GET approvals/{id} answers from it: the approval's status, 'unknown' (404) or 'revoked' (401 as the
+   * agent's token is refused). The fake gateway sets it so both doors tell the same story.
+   */
+  approvalLookup: ((id: string) => string) | undefined;
   tokenLifetime = 900;
   minted = 0;
   exchangeAllowed = true;
@@ -199,6 +204,14 @@ export class FakeAS {
         this.approvalPolls += 1;
         if (!r.headers.get('authorization')?.startsWith('Bearer '))
           return json({ error: 'unauthorized' }, 401);
+        const asked = decodeURIComponent(r.url.split('/approvals/')[1] ?? '');
+        if (this.approvalLookup !== undefined) {
+          const found = this.approvalLookup(asked);
+          if (found === 'revoked') return json({ error: 'invalid_token' }, 401);
+          if (found === 'unknown') return json({ error: 'not_found' }, 404);
+          if (found === 'forbidden') return json({ error: 'forbidden' }, 403);
+          return json({ data: { approval_id: asked, status: found, requesting_action: 'tool' } });
+        }
         if (this.approvalStatus === 'forbidden') return json({ error: 'forbidden' }, 403);
         const status = this.approvalStatus === 'approved' && this.approvalPolls >= 2 ? 'approved' : 'pending';
         return json({
