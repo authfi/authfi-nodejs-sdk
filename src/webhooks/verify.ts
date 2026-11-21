@@ -42,8 +42,10 @@ export interface WebhookEventData {
 
 /** A delivery whose signature and freshness were proven. */
 export interface WebhookEvent {
-  /** The id of the request that caused the event. Several events can share one; it is not unique per delivery. */
+  /** The event's own id, the same on every delivery of the event; de-duplicate on it. */
   readonly id: string;
+  /** The id of the request that caused the event. Several events can share one. */
+  readonly requestId?: string | undefined;
   /**
    * The event name from the signed body. It is a {@link WebhookEventName} today; the platform can add
    * names without an SDK release, so a `switch` needs a `default` arm.
@@ -118,6 +120,7 @@ function parseEvent(text: string, deliveryId: string | undefined): WebhookEvent 
   return {
     id: body.id,
     type: body.event,
+    requestId: typeof body.request_id === 'string' ? body.request_id : undefined,
     timestamp: body.timestamp,
     data: {
       actor: field('actor'),

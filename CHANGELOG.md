@@ -5,6 +5,14 @@ All notable changes to this package. It follows [Semantic Versioning](https://se
 
 ## Unreleased
 
+### Added
+
+- **`event.requestId`** on a webhook event: the id of the request that caused it, when the platform sent one.
+  Several events can share it.
+- **Webhook vectors** carry the event id (UUIDv7) in `id` and the request id in `request_id`, with cases for
+  two events sharing a request, a replayed event and an event without a request id. They are written by
+  `scripts/gen-webhook-vectors.mjs` (`npm run check:webhook-vectors` checks the file).
+
 ### Changed
 
 - **Model calls go to the LLM door, `<issuer>/llm`.** The platform moved the AI gateway off `/mcp/v1/*`:
@@ -27,11 +35,16 @@ All notable changes to this package. It follows [Semantic Versioning](https://se
   from the tool result, and is sent once, never retried. The secret is redeemed once at
   `POST <issuer>/mcp/cloud/credentials/{credential_id}/secret`. The API of `cloud.credentials`, `cloud.secret` and
   `cloud.fetchCredential` is unchanged; a refusal is still an `APIError` with its `ECLOUDCRED` code.
+- **`event.id`** is the event's own id, the same on every delivery of the event: de-duplicate on it.
 
 ## 0.2.0
 
 ### Added
 
+- **B3 checks.** Tests that hold the SDK to the DPoP rules the platform turns on in November: a token renewed after
+  the server's nonce rotated is challenged once at the token endpoint and answered once; a refusal never sends the next
+  request as Bearer; a nonce retry is a new proof; a proof names the URL without its query. `test/live/b3-np.test.ts`
+  runs the same refusals against a probe project on np (skipped unless `AUTHFI_B3_ISSUER` names one).
 - **An agent bound to a workload can ask a person.** `requestUserToken`, `awaitUserToken`,
   `tokenAsUser`, `requestApproval`, `approval` and `waitForApproval` now work for an instance, which the SDK used to
   refuse with `instance_assertion` although the platform accepts them. The CIBA start and the approval request carry
