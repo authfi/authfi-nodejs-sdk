@@ -8,13 +8,26 @@ one discovery and key cache, one logger and one set of typed errors.
 
 ## Install
 
-The package is not on npm yet. Install it from GitHub, pinned to a release tag or a commit:
-
 ```bash
-npm install github:authfi/authfi-nodejs-sdk#<tag-or-commit>
+npm install @authfi/sdk
 ```
 
-npm builds the package from source on install (its `prepare` script), so the machine needs `git`.
+A framework you use is an optional peer dependency: install it beside the SDK (for example `ai`, `@ai-sdk/anthropic` and
+`@ai-sdk/mcp` for the Vercel AI SDK).
+
+## A governed agent in 10 minutes
+
+```ts
+import { connect } from '@authfi/sdk/node';
+import { createVercelAI } from '@authfi/sdk/vercel-ai';
+
+const authfi = createVercelAI({ source: await connect(), approvalSecret });   // keyless: the agent proves where it runs
+```
+
+Start with the [quickstart](https://github.com/authfi/authfi-nodejs-sdk/blob/main/docs/quickstart.md): the one-time
+console setup, a model call, a tool call, an approval and where to see the run. There is
+[one short page per framework](https://github.com/authfi/authfi-nodejs-sdk/blob/main/docs/frameworks/README.md):
+Vercel AI SDK, LangChain.js and LangGraph.js, OpenAI Agents SDK, Mastra and Express.
 
 **Requirements:** Node.js 22.12 or later. The core uses Web APIs only (`fetch`, Web Crypto through
 [`jose`](https://github.com/panva/jose)), so it also runs in edge runtimes and browsers. `jose` is the
@@ -549,15 +562,15 @@ Two things to know:
 
 | Example | |
 |---|---|
-| [`examples/sign-in-web`](examples/sign-in-web) | Signing people in to an Express app, with refresh and sign-out |
-| [`examples/protect-an-api`](examples/protect-an-api) | An Express API that verifies tokens and authorizes on permissions |
-| [`examples/machine-to-machine`](examples/machine-to-machine) | A job calling that API with a client-credentials token |
-| [`examples/agent-identity`](examples/agent-identity) | An agent's key, its token, and a call through the MCP gateway |
-| [`examples/agent-for-a-person-voice`](examples/agent-for-a-person-voice) | Acting for a caller with no browser (CIBA) |
-| [`examples/agent-for-a-signed-in-user`](examples/agent-for-a-signed-in-user) | Acting for a person signed in to your app (token exchange) |
-| [`examples/action-gate`](examples/action-gate) | Freezing a high-risk action before running it |
-| [`examples/agent-model-gateway`](examples/agent-model-gateway) | Model calls through the AI gateway, the token kept out of traces |
-| [`examples/approvals-vercel-ai`](examples/approvals-vercel-ai) | A Vercel AI SDK agent that pauses on an approval and resumes on AuthFI's decision |
+| [`examples/sign-in-web`](https://github.com/authfi/authfi-nodejs-sdk/tree/main/examples/sign-in-web) | Signing people in to an Express app, with refresh and sign-out |
+| [`examples/protect-an-api`](https://github.com/authfi/authfi-nodejs-sdk/tree/main/examples/protect-an-api) | An Express API that verifies tokens and authorizes on permissions |
+| [`examples/machine-to-machine`](https://github.com/authfi/authfi-nodejs-sdk/tree/main/examples/machine-to-machine) | A job calling that API with a client-credentials token |
+| [`examples/agent-identity`](https://github.com/authfi/authfi-nodejs-sdk/tree/main/examples/agent-identity) | An agent's key, its token, and a call through the MCP gateway |
+| [`examples/agent-for-a-person-voice`](https://github.com/authfi/authfi-nodejs-sdk/tree/main/examples/agent-for-a-person-voice) | Acting for a caller with no browser (CIBA) |
+| [`examples/agent-for-a-signed-in-user`](https://github.com/authfi/authfi-nodejs-sdk/tree/main/examples/agent-for-a-signed-in-user) | Acting for a person signed in to your app (token exchange) |
+| [`examples/action-gate`](https://github.com/authfi/authfi-nodejs-sdk/tree/main/examples/action-gate) | Freezing a high-risk action before running it |
+| [`examples/agent-model-gateway`](https://github.com/authfi/authfi-nodejs-sdk/tree/main/examples/agent-model-gateway) | Model calls through the AI gateway, the token kept out of traces |
+| [`examples/approvals-vercel-ai`](https://github.com/authfi/authfi-nodejs-sdk/tree/main/examples/approvals-vercel-ai) | A Vercel AI SDK agent that pauses on an approval and resumes on AuthFI's decision |
 
 ## Secrets
 
@@ -646,4 +659,4 @@ npm run build && npm run check:package && npm run check:browser
 
 ## License
 
-Apache-2.0. See [LICENSE](LICENSE).
+Apache-2.0. See [LICENSE](https://github.com/authfi/authfi-nodejs-sdk/blob/main/LICENSE).

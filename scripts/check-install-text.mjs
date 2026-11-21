@@ -1,7 +1,6 @@
 #!/usr/bin/env node
-// Fails when a README, doc, example or source message tells people to install @authfi/sdk from the npm
-// registry (the name is not ours there yet, so such a command could fetch someone else's package) or from
-// a release tarball nothing builds. The one install is `npm install github:authfi/authfi-nodejs-sdk#<ref>`.
+// Fails when a README, doc, example or source message tells people to install from a release tarball nothing
+// builds, or from a look-alike of the package name. The one install is `npm install @authfi/sdk`.
 //
 //   node scripts/check-install-text.mjs [--root <dir>]
 
@@ -16,9 +15,9 @@ const TEXT = /\.(md|mdx|txt|ts|mts|cts|js|mjs|cjs|json|yml|yaml)$/;
 // This script and its test hold the bad examples on purpose.
 const SELF = new Set(['scripts/check-install-text.mjs', 'test/scripts/install-text.test.ts']);
 
-// A package manager's add/install verb followed, on the same line, by @authfi/sdk that is not a github: spec.
-const REGISTRY =
-  /\b(?:npm|pnpm|yarn|bun)\s+(?:i|install|add)\b[^\n]*?@authfi\/sdk(?!\S*(?:github|git\+|https?:))/;
+// A package manager's add/install verb followed, on the same line, by a name that is almost @authfi/sdk.
+const LOOKALIKE =
+  /\b(?:npm|pnpm|yarn|bun)\s+(?:i|install|add)\b[^\n]*?(?<![@\w/-])(?:authfi-sdk|authfi\/sdk|@authfi-sdk\/\w+)/;
 const TARBALL = /\b(?:npm|pnpm|yarn|bun)\s+(?:i|install|add)\b[^\n]*(?:releases\/download|\.tgz)/;
 
 function* walk(dir) {
@@ -37,8 +36,8 @@ for (const path of walk(root)) {
   readFileSync(path, 'utf8')
     .split('\n')
     .forEach((line, i) => {
-      if (REGISTRY.test(line))
-        problems.push(`${rel}:${i + 1}: installs @authfi/sdk from the npm registry: ${line.trim()}`);
+      if (LOOKALIKE.test(line))
+        problems.push(`${rel}:${i + 1}: installs a package that is not @authfi/sdk: ${line.trim()}`);
       else if (TARBALL.test(line))
         problems.push(`${rel}:${i + 1}: installs from a release tarball nothing builds: ${line.trim()}`);
     });
