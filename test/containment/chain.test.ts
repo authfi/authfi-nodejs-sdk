@@ -385,7 +385,8 @@ describe('the kinds of key a certificate may certify', () => {
     const first = keys[0];
     assert.ok(first);
     await prover.prove({ kid: 'k', algs: ['ES256'], jwk: first.jwk }, first.thumb);
-  });
+    // 260 certificates are built and verified one after another: more than vitest's 5 s on a busy runner (coverage on).
+  }, 60_000);
 });
 
 describe('the chain cache', () => {
