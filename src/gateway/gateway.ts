@@ -17,6 +17,8 @@ export const APPROVAL_ARGUMENT = '_authfi_approval_id';
 
 /** Where the gateway puts a refusal's codes beside the text the model reads. */
 const REFUSAL_META = 'io.authfi/refusal';
+/** Where the gateway puts the code, provider and connect link of a call that needs the person to connect an account. */
+const AUTH_META = 'io.authfi/auth';
 /** Where `tools/list` names the grant object (`mcp:<upstream>.<tool>`) of each tool. */
 const SCOPE_META = 'io.authfi/scope';
 /** The calling agent's advisory outlook for a tool: in `_meta` (kept by every MCP client) and, for older gateways, in `annotations`. */
@@ -150,6 +152,14 @@ export type ToolOutcome =
       readonly nextStep: string | undefined;
       /** What a model may read about this refusal (the same text, whatever the framework). */
       readonly modelText: string;
+      /**
+       * Set when the call needs the person it acts for to connect an account first (`why` is `auth_required`):
+       * which provider, and the https link where they do it. A person's job, not the model's.
+       */
+      readonly authRequired?: {
+        readonly provider: string | undefined;
+        readonly connectUrl: string | undefined;
+      };
     }
   | { readonly kind: 'approval_required'; readonly approvalId: string; readonly code: string };
 
@@ -346,6 +356,29 @@ export class Gateway {
         ...refusal,
         why: guidance?.why ?? 'refused',
         modelText: modelTextOf(refusal),
+      };
+    }
+    const auth = r._meta?.[AUTH_META];
+    if (typeof auth === 'object' && auth !== null) {
+      const a = auth as Record<string, unknown>;
+      const link = str(a.connect_url);
+      const refusal = {
+        reason: textOf(r),
+        code: str(a.code),
+        error: undefined,
+        requiredScope: undefined,
+        nextStep: undefined,
+      };
+      return {
+        kind: 'refused',
+        result: r,
+        ...refusal,
+        why: 'auth_required',
+        modelText: refusal.reason,
+        authRequired: {
+          provider: str(a.provider),
+          connectUrl: link?.startsWith('https://') ? link : undefined,
+        },
       };
     }
     const hold = HOLD.exec(textOf(r));

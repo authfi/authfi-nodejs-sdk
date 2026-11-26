@@ -86,6 +86,49 @@ describe('reading a tool result', () => {
     expect(bare).toMatchObject({ kind: 'refused', reason: 'Refused: x', code: undefined });
   });
 
+  it('reads a call that needs the person to connect an account as a refusal that names where, not as allowed', async () => {
+    const { gateway } = await setup();
+    const out = gateway.readResult(
+      text(
+        'Authorization required (EVAULT001): the person this agent acts for has not connected github; they connect it at https://connect.example/github.',
+        {
+          _meta: {
+            'io.authfi/auth': {
+              code: 'EVAULT001',
+              provider: 'github',
+              connect_url: 'https://connect.example/github',
+            },
+          },
+        },
+      ),
+    );
+    expect(out).toMatchObject({
+      kind: 'refused',
+      code: 'EVAULT001',
+      why: 'auth_required',
+      authRequired: { provider: 'github', connectUrl: 'https://connect.example/github' },
+    });
+    // A link that is not https is not handed on as one.
+    const odd = gateway.readResult(
+      text('Authorization required (EVAULT001): x.', {
+        _meta: {
+          'io.authfi/auth': { code: 'EVAULT001', provider: 'github', connect_url: 'javascript:alert(1)' },
+        },
+      }),
+    );
+    expect(odd).toMatchObject({
+      kind: 'refused',
+      authRequired: { provider: 'github', connectUrl: undefined },
+    });
+    // Only an error result is a refusal: a tool's own output carrying the key is its answer.
+    expect(
+      gateway.readResult({
+        content: [{ type: 'text', text: 'ok' }],
+        _meta: { 'io.authfi/auth': { code: 'EVAULT001' } },
+      }).kind,
+    ).toBe('allowed');
+  });
+
   it("leaves a tool's own error and a plain result as the tool's answer", async () => {
     const { gateway } = await setup();
     expect(gateway.readResult(text('upstream: repository not found')).kind).toBe('allowed');

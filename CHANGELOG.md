@@ -13,6 +13,13 @@ All notable changes to this package. It follows [Semantic Versioning](https://se
   two events sharing a request, a replayed event and an event without a request id. They are written by
   `scripts/gen-webhook-vectors.mjs` (`npm run check:webhook-vectors` checks the file).
 
+### Fixed
+
+- **A call that needs the person to connect an account** (the gateway's `io.authfi/auth` answer) was read as an
+  allowed tool result, so `statusForOutcome` said `WORKING` and nothing told an A2A client to send the person to
+  connect. It is now a `refused` outcome with `why: 'auth_required'` and `authRequired: { provider, connectUrl }`
+  (https links only), and `statusForOutcome` answers `TASK_STATE_AUTH_REQUIRED` with the link.
+
 ### Changed
 
 - **`event.id`** is the event's own id, the same on every delivery of the event: de-duplicate on it.
